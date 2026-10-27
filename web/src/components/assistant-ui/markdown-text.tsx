@@ -28,13 +28,20 @@ import { CopyIcon, CheckIcon, WrapIcon } from '@/components/icons'
 import { useTranslation } from '@/lib/use-translation'
 import { useOptionalHappyChatContext } from '@/components/AssistantChat/context'
 import { decodeFilePathCandidateHref, decodeFilePathHref, remarkFilePathLinks } from '@/lib/remark-file-path-links'
-import { classifyNoSchemeHref } from '@/lib/markdown-href-policy'
+import { classifyNoSchemeHref, resolveMarkdownRelativePath } from '@/lib/markdown-href-policy'
+import { useQuery } from '@tanstack/react-query'
+import { useAppContext } from '@/lib/app-context'
+import { queryKeys } from '@/lib/query-keys'
+import { resolveImageMimeType } from '@/lib/file-markdown-preview'
 import { remarkSessionPathLinks } from '@/lib/remark-session-path-links'
 import { buildSessionReferencePath, parseSessionPathHref } from '@/lib/sessionReference'
 import { UriConfirmDialog } from '@/components/UriConfirmDialog'
 import { DEFAULT_OPEN_EXTERNAL_LINKS_IN_NEW_TAB, useOpenExternalLinksInNewTab } from '@/hooks/useOpenExternalLinksInNewTab'
 
 import type { MarkdownTextPrimitiveProps } from '@assistant-ui/react-markdown'
+
+// Session file being previewed; relative links/images resolve against its directory.
+export const MarkdownFileBaseContext = createContext<{ sessionId: string; filePath: string } | null>(null)
 
 // ── Plugin array ────────────────────────────────────────────────────────────
 // Order: remarkGfm → remarkRepairTables → remarkLatexBracketMath → remarkNonHttpsAutolink → remarkStripCjkAutolink → remarkMath → remarkDisableIndentedCode → remarkSessionPathLinks → remarkFilePathLinks
@@ -645,7 +652,15 @@ function A(props: ComponentPropsWithoutRef<'a'>) {
     const candidatePath =
         typeof props.href === 'string' ? decodeFilePathCandidateHref(props.href) : null
     const targetSessionId = typeof props.href === 'string' ? parseSessionPathHref(props.href) : null
+    const fileBase = useContext(MarkdownFileBaseContext)
     const rel = props.target === '_blank' ? (props.rel ?? 'noreferrer') : props.rel
+
+    const relativeFilePath = fileBase && typeof props.href === 'string'
+        ? resolveMarkdownRelativePath(fileBase.filePath, props.href)
+        : null
+    if (fileBase && relativeFilePath) {
+        return <FilePathAnchor {...props} filePath={relativeFilePath} sessionId={fileBase.sessionId} />
+    }
 
     if (filePath) {
         if (!chat) {
@@ -873,7 +888,28 @@ function Em(props: ComponentPropsWithoutRef<'em'>) {
     return <em {...props} className={cn('aui-md-em italic', props.className)} />
 }
 
+function SessionFileImage(props: ComponentPropsWithoutRef<'img'> & { sessionId: string; path: string }) {
+    const { sessionId, path, ...imgProps } = props
+    const { api } = useAppContext()
+    const query = useQuery({
+        queryKey: queryKeys.sessionFile(sessionId, path),
+        queryFn: async () => await api.readSessionFile(sessionId, path),
+    })
+    const mimeType = resolveImageMimeType(path)
+    const src = query.data?.success && query.data.content && mimeType
+        ? `data:${mimeType};base64,${query.data.content}`
+        : undefined
+    return <img {...imgProps} src={src} className={cn('aui-md-img my-3 max-w-full rounded-xl', props.className)} />
+}
+
 function Image(props: ComponentPropsWithoutRef<'img'>) {
+    const fileBase = useContext(MarkdownFileBaseContext)
+    const path = fileBase && typeof props.src === 'string'
+        ? resolveMarkdownRelativePath(fileBase.filePath, props.src)
+        : null
+    if (fileBase && path) {
+        return <SessionFileImage {...props} sessionId={fileBase.sessionId} path={path} />
+    }
     return <img {...props} className={cn('aui-md-img my-3 max-w-full rounded-xl', props.className)} />
 }
 

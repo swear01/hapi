@@ -225,3 +225,21 @@ export function classifyNoSchemeHref(
     // Non-path leftovers (rare bare tokens) — do not invent SPA routes.
     return { action: 'inert' }
 }
+
+/**
+ * Resolve a relative href/src against the directory of the Markdown file that
+ * contains it. Returns null for URLs, absolute/home paths, fragment-only hrefs
+ * and paths that `..` out of the file's root.
+ */
+export function resolveMarkdownRelativePath(markdownFilePath: string, href: string): string | null {
+    const { path: rawPath } = splitHrefMeta(href.trim())
+    if (!rawPath || /^[A-Za-z][A-Za-z0-9+.-]*:/.test(rawPath) || /^[/\\~]/.test(rawPath)) return null
+    let path: string
+    try {
+        path = decodeURIComponent(rawPath)
+    } catch {
+        return null
+    }
+    const dir = markdownFilePath.slice(0, Math.max(markdownFilePath.lastIndexOf('/'), markdownFilePath.lastIndexOf('\\')) + 1)
+    return resolveLexicalPath(`${dir}${path}`) || null
+}
