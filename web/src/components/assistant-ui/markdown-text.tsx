@@ -42,7 +42,14 @@ import { DEFAULT_OPEN_EXTERNAL_LINKS_IN_NEW_TAB, useOpenExternalLinksInNewTab } 
 import type { MarkdownTextPrimitiveProps } from '@assistant-ui/react-markdown'
 
 // Session file being previewed; relative links/images resolve against its directory.
-export const MarkdownFileBaseContext = createContext<{ sessionId: string; filePath: string; workspacePath: string | null } | null>(null)
+// fileSearch carries the preview's browsing context (origin/tab/query) so Back still returns to it.
+export type MarkdownFileSearch = { origin?: 'chat'; tab?: 'changes' | 'directories'; query?: string }
+export const MarkdownFileBaseContext = createContext<{
+    sessionId: string
+    filePath: string
+    workspacePath: string | null
+    fileSearch: MarkdownFileSearch
+} | null>(null)
 
 // ── Plugin array ────────────────────────────────────────────────────────────
 // Order: remarkGfm → remarkRepairTables → remarkLatexBracketMath → remarkNonHttpsAutolink → remarkStripCjkAutolink → remarkMath → remarkDisableIndentedCode → remarkSessionPathLinks → remarkFilePathLinks
@@ -539,11 +546,18 @@ function Code(props: ComponentPropsWithoutRef<'code'>) {
     )
 }
 
-function FilePathAnchor(props: ComponentPropsWithoutRef<'a'> & { filePath: string; sessionId: string }) {
-    const { filePath, sessionId, ...anchorProps } = props
+function FilePathAnchor(props: ComponentPropsWithoutRef<'a'> & {
+    filePath: string
+    sessionId: string
+    fileSearch?: MarkdownFileSearch
+}) {
+    const { filePath, sessionId, fileSearch = { origin: 'chat' }, ...anchorProps } = props
     const navigate = useNavigate()
     const rel = anchorProps.target === '_blank' ? (anchorProps.rel ?? 'noreferrer') : anchorProps.rel
-    const search = new URLSearchParams({ path: encodeBase64(filePath), origin: 'chat' }).toString()
+    const fileRouteSearch = { path: encodeBase64(filePath), ...fileSearch }
+    const search = new URLSearchParams(
+        Object.entries(fileRouteSearch).filter((entry): entry is [string, string] => entry[1] !== undefined)
+    ).toString()
     const href = `/sessions/${encodeURIComponent(sessionId)}/file?${search}`
 
     const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
@@ -555,10 +569,7 @@ function FilePathAnchor(props: ComponentPropsWithoutRef<'a'> & { filePath: strin
         void navigate({
             to: '/sessions/$sessionId/file',
             params: { sessionId },
-            search: {
-                path: encodeBase64(filePath),
-                origin: 'chat',
-            },
+            search: fileRouteSearch,
             ...PRESERVE_SESSION_SIDEBAR_SCROLL,
         })
     }
@@ -656,13 +667,6 @@ function A(props: ComponentPropsWithoutRef<'a'>) {
     const fileBase = useContext(MarkdownFileBaseContext)
     const rel = props.target === '_blank' ? (props.rel ?? 'noreferrer') : props.rel
 
-    const relativeFilePath = fileBase && typeof props.href === 'string'
-        ? resolveMarkdownRelativePath(fileBase.filePath, props.href, fileBase.workspacePath)
-        : null
-    if (fileBase && relativeFilePath) {
-        return <FilePathAnchor {...props} filePath={relativeFilePath} sessionId={fileBase.sessionId} />
-    }
-
     if (filePath) {
         if (!chat) {
             return <>{props.children}</>
@@ -672,6 +676,20 @@ function A(props: ComponentPropsWithoutRef<'a'>) {
 
     if (targetSessionId) {
         return <SessionPathAnchor {...props} targetSessionId={targetSessionId} />
+    }
+
+    const relativeFilePath = fileBase && typeof props.href === 'string'
+        ? resolveMarkdownRelativePath(fileBase.filePath, props.href, fileBase.workspacePath)
+        : null
+    if (fileBase && relativeFilePath) {
+        return (
+            <FilePathAnchor
+                {...props}
+                filePath={relativeFilePath}
+                sessionId={fileBase.sessionId}
+                fileSearch={fileBase.fileSearch}
+            />
+        )
     }
 
     const { onClick, href, ...rest } = props

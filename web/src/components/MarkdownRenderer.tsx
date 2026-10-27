@@ -15,6 +15,7 @@ import {
     denyOnlyTransform,
     MarkdownFileBaseContext,
     UriConfirmProvider,
+    type MarkdownFileSearch,
 } from '@/components/assistant-ui/markdown-text'
 import { SyntaxHighlighter } from '@/components/assistant-ui/shiki-highlighter'
 import type { CodeHeaderProps, SyntaxHighlighterProps } from '@assistant-ui/react-markdown'
@@ -31,6 +32,7 @@ interface MarkdownRendererProps {
     sessionId?: string
     filePath?: string
     workspacePath?: string | null
+    fileSearch?: MarkdownFileSearch
 }
 
 function StandaloneCode(props: ComponentPropsWithoutRef<'code'>) {
@@ -84,9 +86,14 @@ function StandaloneMarkdownContent(props: MarkdownRendererProps) {
 
     const fileBase = useMemo(
         () => props.sessionId && props.filePath
-            ? { sessionId: props.sessionId, filePath: props.filePath, workspacePath: props.workspacePath ?? null }
+            ? {
+                sessionId: props.sessionId,
+                filePath: props.filePath,
+                workspacePath: props.workspacePath ?? null,
+                fileSearch: props.fileSearch ?? {},
+            }
             : null,
-        [props.sessionId, props.filePath, props.workspacePath]
+        [props.sessionId, props.filePath, props.workspacePath, props.fileSearch]
     )
 
     return (

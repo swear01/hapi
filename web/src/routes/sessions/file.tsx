@@ -223,6 +223,10 @@ export default function FilePage() {
     const { session } = useSession(api, sessionId)
     const encodedPath = typeof search.path === 'string' ? search.path : ''
     const staged = search.staged
+    const markdownLinkSearch = useMemo(
+        () => ({ origin: search.origin, tab: search.tab, query: search.query }),
+        [search.origin, search.tab, search.query]
+    )
 
     const filePath = useMemo(() => decodePath(encodedPath), [encodedPath])
     const fileName = filePath.split('/').pop() || filePath || t('file.page.fallbackName')
@@ -497,6 +501,7 @@ export default function FilePage() {
                                             sessionId={sessionId}
                                             filePath={filePath}
                                             workspacePath={session?.metadata?.path}
+                                            fileSearch={markdownLinkSearch}
                                         />
                                     </div>
                                 ) : (

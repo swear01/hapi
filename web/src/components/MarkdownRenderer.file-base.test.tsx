@@ -25,12 +25,13 @@ vi.mock('@/lib/app-context', () => ({
 const markdown = [
     '[Sibling](error-notes.md)',
     '[Escape](../../outside.md)',
+    '[Session](./sessions/abc-def)',
     '![Local](images/page-001.png)',
     '![Huge](images/huge.png)',
     '![Remote](https://example.com/image.png)',
 ].join('\n\n')
 
-function renderPreview(filePath: string, workspacePath: string | null = null) {
+function renderPreview(filePath: string, workspacePath: string | null = null, fileSearch = {}) {
     return render(
         <QueryClientProvider client={new QueryClient()}>
             <I18nProvider>
@@ -40,6 +41,7 @@ function renderPreview(filePath: string, workspacePath: string | null = null) {
                     sessionId="session-1"
                     filePath={filePath}
                     workspacePath={workspacePath}
+                    fileSearch={fileSearch}
                 />
             </I18nProvider>
         </QueryClientProvider>
@@ -48,12 +50,13 @@ function renderPreview(filePath: string, workspacePath: string | null = null) {
 
 describe('MarkdownRenderer standalone file base', () => {
     it('resolves relative links and images against the Markdown file directory', async () => {
-        renderPreview('docs/notes-01.md')
+        renderPreview('docs/notes-01.md', null, { tab: 'directories' })
 
         const sibling = screen.getByText('Sibling').closest('a')
-        const search = new URLSearchParams({ path: encodeBase64('docs/error-notes.md'), origin: 'chat' })
+        const search = new URLSearchParams({ path: encodeBase64('docs/error-notes.md'), tab: 'directories' })
         expect(sibling).toHaveAttribute('href', `/sessions/session-1/file?${search.toString()}`)
         expect(screen.getByText('Escape').closest('a')).toBeNull()
+        expect(screen.getByText('Session').closest('a')?.getAttribute('href')).toMatch(/\/sessions\/abc-def$/)
 
         await waitFor(() => {
             expect(screen.getByAltText('Local')).toHaveAttribute('src', 'data:image/png;base64,iVBORw0K')
@@ -68,7 +71,7 @@ describe('MarkdownRenderer standalone file base', () => {
     it('keeps absolute-base links outside the workspace inert', () => {
         renderPreview('/home/ada/project/docs/notes-01.md', '/home/ada/project')
 
-        const search = new URLSearchParams({ path: encodeBase64('/home/ada/project/docs/error-notes.md'), origin: 'chat' })
+        const search = new URLSearchParams({ path: encodeBase64('/home/ada/project/docs/error-notes.md') })
         expect(screen.getByText('Sibling').closest('a')).toHaveAttribute('href', `/sessions/session-1/file?${search.toString()}`)
         expect(screen.getByText('Escape').closest('a')).toBeNull()
     })
