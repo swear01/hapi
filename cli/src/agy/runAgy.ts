@@ -13,6 +13,9 @@ import { registerSessionConfigRpc } from '@/agent/sessionConfigRpc';
 import { formatMessageWithAttachments } from '@/utils/attachmentFormatter';
 import { getInvokedCwd } from '@/utils/invokedCwd';
 import type { SessionEffort, SessionModel } from '@/api/types';
+import { splitAgyModelSelection } from '@hapi/protocol';
+import { listAgyModels } from '@/modules/common/agyModels';
+import { normalizeAgyModelSelection } from './utils/agyModelSelection';
 
 export async function runAgy(opts: {
     startedBy?: 'runner' | 'terminal';
@@ -40,7 +43,9 @@ export async function runAgy(opts: {
         startingMode
     };
 
-    const initialModel = opts.model ?? null;
+    const catalog = await listAgyModels();
+    const initialSelection = normalizeAgyModelSelection(opts.model, opts.effort, catalog.availableModels ?? []);
+    const initialModel = initialSelection.model;
 
     const bootstrap = opts.existingSessionId
         ? await bootstrapExistingSession({
@@ -56,7 +61,7 @@ export async function runAgy(opts: {
             tag: `__hapi_agy_${randomUUID()}`,
             agentState: initialState,
             model: initialModel ?? undefined,
-            effort: opts.effort ?? undefined,
+            effort: initialSelection.effort ?? undefined,
             reservedSessionId: opts.reservedSessionId
         });
     const { api, session } = bootstrap;
@@ -69,7 +74,7 @@ export async function runAgy(opts: {
 
     let currentPermissionMode: PermissionMode = opts.permissionMode ?? 'request-review';
     let sessionModel: SessionModel = initialModel;
-    let sessionEffort: SessionEffort | undefined = opts.effort ?? undefined;
+    let sessionEffort: SessionEffort = initialSelection.effort;
 
     const sessionWrapperRef: { current: any | null } = { current: null };
 
@@ -128,13 +133,27 @@ export async function runAgy(opts: {
             rpcHandlerManager: session.rpcHandlerManager,
             flavor: 'agy',
             modelMode: 'nullable',
+            effortMode: 'nullable',
             onApply: async (config) => {
+                let selection;
+                if (config.model !== undefined || config.effort !== undefined) {
+                    const models = await listAgyModels();
+                    const model = config.model === undefined ? sessionModel : config.model;
+                    const effort = config.effort !== undefined
+                        ? config.effort
+                        : config.model !== undefined && splitAgyModelSelection(model).effort
+                            ? undefined
+                            : sessionEffort;
+                    selection = normalizeAgyModelSelection(model, effort, models.availableModels ?? []);
+                }
                 if (config.permissionMode !== undefined) {
                     currentPermissionMode = config.permissionMode;
                 }
-                if (config.model !== undefined) {
-                    sessionModel = config.model;
+                if (selection) {
+                    sessionModel = selection.model;
+                    sessionEffort = selection.effort;
                 }
+                return selection;
             },
             onAfterApply: syncSessionMode
         });
