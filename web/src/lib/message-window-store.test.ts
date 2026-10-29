@@ -1678,6 +1678,40 @@ describe('history view and older pagination', () => {
 
         expect(getMessageWindowState(id).messages.some((message) => message.id === 'root')).toBe(true)
     })
+
+    it('keeps the Agent tool call whose sidechain rows survive the trim', async () => {
+        const id = sessionId('subagent-parent')
+        const claudeOutput = (msgId: string, seq: number, data: Record<string, unknown>) => ({
+            id: msgId,
+            seq,
+            localId: null,
+            content: { role: 'agent', content: { type: 'output', data } },
+            createdAt: seq,
+            invokedAt: seq
+        } as DecryptedMessage)
+        const parent = claudeOutput('agent-call', 1, {
+            type: 'assistant',
+            uuid: 'agent-call',
+            message: { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_agent', name: 'Agent', input: { prompt: 'work' } }] }
+        })
+        const sidechain = Array.from({ length: VISIBLE_WINDOW_SIZE + 5 }, (_, index) => claudeOutput(`side-${index}`, index + 2, {
+            type: 'assistant',
+            uuid: `side-${index}`,
+            isSidechain: true,
+            parentToolUseId: 'toolu_agent',
+            message: { role: 'assistant', content: [{ type: 'text', text: `step ${index}` }] }
+        }))
+        ingestIncomingMessages(id, [parent, ...sidechain])
+
+        const state = getMessageWindowState(id)
+        expect(state.messages[0]?.id).toBe('agent-call')
+        expect(state.messages).toHaveLength(VISIBLE_WINDOW_SIZE + 1)
+
+        // Paging older resumes at the window edge, not at the pinned parent.
+        const getMessages = vi.fn().mockResolvedValue(beforeResponse([], { nextBeforeAt: null, nextBeforeSeq: null }))
+        await fetchOlderMessages(createApi(getMessages), id)
+        expect(getMessages.mock.calls[0]?.[1]).toMatchObject({ beforeSeq: 7 })
+    })
 })
 
 describe('optimistic and queued-message operations', () => {
