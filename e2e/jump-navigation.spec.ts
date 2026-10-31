@@ -104,7 +104,8 @@ test('jump to conversation start reaches the top without dragging the composer o
         .locator('[title="Jump to turn input"]').evaluate(button => (button as HTMLButtonElement).click())
     const selectedInput = page.locator('.happy-thread-messages > [id$="m-user-500"]')
     await expect(selectedInput).toBeInViewport()
-    await expect.poll(() => page.evaluate(() => window.__jumpProbe.windowState().navigationLeaseCount)).toBe(0)
+    // The lease outlives the landing by up to the scroll retry + settle deadlines (~6.5s).
+    await expect.poll(() => page.evaluate(() => window.__jumpProbe.windowState().navigationLeaseCount), { timeout: 15_000 }).toBe(0)
     await page.evaluate(() => window.__jumpProbe.ingestNextMessage())
     await expect(selectedInput).toBeInViewport()
     await page.waitForTimeout(500)

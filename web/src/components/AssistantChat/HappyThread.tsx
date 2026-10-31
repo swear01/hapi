@@ -341,21 +341,18 @@ export function findPromptTarget(
 
     const target = findPreviousUserMessage(viewport, messageId)
     if (target) return target
-    if (!assistantAnchorState.current || assistantAnchor) return null
+    if (!assistantAnchorState.current || assistantAnchor || !assistantAnchorState.nextAnchorId) return null
 
+    // The selected card was re-keyed (e.g. merged by a prepend): only the
+    // following card seen at click time still bounds its turn. Without it,
+    // a newly streamed turn would be indistinguishable, so do not guess.
     const messages = Array.from(viewport.querySelectorAll<HTMLElement>(MESSAGE_ANCHOR_SELECTOR))
-    const boundaryIndex = assistantAnchorState.nextAnchorId
-        ? messages.findIndex((message) => message.id === assistantAnchorState.nextAnchorId)
-        : messages.length
-    if (boundaryIndex >= 0) {
-        for (let index = boundaryIndex - 1; index >= 0; index -= 1) {
-            if (messages[index].id.includes('__transcript-gap__')) return null
-            if (isPromptAnchor(messages[index])) return messages[index]
-        }
-        return null
+    const boundaryIndex = messages.findIndex((message) => message.id === assistantAnchorState.nextAnchorId)
+    for (let index = boundaryIndex - 1; index >= 0; index -= 1) {
+        if (messages[index].id.includes('__transcript-gap__')) return null
+        if (isPromptAnchor(messages[index])) return messages[index]
     }
-
-    return messages.filter(isPromptAnchor).at(-1) ?? null
+    return null
 }
 
 async function findPreviousUserMessageAfterRender(
@@ -1139,32 +1136,15 @@ export function HappyThread(props: {
     const [isNavigationInFlight, setIsNavigationInFlight] = useState(false)
     const [promptNavigationStatus, setPromptNavigationStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
     const [conversationStartStatus, setConversationStartStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
+    const [loadingPromptMessageId, setLoadingPromptMessageId] = useState<string | null>(null)
     const promptNavigationTimerRef = useRef<number | null>(null)
     const conversationStartStatusTimerRef = useRef<number | null>(null)
-    const navigationInFlightRef = useRef(false)
-    const navigationOperationTokenRef = useRef(0)
-    const activeNavigationReleasesRef = useRef(new Set<() => void>())
-    const navigationScrollAbortControllerRef = useRef<AbortController | null>(null)
+    // The single in-flight navigation (outline pick, prompt jump, conversation
+    // start). Navigations are serialized and only cancelNavigation aborts one,
+    // so `signal.aborted` is the only ownership check async steps need.
+    const navigationRef = useRef<{ controller: AbortController; release: () => void } | null>(null)
 
-    const abortActiveNavigationScroll = useCallback(() => {
-        if (navigationScrollAbortControllerRef.current !== null) {
-            navigationScrollAbortControllerRef.current.abort()
-            navigationScrollAbortControllerRef.current = null
-        }
-    }, [])
-
-    const releaseAllNavigationLeases = useCallback(() => {
-        navigationOperationTokenRef.current += 1
-        abortActiveNavigationScroll()
-        for (const release of activeNavigationReleasesRef.current) {
-            release()
-        }
-        activeNavigationReleasesRef.current.clear()
-        navigationInFlightRef.current = false
-        setIsNavigationInFlight(false)
-        setConversationStartStatus('idle')
-        setPromptNavigationStatus('idle')
-        setLoadingPromptMessageId(null)
+    const clearNavigationStatusTimers = useCallback(() => {
         if (conversationStartStatusTimerRef.current !== null) {
             window.clearTimeout(conversationStartStatusTimerRef.current)
             conversationStartStatusTimerRef.current = null
@@ -1173,22 +1153,55 @@ export function HappyThread(props: {
             window.clearTimeout(promptNavigationTimerRef.current)
             promptNavigationTimerRef.current = null
         }
-    }, [abortActiveNavigationScroll])
-
-    const beginOwnedNavigation = useCallback((preserveHistory = false) => {
-        const release = beginNavigation(sessionIdRef.current, preserveHistory)
-        activeNavigationReleasesRef.current.add(release)
-        return () => {
-            if (activeNavigationReleasesRef.current.has(release)) {
-                activeNavigationReleasesRef.current.delete(release)
-                release()
-            }
-        }
     }, [])
 
-    useEffect(() => () => {
-        releaseAllNavigationLeases()
-    }, [releaseAllNavigationLeases])
+    const showPromptNavigationResult = useCallback((status: 'success' | 'error') => {
+        setPromptNavigationStatus(status)
+        promptNavigationTimerRef.current = window.setTimeout(() => setPromptNavigationStatus('idle'), status === 'success' ? 1400 : 3000)
+    }, [])
+
+    const showConversationStartResult = useCallback((status: 'success' | 'error') => {
+        setConversationStartStatus(status)
+        conversationStartStatusTimerRef.current = window.setTimeout(() => setConversationStartStatus('idle'), status === 'success' ? 1400 : 3000)
+    }, [])
+
+    const startNavigation = useCallback((preserveHistory: boolean) => {
+        if (navigationRef.current) return null
+        // The store's release is idempotent: cancel and the owner's finally may both call it.
+        const navigation = {
+            controller: new AbortController(),
+            release: beginNavigation(sessionIdRef.current, preserveHistory)
+        }
+        navigationRef.current = navigation
+        setIsNavigationInFlight(true)
+        clearNavigationStatusTimers()
+        setConversationStartStatus('idle')
+        setPromptNavigationStatus('idle')
+        return navigation
+    }, [clearNavigationStatusTimers])
+
+    /** Releases the navigation; returns whether it was still the current one. */
+    const endNavigation = useCallback((navigation: { release: () => void }) => {
+        navigation.release()
+        if (navigationRef.current !== navigation) return false
+        navigationRef.current = null
+        setIsNavigationInFlight(false)
+        setLoadingPromptMessageId(null)
+        return true
+    }, [])
+
+    const cancelNavigation = useCallback(() => {
+        const navigation = navigationRef.current
+        if (navigation) {
+            navigation.controller.abort()
+            endNavigation(navigation)
+        }
+        clearNavigationStatusTimers()
+        setConversationStartStatus('idle')
+        setPromptNavigationStatus('idle')
+    }, [clearNavigationStatusTimers, endNavigation])
+
+    useEffect(() => cancelNavigation, [cancelNavigation])
 
     const isInitialScrollSettling = useCallback(() => {
         return initialScrollSessionRef.current === sessionIdRef.current && Date.now() < initialScrollDeadlineRef.current
@@ -1309,7 +1322,7 @@ export function HappyThread(props: {
         }
 
         const handleScroll = () => {
-            if (navigationInFlightRef.current) {
+            if (navigationRef.current) {
                 lastScrollTopRef.current = viewport.scrollTop
                 return
             }
@@ -1675,7 +1688,7 @@ export function HappyThread(props: {
 
     // Scroll to bottom handler for the indicator button
     const scrollToBottom = useCallback(() => {
-        releaseAllNavigationLeases()
+        cancelNavigation()
         if (outlineOpenRef.current) {
             outlineOpenRef.current = false
             props.onOutlineOpenChange(false)
@@ -1696,7 +1709,7 @@ export function HappyThread(props: {
             atBottomRef.current = true
             onViewModeChangeRef.current('tail')
         }
-    }, [props.onOutlineOpenChange, releaseAllNavigationLeases, scrollToBottomSmooth])
+    }, [props.onOutlineOpenChange, cancelNavigation, scrollToBottomSmooth])
 
     // Reset state when session changes
     useLayoutEffect(() => {
@@ -1710,7 +1723,7 @@ export function HappyThread(props: {
         pendingScrollRef.current = null
         pullToLoadStateRef.current = 'idle'
         setPullToLoadState('idle')
-        releaseAllNavigationLeases()
+        cancelNavigation()
         historyLoaderRef.current = {
             runId: historyLoaderRef.current.runId + 1,
             phase: 'idle',
@@ -2086,105 +2099,53 @@ export function HappyThread(props: {
     const handleOutlineSelect = useCallback(async (item: ConversationOutlineItem) => {
         // Serialize with response navigation: an outline pick while a jump is
         // loading would race the jump's final scroll for the viewport.
-        if (navigationInFlightRef.current) return
-        const token = navigationOperationTokenRef.current + 1
-        navigationOperationTokenRef.current = token
-        navigationInFlightRef.current = true
-        setIsNavigationInFlight(true)
+        const navigation = startNavigation(true)
+        if (!navigation) return
+        const { signal } = navigation.controller
         initialScrollDeadlineRef.current = 0
         clearInitialScrollTimers()
-        abortActiveNavigationScroll()
-        const scrollAbortController = new AbortController()
-        navigationScrollAbortControllerRef.current = scrollAbortController
-        const releaseNavigation = beginOwnedNavigation(true)
         try {
             const target = await locateOutlineTargetMessage({
                 targetMessageId: item.targetMessageId,
                 findTarget: (anchorId) => document.getElementById(anchorId),
                 hasMoreMessages: () => hasMoreMessagesRef.current,
-                loadOlderPreservingScroll: () => loadOlderForOutline(scrollAbortController.signal),
-                signal: scrollAbortController.signal
+                loadOlderPreservingScroll: () => loadOlderForOutline(signal),
+                signal
             })
-            if (scrollAbortController.signal.aborted || navigationOperationTokenRef.current !== token) {
-                if (outlineOpenRef.current && navigationOperationTokenRef.current === token) {
-                    outlineOpenRef.current = false
-                    props.onOutlineOpenChange(false)
-                }
-                return
-            }
+            if (signal.aborted) return
             if (target && viewportRef.current) {
                 markExplicitNavigationAwayFromBottom()
-                await scrollTargetIntoView(viewportRef.current, target, scrollAbortController.signal)
+                await scrollTargetIntoView(viewportRef.current, target, signal)
+                if (signal.aborted) return
             }
-            if (outlineOpenRef.current && navigationOperationTokenRef.current === token) {
+            if (outlineOpenRef.current) {
                 outlineOpenRef.current = false
                 props.onOutlineOpenChange(false)
             }
-            if (scrollAbortController.signal.aborted || navigationOperationTokenRef.current !== token) return
             props.onOutlineItemClick?.(item)
         } finally {
-            if (navigationScrollAbortControllerRef.current === scrollAbortController) {
-                navigationScrollAbortControllerRef.current = null
-            }
-            releaseNavigation()
-            if (navigationOperationTokenRef.current === token) {
-                navigationInFlightRef.current = false
-                setIsNavigationInFlight(false)
-                restoreTailIfViewportIsAtBottom()
-            }
+            if (endNavigation(navigation)) restoreTailIfViewportIsAtBottom()
         }
-    }, [abortActiveNavigationScroll, beginOwnedNavigation, loadOlderForOutline, markExplicitNavigationAwayFromBottom, props.onOutlineItemClick, props.onOutlineOpenChange, restoreTailIfViewportIsAtBottom])
+    }, [clearInitialScrollTimers, endNavigation, loadOlderForOutline, markExplicitNavigationAwayFromBottom, props.onOutlineItemClick, props.onOutlineOpenChange, restoreTailIfViewportIsAtBottom, startNavigation])
 
-    const scrollToMessage = useCallback(async (messageId: string, signal?: AbortSignal): Promise<boolean> => {
-        if (signal?.aborted) return false
-        initialScrollDeadlineRef.current = 0
-        clearInitialScrollTimers()
+    const scrollToMessage = useCallback(async (messageId: string, signal: AbortSignal): Promise<boolean> => {
+        if (signal.aborted) return false
         const target = document.getElementById(getConversationMessageAnchorId(messageId))
         const viewport = viewportRef.current
         if (!target || !viewport?.contains(target)) return false
-        markExplicitNavigationAwayFromBottom()
-        if (signal) {
-            await scrollTargetIntoView(viewport, target, signal)
-            return !signal.aborted
-        }
-        abortActiveNavigationScroll()
-        const scrollAbortController = new AbortController()
-        navigationScrollAbortControllerRef.current = scrollAbortController
-        try {
-            await scrollTargetIntoView(viewport, target, scrollAbortController.signal)
-            return !scrollAbortController.signal.aborted
-        } finally {
-            if (navigationScrollAbortControllerRef.current === scrollAbortController) {
-                navigationScrollAbortControllerRef.current = null
-            }
-        }
-    }, [abortActiveNavigationScroll, clearInitialScrollTimers, markExplicitNavigationAwayFromBottom])
+        await scrollTargetIntoView(viewport, target, signal)
+        return !signal.aborted
+    }, [])
 
-    const [loadingPromptMessageId, setLoadingPromptMessageId] = useState<string | null>(null)
-    const scrollToPromptForMessage = useCallback(async (
-        messageId: string,
-        replyToMessageId?: string,
-        token?: number
-    ): Promise<boolean> => {
-        const isCurrentOwner = () => token === undefined || navigationOperationTokenRef.current === token
-        if (promptNavigationTimerRef.current !== null) {
-            window.clearTimeout(promptNavigationTimerRef.current)
-            promptNavigationTimerRef.current = null
-        }
-        if (conversationStartStatusTimerRef.current !== null) {
-            window.clearTimeout(conversationStartStatusTimerRef.current)
-            conversationStartStatusTimerRef.current = null
-        }
-        setConversationStartStatus('idle')
+    const jumpToPrompt = useCallback(async (messageId: string, replyToMessageId?: string): Promise<boolean> => {
+        const navigation = startNavigation(true)
+        if (!navigation) return false
+        const { signal } = navigation.controller
         setLoadingPromptMessageId(messageId)
         setPromptNavigationStatus('loading')
         initialScrollDeadlineRef.current = 0
         clearInitialScrollTimers()
         markExplicitNavigationAwayFromBottom()
-
-        abortActiveNavigationScroll()
-        const scrollAbortController = new AbortController()
-        navigationScrollAbortControllerRef.current = scrollAbortController
 
         const viewport = viewportRef.current
         try {
@@ -2192,17 +2153,11 @@ export function HappyThread(props: {
             if (replyToMessageId) {
                 const scrolled = await runAfterPendingHistoryLoad(
                     pendingLoadPromiseRef.current,
-                    () => scrollToMessage(replyToMessageId, scrollAbortController.signal)
+                    () => scrollToMessage(replyToMessageId, signal)
                 )
+                if (signal.aborted) return false
                 if (scrolled) {
-                    if (scrollAbortController.signal.aborted || !isCurrentOwner()) {
-                        if (isCurrentOwner()) setPromptNavigationStatus('idle')
-                        return false
-                    }
-                    if (isCurrentOwner()) {
-                        setPromptNavigationStatus('success')
-                        promptNavigationTimerRef.current = window.setTimeout(() => setPromptNavigationStatus('idle'), 1400)
-                    }
+                    showPromptNavigationResult('success')
                     return true
                 }
             }
@@ -2212,120 +2167,47 @@ export function HappyThread(props: {
             }
             let target = await findPreviousUserMessageAfterRender(viewport, messageId, assistantAnchorState)
             while (!target && hasMoreMessagesRef.current) {
-                if (scrollAbortController.signal.aborted || !isCurrentOwner()) {
-                    if (isCurrentOwner()) setPromptNavigationStatus('idle')
-                    return false
-                }
-                const loaded = await loadOlderForNavigation(scrollAbortController.signal)
+                if (signal.aborted) return false
+                const loaded = await loadOlderForNavigation(signal)
                 if (!loaded) throw new Error('Could not load older messages')
                 target = await findPreviousUserMessageAfterRender(viewport, messageId, assistantAnchorState)
             }
-            if (scrollAbortController.signal.aborted || !isCurrentOwner()) {
-                if (isCurrentOwner()) setPromptNavigationStatus('idle')
-                return false
-            }
+            if (signal.aborted) return false
             if (!target) throw new Error('Could not find the user prompt')
-            await scrollTargetIntoView(viewport, target, scrollAbortController.signal)
-            if (scrollAbortController.signal.aborted || !isCurrentOwner()) {
-                if (isCurrentOwner()) setPromptNavigationStatus('idle')
-                return false
-            }
-            if (isCurrentOwner()) {
-                setPromptNavigationStatus('success')
-                promptNavigationTimerRef.current = window.setTimeout(() => setPromptNavigationStatus('idle'), 1400)
-            }
+            await scrollTargetIntoView(viewport, target, signal)
+            if (signal.aborted) return false
+            showPromptNavigationResult('success')
             return true
         } catch (error) {
-            if (scrollAbortController.signal.aborted || !isCurrentOwner()) {
-                if (isCurrentOwner()) setPromptNavigationStatus('idle')
-                return false
-            }
+            if (signal.aborted) return false
             console.error('Failed to locate assistant prompt:', error)
-            setPromptNavigationStatus('error')
-            promptNavigationTimerRef.current = window.setTimeout(() => setPromptNavigationStatus('idle'), 3000)
+            showPromptNavigationResult('error')
             return false
         } finally {
-            if (scrollAbortController.signal.aborted && isCurrentOwner()) {
-                setPromptNavigationStatus('idle')
-            }
-            if (navigationScrollAbortControllerRef.current === scrollAbortController) {
-                navigationScrollAbortControllerRef.current = null
-            }
-            // A cancelled jump is no longer the owner but must still clear its own spinner.
-            setLoadingPromptMessageId(current => current === messageId ? null : current)
+            if (endNavigation(navigation)) restoreTailIfViewportIsAtBottom()
         }
-    }, [abortActiveNavigationScroll, clearInitialScrollTimers, loadOlderForNavigation, markExplicitNavigationAwayFromBottom, scrollToMessage])
-
-    const jumpToPrompt = useCallback(async (messageId: string, replyToMessageId?: string): Promise<boolean> => {
-        if (navigationInFlightRef.current) return false
-        const token = navigationOperationTokenRef.current + 1
-        navigationOperationTokenRef.current = token
-        navigationInFlightRef.current = true
-        setIsNavigationInFlight(true)
-        const releaseNavigation = beginOwnedNavigation(true)
-        try {
-            return await scrollToPromptForMessage(messageId, replyToMessageId, token)
-        } finally {
-            releaseNavigation()
-            if (navigationOperationTokenRef.current === token) {
-                navigationInFlightRef.current = false
-                setIsNavigationInFlight(false)
-                restoreTailIfViewportIsAtBottom()
-            }
-        }
-    }, [beginOwnedNavigation, restoreTailIfViewportIsAtBottom, scrollToPromptForMessage])
+    }, [clearInitialScrollTimers, endNavigation, loadOlderForNavigation, markExplicitNavigationAwayFromBottom, restoreTailIfViewportIsAtBottom, scrollToMessage, showPromptNavigationResult, startNavigation])
 
     const isLoadingConversationStart = conversationStartStatus === 'loading'
     const scrollToConversationStart = useCallback(async (): Promise<boolean> => {
-        if (navigationInFlightRef.current) return false
-        const token = navigationOperationTokenRef.current + 1
-        navigationOperationTokenRef.current = token
-        navigationInFlightRef.current = true
-        setIsNavigationInFlight(true)
-        const releaseNavigation = beginOwnedNavigation()
-        if (conversationStartStatusTimerRef.current !== null) {
-            window.clearTimeout(conversationStartStatusTimerRef.current)
-            conversationStartStatusTimerRef.current = null
-        }
-        if (promptNavigationTimerRef.current !== null) {
-            window.clearTimeout(promptNavigationTimerRef.current)
-            promptNavigationTimerRef.current = null
-        }
-        setPromptNavigationStatus('idle')
+        const navigation = startNavigation(false)
+        if (!navigation) return false
+        const { signal } = navigation.controller
         initialScrollDeadlineRef.current = 0
         clearInitialScrollTimers()
         setConversationStartStatus('loading')
         markExplicitNavigationAwayFromBottom()
 
-        abortActiveNavigationScroll()
-        const scrollAbortController = new AbortController()
-        navigationScrollAbortControllerRef.current = scrollAbortController
-
-        const isCurrentOwner = () => navigationOperationTokenRef.current === token
-
         try {
             const loadedAll = await loadAllOlderMessages({
                 hasMoreMessages: () => hasMoreMessagesRef.current,
-                loadOlderPreservingScroll: () => loadOlderForNavigation(scrollAbortController.signal),
-                signal: scrollAbortController.signal
+                loadOlderPreservingScroll: () => loadOlderForNavigation(signal),
+                signal
             })
-            if (scrollAbortController.signal.aborted || !isCurrentOwner()) {
-                if (isCurrentOwner()) setConversationStartStatus('idle')
-                return false
-            }
-            if (!loadedAll) {
-                if (isCurrentOwner()) {
-                    setConversationStartStatus('error')
-                    conversationStartStatusTimerRef.current = window.setTimeout(() => setConversationStartStatus('idle'), 3000)
-                }
-                return false
-            }
+            if (signal.aborted) return false
             const viewport = viewportRef.current
-            if (!viewport) {
-                if (isCurrentOwner()) {
-                    setConversationStartStatus('error')
-                    conversationStartStatusTimerRef.current = window.setTimeout(() => setConversationStartStatus('idle'), 3000)
-                }
+            if (!loadedAll || !viewport) {
+                showConversationStartResult('error')
                 return false
             }
             // Preserve the pre-jump baseline so the first smooth-scroll frames
@@ -2333,48 +2215,19 @@ export function HappyThread(props: {
             // near-bottom frame look non-upward and can flip view mode back to
             // tail, compacting the history we just loaded.
             lastScrollTopRef.current = viewport.scrollTop
-            await smoothScrollViewportToTop(viewport, scrollAbortController.signal)
-            if (scrollAbortController.signal.aborted || !isCurrentOwner()) {
-                if (isCurrentOwner()) setConversationStartStatus('idle')
-                return false
-            }
-            if (isCurrentOwner()) {
-                setConversationStartStatus('success')
-                conversationStartStatusTimerRef.current = window.setTimeout(() => setConversationStartStatus('idle'), 1400)
-            }
+            await smoothScrollViewportToTop(viewport, signal)
+            if (signal.aborted) return false
+            showConversationStartResult('success')
             return true
         } catch (error) {
-            if (scrollAbortController.signal.aborted || !isCurrentOwner()) {
-                if (isCurrentOwner()) setConversationStartStatus('idle')
-                return false
-            }
+            if (signal.aborted) return false
             console.error('Failed to load conversation start:', error)
-            setConversationStartStatus('error')
-            conversationStartStatusTimerRef.current = window.setTimeout(() => setConversationStartStatus('idle'), 3000)
+            showConversationStartResult('error')
             return false
         } finally {
-            if (scrollAbortController.signal.aborted && isCurrentOwner()) {
-                setConversationStartStatus('idle')
-            }
-            if (navigationScrollAbortControllerRef.current === scrollAbortController) {
-                navigationScrollAbortControllerRef.current = null
-            }
-            releaseNavigation()
-            if (isCurrentOwner()) {
-                navigationInFlightRef.current = false
-                setIsNavigationInFlight(false)
-            }
+            endNavigation(navigation)
         }
-    }, [abortActiveNavigationScroll, beginOwnedNavigation, clearInitialScrollTimers, loadOlderForNavigation, markExplicitNavigationAwayFromBottom])
-
-    useEffect(() => () => {
-        if (conversationStartStatusTimerRef.current !== null) {
-            window.clearTimeout(conversationStartStatusTimerRef.current)
-        }
-        if (promptNavigationTimerRef.current !== null) {
-            window.clearTimeout(promptNavigationTimerRef.current)
-        }
-    }, [])
+    }, [clearInitialScrollTimers, endNavigation, loadOlderForNavigation, markExplicitNavigationAwayFromBottom, showConversationStartResult, startNavigation])
 
     const handleOutlineClose = useCallback(() => {
         outlineOpenRef.current = false
@@ -2429,13 +2282,13 @@ export function HappyThread(props: {
             // content may resize). Keep a smooth tail jump aligned with the
             // newest content until it reaches the bottom; otherwise the
             // browser's original smooth-scroll target can become stale.
-            if (tailScrollInProgressRef.current && !pendingScrollRef.current && !navigationInFlightRef.current) {
+            if (tailScrollInProgressRef.current && !pendingScrollRef.current && !navigationRef.current) {
                 scrollToBottomSmooth()
             } else if (
                 autoScrollEnabledRef.current
                 && atBottomRef.current
                 && !pendingScrollRef.current
-                && !navigationInFlightRef.current
+                && !navigationRef.current
             ) {
                 scrollToBottomInstant()
             }
@@ -2499,7 +2352,7 @@ export function HappyThread(props: {
             settlePendingLoad('loaded')
             return
         }
-        if (atBottomRef.current && autoScrollEnabledRef.current && !navigationInFlightRef.current) {
+        if (atBottomRef.current && autoScrollEnabledRef.current && !navigationRef.current) {
             scrollToBottomInstant()
         }
     }, [

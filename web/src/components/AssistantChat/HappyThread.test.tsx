@@ -289,6 +289,29 @@ describe('assistant prompt lookup', () => {
             .toBe('hapi-message-user-text:prompt')
         viewport.remove()
     })
+
+    it('does not guess a prompt from the tail when the re-keyed card had no follower', () => {
+        const viewport = document.createElement('div')
+        viewport.innerHTML = `
+            <div class="happy-thread-messages">
+                <div id="hapi-message-agent-text:answer"></div>
+            </div>
+        `
+        document.body.append(viewport)
+        const assistantAnchorState = { current: false, nextAnchorId: null as string | null }
+        expect(findPromptTarget(viewport, 'agent-text:answer', assistantAnchorState)).toBeNull()
+
+        viewport.innerHTML = `
+            <div class="happy-thread-messages">
+                <div id="hapi-message-user-text:prompt" data-hapi-message-role="user"></div>
+                <div id="hapi-message-agent-text:older-answer"></div>
+                <div id="hapi-message-user-text:streamed" data-hapi-message-role="user"></div>
+            </div>
+        `
+
+        expect(findPromptTarget(viewport, 'agent-text:answer', assistantAnchorState)).toBeNull()
+        viewport.remove()
+    })
 })
 
 describe('ThreadMessagesById', () => {
