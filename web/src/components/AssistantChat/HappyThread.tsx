@@ -327,45 +327,29 @@ export function findPreviousUserMessage(
 export function findPromptTarget(
     viewport: HTMLElement,
     messageId: string,
-    assistantAnchorState: { current: boolean; nextAnchorId: string | null }
+    replyTargets?: ReadonlyMap<string, string>
 ): HTMLElement | null {
-    const assistantAnchorId = getConversationMessageAnchorId(messageId)
-    const assistantAnchor = document.getElementById(assistantAnchorId)
-    if (assistantAnchor) {
-        assistantAnchorState.current = true
-        assistantAnchorState.nextAnchorId ??=
-            assistantAnchor.nextElementSibling instanceof HTMLElement
-                ? assistantAnchor.nextElementSibling.id
-                : null
-    }
-
-    const target = findPreviousUserMessage(viewport, messageId)
-    if (target) return target
-    if (!assistantAnchorState.current || assistantAnchor || !assistantAnchorState.nextAnchorId) return null
-
-    // The selected card was re-keyed (e.g. merged by a prepend): only the
-    // following card seen at click time still bounds its turn. Without it,
-    // a newly streamed turn would be indistinguishable, so do not guess.
-    const messages = Array.from(viewport.querySelectorAll<HTMLElement>(MESSAGE_ANCHOR_SELECTOR))
-    const boundaryIndex = messages.findIndex((message) => message.id === assistantAnchorState.nextAnchorId)
-    for (let index = boundaryIndex - 1; index >= 0; index -= 1) {
-        if (messages[index].id.includes('__transcript-gap__')) return null
-        if (isPromptAnchor(messages[index])) return messages[index]
-    }
-    return null
+    // Reply targets are keyed by every block, so a card re-keyed by a prepend
+    // still resolves through the block that was clicked, never a newer turn.
+    const replyToMessageId = replyTargets?.get(messageId)
+    const linked = replyToMessageId
+        ? document.getElementById(getConversationMessageAnchorId(replyToMessageId))
+        : null
+    if (linked && viewport.contains(linked)) return linked
+    return findPreviousUserMessage(viewport, messageId)
 }
 
-async function findPreviousUserMessageAfterRender(
+async function findPromptTargetAfterRender(
     viewport: HTMLElement,
     messageId: string,
-    assistantAnchorState: { current: boolean; nextAnchorId: string | null }
+    replyTargetsRef?: React.MutableRefObject<ReadonlyMap<string, string>>
 ): Promise<HTMLElement | null> {
     for (let attempt = 0; attempt < 4; attempt += 1) {
-        const target = findPromptTarget(viewport, messageId, assistantAnchorState)
+        const target = findPromptTarget(viewport, messageId, replyTargetsRef?.current)
         if (target) return target
         await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()))
     }
-    return findPromptTarget(viewport, messageId, assistantAnchorState)
+    return findPromptTarget(viewport, messageId, replyTargetsRef?.current)
 }
 
 export async function loadAllOlderMessages(options: {
@@ -951,6 +935,7 @@ export function HappyThread(props: {
     messagesWarning: string | null
     hasMoreMessages: boolean
     isLoadingMoreMessages: boolean
+    replyTargetsRef?: React.MutableRefObject<ReadonlyMap<string, string>>
     onLoadMore: (onBeforeApply?: (historyVersion: number) => boolean, options?: { shouldInstallBoundary?: () => boolean }) => Promise<OlderLoadOutcome>
     onCancelLoadMore: () => void
     unseenCount: number
@@ -2161,16 +2146,12 @@ export function HappyThread(props: {
                     return true
                 }
             }
-            const assistantAnchorState = {
-                current: false,
-                nextAnchorId: null as string | null
-            }
-            let target = await findPreviousUserMessageAfterRender(viewport, messageId, assistantAnchorState)
+            let target = await findPromptTargetAfterRender(viewport, messageId, props.replyTargetsRef)
             while (!target && hasMoreMessagesRef.current) {
                 if (signal.aborted) return false
                 const loaded = await loadOlderForNavigation(signal)
                 if (!loaded) throw new Error('Could not load older messages')
-                target = await findPreviousUserMessageAfterRender(viewport, messageId, assistantAnchorState)
+                target = await findPromptTargetAfterRender(viewport, messageId, props.replyTargetsRef)
             }
             if (signal.aborted) return false
             if (!target) throw new Error('Could not find the user prompt')
@@ -2186,7 +2167,7 @@ export function HappyThread(props: {
         } finally {
             if (endNavigation(navigation)) restoreTailIfViewportIsAtBottom()
         }
-    }, [clearInitialScrollTimers, endNavigation, loadOlderForNavigation, markExplicitNavigationAwayFromBottom, restoreTailIfViewportIsAtBottom, scrollToMessage, showPromptNavigationResult, startNavigation])
+    }, [clearInitialScrollTimers, endNavigation, loadOlderForNavigation, markExplicitNavigationAwayFromBottom, props.replyTargetsRef, restoreTailIfViewportIsAtBottom, scrollToMessage, showPromptNavigationResult, startNavigation])
 
     const isLoadingConversationStart = conversationStartStatus === 'loading'
     const scrollToConversationStart = useCallback(async (): Promise<boolean> => {

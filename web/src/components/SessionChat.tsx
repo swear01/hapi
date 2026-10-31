@@ -1902,6 +1902,7 @@ function SessionChatInner(props: SessionChatProps) {
     // ordinary sends.
     const pendingSendIntentRef = useRef<ComposerSendIntent>('default')
     const attachmentOrderRef = useRef<string[]>([])
+    const replyTargetsRef = useRef<ReadonlyMap<string, string>>(new Map())
     const restoredSendErrorIdRef = useRef<number | null>(null)
 
     useEffect(() => {
@@ -2045,6 +2046,7 @@ function SessionChatInner(props: SessionChatProps) {
         isRunning: props.session.thinking || hasRunningChildAgent,
         onSendMessage: handleSend,
         attachmentOrderRef,
+        replyTargetsRef,
         onAbort: handleAbort,
         attachmentAdapter,
         allowSendWhenInactive: true,
@@ -2122,6 +2124,7 @@ function SessionChatInner(props: SessionChatProps) {
                         // React reconciliation issues when switching sessions rapidly.
                         // Without prefixes, React may reuse the wrong component's DOM/localStorage.
                         key={`thread-${props.session.id}`}
+                        replyTargetsRef={replyTargetsRef}
                         api={props.api}
                         session={props.session}
                         serviceTier={effectiveCodexServiceTier}

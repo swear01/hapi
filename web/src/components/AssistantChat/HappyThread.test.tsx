@@ -233,8 +233,7 @@ describe('assistant prompt lookup', () => {
         // must not fall through to the head prompt across the gap boundary.
         expect(findPreviousUserMessage(viewport, 'agent-text:tail-answer')).toBeNull()
 
-        const assistantAnchorState = { current: false, nextAnchorId: null }
-        expect(findPromptTarget(viewport, 'agent-text:tail-answer', assistantAnchorState)).toBeNull()
+        expect(findPromptTarget(viewport, 'agent-text:tail-answer')).toBeNull()
     })
 
     it('returns null when the prompt is outside the loaded history window', () => {
@@ -261,46 +260,8 @@ describe('assistant prompt lookup', () => {
             .toBe('hapi-message-cli-output:command')
     })
 
-    it('bounds prompt lookup when prepending re-keys the selected assistant card', () => {
+    it('resolves a re-keyed tail response through its reply target, not a newer turn', () => {
         const viewport = document.createElement('div')
-        viewport.innerHTML = `
-            <div class="happy-thread-messages">
-                <div id="hapi-message-agent-text:answer"></div>
-                <div id="hapi-message-user-text:later" data-hapi-message-role="user"></div>
-                <div id="hapi-message-agent-text:later-answer"></div>
-            </div>
-        `
-        document.body.append(viewport)
-        const assistantAnchorState = { current: false, nextAnchorId: null as string | null }
-        expect(findPromptTarget(viewport, 'agent-text:answer', assistantAnchorState)).toBeNull()
-        expect(assistantAnchorState.nextAnchorId).toBe('hapi-message-user-text:later')
-
-        viewport.innerHTML = `
-            <div class="happy-thread-messages">
-                <div id="hapi-message-user-text:older" data-hapi-message-role="user"></div>
-                <div id="hapi-message-user-text:prompt" data-hapi-message-role="user"></div>
-                <div id="hapi-message-agent-text:older-answer"></div>
-                <div id="hapi-message-user-text:later" data-hapi-message-role="user"></div>
-                <div id="hapi-message-agent-text:later-answer"></div>
-            </div>
-        `
-
-        expect(findPromptTarget(viewport, 'agent-text:answer', assistantAnchorState)?.id)
-            .toBe('hapi-message-user-text:prompt')
-        viewport.remove()
-    })
-
-    it('does not guess a prompt from the tail when the re-keyed card had no follower', () => {
-        const viewport = document.createElement('div')
-        viewport.innerHTML = `
-            <div class="happy-thread-messages">
-                <div id="hapi-message-agent-text:answer"></div>
-            </div>
-        `
-        document.body.append(viewport)
-        const assistantAnchorState = { current: false, nextAnchorId: null as string | null }
-        expect(findPromptTarget(viewport, 'agent-text:answer', assistantAnchorState)).toBeNull()
-
         viewport.innerHTML = `
             <div class="happy-thread-messages">
                 <div id="hapi-message-user-text:prompt" data-hapi-message-role="user"></div>
@@ -308,8 +269,14 @@ describe('assistant prompt lookup', () => {
                 <div id="hapi-message-user-text:streamed" data-hapi-message-role="user"></div>
             </div>
         `
+        document.body.append(viewport)
 
-        expect(findPromptTarget(viewport, 'agent-text:answer', assistantAnchorState)).toBeNull()
+        // The clicked card (agent-text:answer) was merged into older-answer.
+        expect(findPromptTarget(viewport, 'agent-text:answer')).toBeNull()
+        expect(findPromptTarget(viewport, 'agent-text:answer', new Map([
+            ['agent-text:older-answer', 'user-text:prompt'],
+            ['agent-text:answer', 'user-text:prompt']
+        ]))?.id).toBe('hapi-message-user-text:prompt')
         viewport.remove()
     })
 })

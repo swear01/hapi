@@ -818,6 +818,8 @@ export function useHappyRuntime(props: {
      * soon as assistant-ui emits the corresponding AppendMessage.
      */
     pendingSendIntentRef?: React.MutableRefObject<ComposerSendIntent>
+    /** Shared with HappyThread: resolves a response's prompt after its card is re-keyed by a prepend. */
+    replyTargetsRef?: React.MutableRefObject<ReadonlyMap<string, string>>
 }) {
     const isRunning = props.isRunning ?? props.session.thinking
     const activeTurnStartedAt = props.session.activeTurnStartedAt ?? null
@@ -945,6 +947,7 @@ export function useHappyRuntime(props: {
         () => buildAssistantReplyTargets(blocksWithThreadIds),
         [blocksWithThreadIds]
     )
+    if (props.replyTargetsRef) props.replyTargetsRef.current = replyTargets
 
     const convertBlock = useCallback(
         ({ block, threadMessageId }: BlockWithThreadMessageId): ThreadMessageLike => {
