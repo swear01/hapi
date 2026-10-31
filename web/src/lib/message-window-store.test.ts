@@ -3060,6 +3060,13 @@ describe('explicit history navigation', () => {
         // The rows skipped inside the turn are marked, not silently dropped.
         expect(ids[promptIndex + 1]).toBe(`__transcript-gap__${tailStartSeq - 4}-${tailStartSeq - 1}~turn`)
         expect(ids[promptIndex + 2]).toBe(`overflow-${tailStartSeq - 2}`)
+
+        // A re-trim of the already-trimmed window keeps both boundaries.
+        ingestIncomingMessages(id, [makeAgentMessage({ id: 'next', seq: total + 2, at: total + 2 })])
+        const retrimmed = getMessageWindowState(id).messages.map((message) => message.id)
+        const retrimmedPrompt = retrimmed.indexOf('tail-prompt')
+        expect(retrimmed[retrimmedPrompt - 1]).toBe(ids[promptIndex - 1])
+        expect(retrimmed[retrimmedPrompt + 1]).toMatch(/^__transcript-gap__.*~turn$/)
         releaseNavigation()
     })
 

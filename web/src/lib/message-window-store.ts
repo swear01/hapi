@@ -569,39 +569,50 @@ function trimNavigationRegularWindow(
     if (regular.length <= limit) {
         return messages
     }
-    const head = messages.slice(0, messages.indexOf(regular[NAVIGATION_HEAD_LIMIT - 1]!) + 1)
     const tailStart = regular.length - NAVIGATION_TAIL_LIMIT
-    const tail = messages.slice(messages.indexOf(regular[tailStart]!))
     // Keep the input of the turn the tail starts in, so its first retained
     // response still links to a prompt instead of dead-ending at the gap.
     let promptIndex = tailStart
     while (promptIndex >= NAVIGATION_HEAD_LIMIT && !isUserMessage(regular[promptIndex]!)) promptIndex -= 1
-    // Omissions come from display-order positions: seq adjacency misses a
-    // late-invoked queued input that sorts after newer assistant rows.
-    const headEnd = NAVIGATION_HEAD_LIMIT - 1
-    return promptIndex >= NAVIGATION_HEAD_LIMIT && promptIndex < tailStart
-        ? joinWithGap(
-            joinWithGap(head, [regular[promptIndex]!], promptIndex > headEnd + 1),
-            tail,
-            tailStart > promptIndex + 1,
-            TRANSCRIPT_TURN_GAP_SUFFIX
-        )
-        : joinWithGap(head, tail, true)
+    const prompt = promptIndex >= NAVIGATION_HEAD_LIMIT && promptIndex < tailStart ? regular[promptIndex]! : null
+    const kept = new Set([
+        ...regular.slice(0, NAVIGATION_HEAD_LIMIT),
+        ...(prompt ? [prompt] : []),
+        ...regular.slice(tailStart)
+    ])
+    // Walk the full display order (existing markers included): seq adjacency
+    // misses late-invoked inputs, and a re-trim must not erase earlier gaps.
+    const result: DecryptedMessage[] = []
+    let omitted: DecryptedMessage[] = []
+    for (const message of messages) {
+        if (!kept.has(message)) {
+            omitted.push(message)
+            continue
+        }
+        if (omitted.length > 0) {
+            result.push(...markOmitted(omitted, result.at(-1) ?? null, message, prompt))
+            omitted = []
+        }
+        result.push(message)
+    }
+    return [...result, ...omitted.filter(isTranscriptGap)]
 }
 
 /** Marks rows omitted inside one turn: unlike a plain gap it keeps the prompt association. */
 export const TRANSCRIPT_TURN_GAP_SUFFIX = '~turn'
 
-function joinWithGap(
-    before: DecryptedMessage[],
-    after: DecryptedMessage[],
-    omitted: boolean,
-    idSuffix = ''
+function markOmitted(
+    omitted: DecryptedMessage[],
+    last: DecryptedMessage | null,
+    next: DecryptedMessage,
+    prompt: DecryptedMessage | null
 ): DecryptedMessage[] {
-    if (!omitted) return [...before, ...after]
-    const last = before.at(-1) ?? null
-    const gap = makeTranscriptGapMessage(last?.seq ?? null, after[0]?.seq ?? null, last ? (last.invokedAt ?? last.createdAt) : 0)
-    return [...before, { ...gap, id: gap.id + idSuffix }, ...after]
+    // Nothing new dropped: keep the existing markers untouched.
+    if (omitted.every(isTranscriptGap)) return omitted
+    const withinTurn = last !== null && last === prompt
+        && omitted.every(message => !isTranscriptGap(message) || message.id.endsWith(TRANSCRIPT_TURN_GAP_SUFFIX))
+    const gap = makeTranscriptGapMessage(last?.seq ?? null, next.seq ?? null, last ? (last.invokedAt ?? last.createdAt) : 0)
+    return [{ ...gap, id: gap.id + (withinTurn ? TRANSCRIPT_TURN_GAP_SUFFIX : '') }]
 }
 
 function trimNavigationWindow(
