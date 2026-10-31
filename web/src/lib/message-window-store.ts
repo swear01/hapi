@@ -576,20 +576,31 @@ function trimNavigationRegularWindow(
     // response still links to a prompt instead of dead-ending at the gap.
     let promptIndex = tailStart
     while (promptIndex >= NAVIGATION_HEAD_LIMIT && !isUserMessage(regular[promptIndex]!)) promptIndex -= 1
+    // Omissions come from display-order positions: seq adjacency misses a
+    // late-invoked queued input that sorts after newer assistant rows.
+    const headEnd = NAVIGATION_HEAD_LIMIT - 1
     return promptIndex >= NAVIGATION_HEAD_LIMIT && promptIndex < tailStart
-        ? joinWithGap(joinWithGap(head, [regular[promptIndex]!]), tail, TRANSCRIPT_TURN_GAP_SUFFIX)
-        : joinWithGap(head, tail)
+        ? joinWithGap(
+            joinWithGap(head, [regular[promptIndex]!], promptIndex > headEnd + 1),
+            tail,
+            tailStart > promptIndex + 1,
+            TRANSCRIPT_TURN_GAP_SUFFIX
+        )
+        : joinWithGap(head, tail, true)
 }
 
 /** Marks rows omitted inside one turn: unlike a plain gap it keeps the prompt association. */
 export const TRANSCRIPT_TURN_GAP_SUFFIX = '~turn'
 
-function joinWithGap(before: DecryptedMessage[], after: DecryptedMessage[], idSuffix = ''): DecryptedMessage[] {
+function joinWithGap(
+    before: DecryptedMessage[],
+    after: DecryptedMessage[],
+    omitted: boolean,
+    idSuffix = ''
+): DecryptedMessage[] {
+    if (!omitted) return [...before, ...after]
     const last = before.at(-1) ?? null
-    const lastSeq = last?.seq ?? null
-    const nextSeq = after[0]?.seq ?? null
-    if (lastSeq !== null && nextSeq !== null && nextSeq === lastSeq + 1) return [...before, ...after]
-    const gap = makeTranscriptGapMessage(lastSeq, nextSeq, last ? (last.invokedAt ?? last.createdAt) : 0)
+    const gap = makeTranscriptGapMessage(last?.seq ?? null, after[0]?.seq ?? null, last ? (last.invokedAt ?? last.createdAt) : 0)
     return [...before, { ...gap, id: gap.id + idSuffix }, ...after]
 }
 

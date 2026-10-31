@@ -3063,6 +3063,30 @@ describe('explicit history navigation', () => {
         releaseNavigation()
     })
 
+    it('marks omitted rows by display order, not seq adjacency', () => {
+        const id = sessionId('navigation-late-invoked-prompt')
+        const releaseNavigation = beginNavigation(id)
+        setMessageViewMode(id, 'history')
+        const total = HISTORY_WINDOW_SIZE + VISIBLE_WINDOW_SIZE + 50
+        const agents = Array.from({ length: total }, (_, index) => {
+            const seq = index + 2 >= HISTORY_WINDOW_SIZE + 2 ? index + 3 : index + 2
+            return makeAgentMessage({ id: `overflow-${index}`, seq, at: index + 2 })
+        })
+        // Seq follows the head's last row, but it was invoked after 40 newer agent rows.
+        const latePrompt = makeUserMessage({
+            id: 'late-prompt',
+            seq: HISTORY_WINDOW_SIZE + 2,
+            createdAt: HISTORY_WINDOW_SIZE + 40.5,
+            invokedAt: HISTORY_WINDOW_SIZE + 40.5
+        })
+        ingestIncomingMessages(id, [...agents, latePrompt])
+
+        const ids = getMessageWindowState(id).messages.map((message) => message.id)
+        const promptIndex = ids.indexOf('late-prompt')
+        expect(ids[promptIndex - 1]).toMatch(/^__transcript-gap__/)
+        releaseNavigation()
+    })
+
     it('preserves queued rows dropped into the trimmed middle while navigating', () => {
         const id = sessionId('navigation-keeps-queued')
         const releaseNavigation = beginNavigation(id)
