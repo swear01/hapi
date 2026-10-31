@@ -88,7 +88,8 @@ test('jump to conversation start reaches the top without dragging the composer o
     const finalState = await page.evaluate(() => window.__jumpProbe.windowState())
     expect(finalState.oldestSeq).toBe(1)
     expect(finalState.newestSeq).toBe(1201)
-    expect(finalState.messageCount).toBe(1001)
+    // 600 head + gap + the tail turn's prompt (row 801) + 400 tail rows.
+    expect(finalState.messageCount).toBe(1002)
     // The gap marker sits between the retained head and tail (off-screen
     // under virtualization, so assert on the store window).
     expect(finalState.gapPresent).toBe(true)
@@ -100,6 +101,11 @@ test('jump to conversation start reaches the top without dragging the composer o
     expect(afterCount).toBeLessThanOrEqual(1)
     // The queued refresh found nothing newer, so the window was not replaced.
     expect(finalState.newestSeq).toBe(1201)
+    // The first retained tail response still reaches its input across the gap.
+    await page.locator('.happy-message').filter({ hasText: 'Fixture assistant reply 401' })
+        .locator('[title="Jump to turn input"]').evaluate(button => (button as HTMLButtonElement).click())
+    await expect(page.locator('.happy-thread-messages > [id$="m-user-401"]')).toBeInViewport()
+    await expect.poll(() => page.evaluate(() => window.__jumpProbe.windowState().navigationLeaseCount), { timeout: 15_000 }).toBe(0)
     await page.locator('.happy-message').filter({ hasText: 'Fixture assistant reply 500' })
         .locator('[title="Jump to turn input"]').evaluate(button => (button as HTMLButtonElement).click())
     const selectedInput = page.locator('.happy-thread-messages > [id$="m-user-500"]')

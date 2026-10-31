@@ -3043,6 +3043,24 @@ describe('explicit history navigation', () => {
         releaseNavigation()
     })
 
+    it('keeps the prompt of the turn the retained tail starts in', () => {
+        const id = sessionId('navigation-tail-prompt')
+        const releaseNavigation = beginNavigation(id)
+        setMessageViewMode(id, 'history')
+        const total = HISTORY_WINDOW_SIZE + VISIBLE_WINDOW_SIZE + 50
+        const tailStartSeq = total - VISIBLE_WINDOW_SIZE + 2
+        ingestIncomingMessages(id, Array.from({ length: total }, (_, index) => index + 2 === tailStartSeq - 5
+            ? makeUserMessage({ id: 'tail-prompt', seq: index + 2, createdAt: index + 2, invokedAt: index + 2 })
+            : makeAgentMessage({ id: `overflow-${index}`, seq: index + 2, at: index + 2 })
+        ))
+
+        const ids = getMessageWindowState(id).messages.map((message) => message.id)
+        const promptIndex = ids.indexOf('tail-prompt')
+        expect(ids[promptIndex - 1]).toMatch(/^__transcript-gap__/)
+        expect(ids[promptIndex + 1]).toBe(`overflow-${tailStartSeq - 2}`)
+        releaseNavigation()
+    })
+
     it('preserves queued rows dropped into the trimmed middle while navigating', () => {
         const id = sessionId('navigation-keeps-queued')
         const releaseNavigation = beginNavigation(id)

@@ -5,7 +5,7 @@ import { reduceChatBlocks, type LatestUsage } from '@/chat/reducer'
 import { buildVisibleChatBlocks, isEligibleForToolGrouping } from '@/chat/toolGroups'
 import type { NormalizedMessage } from '@/chat/types'
 import type { DecryptedMessage, MessageStatus, MessagesResponse } from '@/types/api'
-import { isQueuedForInvocation, mergeMessages } from '@/lib/messages'
+import { isQueuedForInvocation, isUserMessage, mergeMessages } from '@/lib/messages'
 
 export type MessageViewMode = 'tail' | 'history'
 
@@ -570,7 +570,16 @@ function trimNavigationRegularWindow(
         return messages
     }
     const head = messages.slice(0, messages.indexOf(regular[NAVIGATION_HEAD_LIMIT - 1]!) + 1)
-    const tail = messages.slice(messages.indexOf(regular[regular.length - NAVIGATION_TAIL_LIMIT]!))
+    const tailStart = regular.length - NAVIGATION_TAIL_LIMIT
+    // Keep the input of the turn the tail starts in, so its first retained
+    // response still links to a prompt instead of dead-ending at the gap.
+    // ponytail: rows between that prompt and the tail start drop unmarked.
+    let promptIndex = tailStart
+    while (promptIndex >= NAVIGATION_HEAD_LIMIT && !isUserMessage(regular[promptIndex]!)) promptIndex -= 1
+    const tail = [
+        ...(promptIndex >= NAVIGATION_HEAD_LIMIT && promptIndex < tailStart ? [regular[promptIndex]!] : []),
+        ...messages.slice(messages.indexOf(regular[tailStart]!))
+    ]
     const headLast = head.at(-1) ?? null
     const tailFirst = tail[0] ?? null
     const headLastSeq = headLast?.seq ?? null
