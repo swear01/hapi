@@ -2067,6 +2067,7 @@ export function HappyThread(props: {
     }, [loadOlderFromConsumer])
 
     const markExplicitNavigationAwayFromBottom = useCallback(() => {
+        tailScrollInProgressRef.current = false
         autoScrollEnabledRef.current = false
         atBottomRef.current = false
         onViewModeChangeRef.current('history')
@@ -2428,7 +2429,7 @@ export function HappyThread(props: {
             // content may resize). Keep a smooth tail jump aligned with the
             // newest content until it reaches the bottom; otherwise the
             // browser's original smooth-scroll target can become stale.
-            if (tailScrollInProgressRef.current && !pendingScrollRef.current) {
+            if (tailScrollInProgressRef.current && !pendingScrollRef.current && !navigationInFlightRef.current) {
                 scrollToBottomSmooth()
             } else if (
                 autoScrollEnabledRef.current
