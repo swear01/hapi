@@ -1164,6 +1164,7 @@ export function HappyThread(props: {
         setIsNavigationInFlight(false)
         setConversationStartStatus('idle')
         setPromptNavigationStatus('idle')
+        setLoadingPromptMessageId(null)
         if (conversationStartStatusTimerRef.current !== null) {
             window.clearTimeout(conversationStartStatusTimerRef.current)
             conversationStartStatusTimerRef.current = null
