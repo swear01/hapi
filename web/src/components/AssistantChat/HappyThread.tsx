@@ -2134,6 +2134,7 @@ export function HappyThread(props: {
     }, [abortActiveNavigationScroll, beginOwnedNavigation, loadOlderForOutline, markExplicitNavigationAwayFromBottom, props.onOutlineItemClick, props.onOutlineOpenChange, restoreTailIfViewportIsAtBottom])
 
     const scrollToMessage = useCallback(async (messageId: string, signal?: AbortSignal): Promise<boolean> => {
+        if (signal?.aborted) return false
         initialScrollDeadlineRef.current = 0
         clearInitialScrollTimers()
         const target = document.getElementById(getConversationMessageAnchorId(messageId))
@@ -2248,9 +2249,8 @@ export function HappyThread(props: {
             if (navigationScrollAbortControllerRef.current === scrollAbortController) {
                 navigationScrollAbortControllerRef.current = null
             }
-            if (isCurrentOwner()) {
-                setLoadingPromptMessageId(null)
-            }
+            // A cancelled jump is no longer the owner but must still clear its own spinner.
+            setLoadingPromptMessageId(current => current === messageId ? null : current)
         }
     }, [abortActiveNavigationScroll, clearInitialScrollTimers, loadOlderForNavigation, markExplicitNavigationAwayFromBottom, scrollToMessage])
 
