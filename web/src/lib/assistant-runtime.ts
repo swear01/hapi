@@ -16,6 +16,7 @@ import type { ToolGroupBlock, VisibleChatBlock } from '@/chat/toolGroups'
 import { visibleBlockRole } from '@/chat/toolGroups'
 import type { AttachmentMetadata, MessageStatus as HappyMessageStatus, Session } from '@/types/api'
 import { orderItemsById } from '@/lib/attachmentOrder'
+import { TRANSCRIPT_TURN_GAP_SUFFIX } from '@/lib/message-window-store'
 
 /**
  * Aggregated metadata for a multi-turn response group, surfaced on the
@@ -378,8 +379,9 @@ export function buildAssistantReplyTargets(
     for (const { block, threadMessageId } of blocks) {
         if (block.id.startsWith('__transcript-gap__')) {
             // The navigation window trimmed the middle of the transcript: the
-            // retained tail must never link back to a head prompt.
-            latestUserMessageId = null
+            // retained tail must never link back to a head prompt (rows
+            // omitted inside one turn still belong to its prompt).
+            if (!block.id.endsWith(TRANSCRIPT_TURN_GAP_SUFFIX)) latestUserMessageId = null
             continue
         }
         const role = visibleBlockRole(block)

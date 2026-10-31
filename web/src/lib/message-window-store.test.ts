@@ -3057,7 +3057,9 @@ describe('explicit history navigation', () => {
         const ids = getMessageWindowState(id).messages.map((message) => message.id)
         const promptIndex = ids.indexOf('tail-prompt')
         expect(ids[promptIndex - 1]).toMatch(/^__transcript-gap__/)
-        expect(ids[promptIndex + 1]).toBe(`overflow-${tailStartSeq - 2}`)
+        // The rows skipped inside the turn are marked, not silently dropped.
+        expect(ids[promptIndex + 1]).toBe(`__transcript-gap__${tailStartSeq - 4}-${tailStartSeq - 1}~turn`)
+        expect(ids[promptIndex + 2]).toBe(`overflow-${tailStartSeq - 2}`)
         releaseNavigation()
     })
 

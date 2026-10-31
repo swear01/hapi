@@ -571,24 +571,26 @@ function trimNavigationRegularWindow(
     }
     const head = messages.slice(0, messages.indexOf(regular[NAVIGATION_HEAD_LIMIT - 1]!) + 1)
     const tailStart = regular.length - NAVIGATION_TAIL_LIMIT
+    const tail = messages.slice(messages.indexOf(regular[tailStart]!))
     // Keep the input of the turn the tail starts in, so its first retained
     // response still links to a prompt instead of dead-ending at the gap.
-    // ponytail: rows between that prompt and the tail start drop unmarked.
     let promptIndex = tailStart
     while (promptIndex >= NAVIGATION_HEAD_LIMIT && !isUserMessage(regular[promptIndex]!)) promptIndex -= 1
-    const tail = [
-        ...(promptIndex >= NAVIGATION_HEAD_LIMIT && promptIndex < tailStart ? [regular[promptIndex]!] : []),
-        ...messages.slice(messages.indexOf(regular[tailStart]!))
-    ]
-    const headLast = head.at(-1) ?? null
-    const tailFirst = tail[0] ?? null
-    const headLastSeq = headLast?.seq ?? null
-    const tailFirstSeq = tailFirst?.seq ?? null
-    const contiguous = headLastSeq !== null && tailFirstSeq !== null && tailFirstSeq === headLastSeq + 1
-    const gapAt = headLast ? (headLast.invokedAt ?? headLast.createdAt) : 0
-    return contiguous
-        ? [...head, ...tail]
-        : [...head, makeTranscriptGapMessage(headLastSeq, tailFirstSeq, gapAt), ...tail]
+    return promptIndex >= NAVIGATION_HEAD_LIMIT && promptIndex < tailStart
+        ? joinWithGap(joinWithGap(head, [regular[promptIndex]!]), tail, TRANSCRIPT_TURN_GAP_SUFFIX)
+        : joinWithGap(head, tail)
+}
+
+/** Marks rows omitted inside one turn: unlike a plain gap it keeps the prompt association. */
+export const TRANSCRIPT_TURN_GAP_SUFFIX = '~turn'
+
+function joinWithGap(before: DecryptedMessage[], after: DecryptedMessage[], idSuffix = ''): DecryptedMessage[] {
+    const last = before.at(-1) ?? null
+    const lastSeq = last?.seq ?? null
+    const nextSeq = after[0]?.seq ?? null
+    if (lastSeq !== null && nextSeq !== null && nextSeq === lastSeq + 1) return [...before, ...after]
+    const gap = makeTranscriptGapMessage(lastSeq, nextSeq, last ? (last.invokedAt ?? last.createdAt) : 0)
+    return [...before, { ...gap, id: gap.id + idSuffix }, ...after]
 }
 
 function trimNavigationWindow(

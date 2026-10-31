@@ -326,6 +326,19 @@ describe('buildAssistantReplyTargets', () => {
         ])
     })
 
+    it('keeps the prompt association across a gap inside one turn', () => {
+        const blocks = assignThreadMessageIds([
+            userText('__transcript-gap__601-800'),
+            userText('tail-prompt'),
+            userText('__transcript-gap__802-900~turn'),
+            agentText('tail-answer')
+        ])
+
+        expect([...buildAssistantReplyTargets(blocks)]).toEqual([
+            ['agent-text:tail-answer', 'user-text:tail-prompt']
+        ])
+    })
+
     it('skips failed sends when linking responses to their turn input', () => {
         const blocks = assignThreadMessageIds([
             userText('delivered'),
