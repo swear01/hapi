@@ -2018,7 +2018,9 @@ export function SessionList(props: {
                                             showDetailedStatus={showDetailedStatus}
                                             inRunningSection
                                             projectLabel={getSessionProjectLabel(getSessionProjectPath(s.metadata) ?? 'Other')}
-                                            machineLabel={resolveMachineLabel(s.metadata?.machineId ?? null)}
+                                            machineLabel={showMachineFilterBar && activeMachineFilter === null
+                                                ? resolveMachineLabel(s.metadata?.machineId ?? null)
+                                                : undefined}
                                             contentSnippet={contentSnippetBySessionId.get(s.id)}
                                             contentSearchTruncated={contentSearchTruncatedBySessionId.has(s.id)}
                                             targetMessageId={contentTargetMessageIdBySessionId.get(s.id)}
@@ -2734,7 +2736,9 @@ export function SessionList(props: {
                                             showDetailedStatus={showDetailedStatus}
                                             inRunningSection
                                             projectLabel={getSessionProjectLabel(getSessionProjectPath(s.metadata) ?? 'Other')}
-                                            machineLabel={resolveMachineLabel(s.metadata?.machineId ?? null)}
+                                            machineLabel={showMachineFilterBar && activeMachineFilter === null
+                                                ? resolveMachineLabel(s.metadata?.machineId ?? null)
+                                                : undefined}
                                             contentSnippet={contentSnippetBySessionId.get(s.id)}
                                             contentSearchTruncated={contentSearchTruncatedBySessionId.has(s.id)}
                                             targetMessageId={contentTargetMessageIdBySessionId.get(s.id)}
