@@ -27,6 +27,7 @@ import {
     type ComposerSegment,
     type ComposerSelection,
 } from '@/lib/composerSegments'
+import { DEFAULT_AUTOCOMPLETE_PREFIXES } from '@/lib/autocomplete'
 import {
     formatSessionMentionTooltip,
     type SessionMentionTooltipModel,
@@ -875,7 +876,7 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
             })
             return serialized
         },
-        insertSessionMention: (mention, prefixes = ['@', '/', '$']) => {
+        insertSessionMention: (mention, prefixes = [...DEFAULT_AUTOCOMPLETE_PREFIXES]) => {
             const root = rootRef.current
             if (!root) {
                 return { text: value, selection: { start: value.length, end: value.length } }
@@ -887,7 +888,7 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
             const serialized = commitSegments(root, result.segments, result.selection)
             return { text: serialized, selection: result.selection }
         },
-        applyPlainSuggestion: (suggestionText, prefixes = ['@', '/', '$']) => {
+        applyPlainSuggestion: (suggestionText, prefixes = [...DEFAULT_AUTOCOMPLETE_PREFIXES]) => {
             const root = rootRef.current
             if (!root) {
                 return { text: value, selection: { start: value.length, end: value.length } }
