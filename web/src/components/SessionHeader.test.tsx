@@ -209,7 +209,7 @@ describe('SessionHeader', () => {
         )
 
         fireEvent.click(screen.getByRole('button', { name: /More/ }))
-        fireEvent.click(screen.getByRole('menuitem', { name: /Sync Pi history/ }))
+        fireEvent.click(screen.getByRole('menuitem', { name: /Sync session/ }))
 
         await waitFor(() => expect(importPiSessions).toHaveBeenCalledWith({
             sessionIds: ['pi-native-1'],
@@ -242,7 +242,7 @@ describe('SessionHeader', () => {
         )
 
         fireEvent.click(screen.getByRole('button', { name: /More/ }))
-        expect(screen.queryByRole('menuitem', { name: /Sync Pi history/ })).toBeNull()
+        expect(screen.queryByRole('menuitem', { name: /Sync session/ })).toBeNull()
     })
 
     it('renders and toggles the agent terminal control', () => {
