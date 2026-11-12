@@ -1,0 +1,543 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Mon, 19 Oct 2026 15:38:51 +0000
+Subject: [PATCH 38/51] carry(upstream): PR #2035 fix(runner): prevent Windows
+ process probes from blocking session lifecycle
+
+Upstream-head: 0de3764c2320f254789e2ed25c1a717220ff2a42
+---
+ cli/src/codex/shared/registry.test.ts |  25 +++++
+ cli/src/codex/shared/registry.ts      |  13 ++-
+ cli/src/runner/orphanReap.test.ts     |  12 +++
+ cli/src/runner/orphanReap.ts          |  15 ++-
+ cli/src/runner/run.ts                 |  39 ++++++--
+ cli/src/utils/process.test.ts         | 133 +++++++++++++++++++++++++-
+ cli/src/utils/process.ts              |  89 +++++++++++++++--
+ 7 files changed, 303 insertions(+), 23 deletions(-)
+
+diff --git a/cli/src/codex/shared/registry.test.ts b/cli/src/codex/shared/registry.test.ts
+index 10a98592d..6fe2b84c9 100644
+--- a/cli/src/codex/shared/registry.test.ts
++++ b/cli/src/codex/shared/registry.test.ts
+@@ -17,6 +17,31 @@ async function fixture(): Promise<CodexRuntimeRecord> {
+         sessions: { sid: { threadId: 'thread', namespace: 'ns', active: true } } };
+ }
+ describe('shared runtime ownership', () => {
++    it('uses one complete process snapshot without per-record OS probes', async () => {
++        const owner = await fixture();
++        const probe = vi.spyOn(state.processes, 'has');
++        try {
++            for (let scan = 0; scan < 3; scan++) {
++                for (let index = 0; index < 50; index++) {
++                    expect(runtimeMayBeAlive({ ...owner, pid: 3000 + index, serverPid: 4000 + index }, new Map())).toBe(false);
++                }
++            }
++            expect(probe).not.toHaveBeenCalled();
++        } finally { probe.mockRestore(); }
++    });
++    it('retains live wrappers, orphan engines and unknown generations in a fresh snapshot', async () => {
++        const owner = await fixture();
++        expect(runtimeMayBeAlive(owner, new Map([[1111, owner.marker]]))).toBe(true);
++        expect(runtimeMayBeAlive(owner, new Map([[2222, owner.serverMarker!]]))).toBe(true);
++        expect(runtimeMayBeAlive(owner, new Map([[1111, null]]))).toBe(true);
++        expect(runtimeMayBeAlive({ ...owner, serverMarker: undefined }, new Map([[2222, 'unverified-start']]))).toBe(true);
++    });
++    it('does not confuse old runtime generations with reused PIDs or retain a stale live snapshot', async () => {
++        const owner = await fixture(); state.processes.set(1111, owner.marker);
++        expect(runtimeMayBeAlive(owner, new Map([[1111, 'new-wrapper'], [2222, 'new-engine']]))).toBe(false);
++        expect(runtimeMayBeAlive(owner, new Map())).toBe(false);
++        expect(runtimeMayBeAlive(owner, new Map([[1111, owner.marker]]))).toBe(true);
++    });
+     it('distinguishes PID reuse from an unknown generation and a live orphan engine', async () => {
+         const owner = await fixture(); state.processes.set(1111, 'different-start');
+         expect(runtimeAlive(owner)).toBe(false); expect(runtimeMayBeAlive(owner)).toBe(false);
+diff --git a/cli/src/codex/shared/registry.ts b/cli/src/codex/shared/registry.ts
+index 5985fa8c9..4f7be44be 100644
+--- a/cli/src/codex/shared/registry.ts
++++ b/cli/src/codex/shared/registry.ts
+@@ -32,15 +32,20 @@ export function runtimeAlive(record: CodexRuntimeRecord): boolean {
+     return isProcessAlive(record.pid) && getProcessStartMarker(record.pid) === record.marker;
+ }
+ 
+-function generationMayBeAlive(pid: number, marker?: string): boolean {
++function generationMayBeAlive(pid: number, marker?: string, snapshot?: ReadonlyMap<number, string | null>): boolean {
++    if (snapshot) {
++        if (!snapshot.has(pid)) return false;
++        const actual = snapshot.get(pid);
++        return !actual || !marker || actual === marker;
++    }
+     if (!isProcessAlive(pid)) return false;
+     const actual = getProcessStartMarker(pid);
+     // A failed OS probe is not evidence that the engine exited.
+     return !actual || !marker || actual === marker;
+ }
+-export function runtimeMayBeAlive(owner: CodexRuntimeRecord): boolean {
+-    return generationMayBeAlive(owner.pid, owner.marker)
+-        || Boolean(owner.serverPid && generationMayBeAlive(owner.serverPid, owner.serverMarker));
++export function runtimeMayBeAlive(owner: CodexRuntimeRecord, snapshot?: ReadonlyMap<number, string | null>): boolean {
++    return generationMayBeAlive(owner.pid, owner.marker, snapshot)
++        || Boolean(owner.serverPid && generationMayBeAlive(owner.serverPid, owner.serverMarker, snapshot));
+ }
+ 
+ export async function readRuntimes(options?: { strict?: boolean }): Promise<CodexRuntimeRecord[]> {
+diff --git a/cli/src/runner/orphanReap.test.ts b/cli/src/runner/orphanReap.test.ts
+index db5900fa7..39262bee0 100644
+--- a/cli/src/runner/orphanReap.test.ts
++++ b/cli/src/runner/orphanReap.test.ts
+@@ -7,6 +7,7 @@ import {
+     commandMatchesRunnerSpawnedSession,
+     findRunnerSpawnedOrphanTargets,
+     findStopSessionOrphanTargets,
++    parseWindowsProcessSnapshot,
+     reapRunnerSpawnedOrphans,
+     selectOrphanPidsForSession,
+     selectOrphanTargetsForSession,
+@@ -17,6 +18,17 @@ import {
+     windowsProcessMarkerCimCommand,
+ } from '@/utils/process'
+ 
++describe('complete Windows process snapshots', () => {
++    it.each(['', '[]', '{}', 'null', '[{"ProcessId":1},{}]', '[{"ProcessId":0}]'])('rejects unverifiable listing %s', raw => {
++        expect(() => parseWindowsProcessSnapshot(raw)).toThrow();
++    });
++    it('retains missing creation times as unknown rather than treating the PID as absent', () => {
++        expect(parseWindowsProcessSnapshot('[{"ProcessId":0},{"ProcessId":42,"CreationDate":null}]')).toEqual([
++            { pid: 42, name: '', cmd: '', startMarker: null }
++        ]);
++    });
++});
++
+ describe('orphanReap argv matching', () => {
+     const sessionId = 'sess-abc-123'
+ 
+diff --git a/cli/src/runner/orphanReap.ts b/cli/src/runner/orphanReap.ts
+index d4d5d6905..6d3831b04 100644
+--- a/cli/src/runner/orphanReap.ts
++++ b/cli/src/runner/orphanReap.ts
+@@ -191,7 +191,12 @@ export function listWindowsProcessesWithCommandLine(): ProcessSnapshot[] {
+     if (result.error || result.status !== 0) {
+         throw result.error ?? new Error(`powershell Win32_Process exit ${result.status}`)
+     }
+-    const raw = (result.stdout ?? '').trim()
++    return parseWindowsProcessSnapshot((result.stdout ?? '').toString())
++}
++
++/** Reject incomplete/invalid listings before absence can prove a PID exited. */
++export function parseWindowsProcessSnapshot(stdout: string): ProcessSnapshot[] {
++    const raw = stdout.trim()
+     // Empty stdout is a failed scan, not "no processes" — a live Windows host
+     // always has System/Idle. Match process.ts collectWindowsProcessTree
+     // fail-closed semantics so orphan reap does not claim archive-ok (#1911).
+@@ -202,7 +207,11 @@ export function listWindowsProcessesWithCommandLine(): ProcessSnapshot[] {
+         | Array<{ ProcessId?: number; Name?: string; CommandLine?: string; CreationDate?: string }>
+         | { ProcessId?: number; Name?: string; CommandLine?: string; CreationDate?: string }
+     const rows = Array.isArray(parsed) ? parsed : [parsed]
+-    return rows
++    if (!rows.length || rows.some(row => !row || typeof row.ProcessId !== 'number'
++        || !Number.isInteger(row.ProcessId) || row.ProcessId < 0)) {
++        throw new Error('powershell Win32_Process returned an invalid process snapshot')
++    }
++    const processes = rows
+         .map((row) => ({
+             pid: Number(row.ProcessId),
+             name: row.Name ?? '',
+@@ -212,6 +221,8 @@ export function listWindowsProcessesWithCommandLine(): ProcessSnapshot[] {
+                 : null,
+         }))
+         .filter((proc) => Number.isFinite(proc.pid) && proc.pid > 0)
++    if (!processes.length) throw new Error('powershell Win32_Process returned no verifiable processes')
++    return processes
+ }
+ 
+ export async function listProcessesForOrphanScan(): Promise<ProcessSnapshot[]> {
+diff --git a/cli/src/runner/run.ts b/cli/src/runner/run.ts
+index 16cb278c8..a2b1189c1 100644
+--- a/cli/src/runner/run.ts
++++ b/cli/src/runner/run.ts
+@@ -15,7 +15,7 @@ import { spawnHappyCLI } from '@/utils/spawnHappyCLI';
+ import { writeRunnerState, RunnerLocallyPersistedState, readRunnerState, acquireRunnerLock, releaseRunnerLock } from '@/persistence';
+ import { getCliArgs } from '@/utils/cliArgs';
+ import { getProcessStartMarker, isProcessAlive, isWindows, killProcess, killProcessByChildProcess, killProcessTreeByPid } from '@/utils/process';
+-import { findStopSessionOrphanTargets, reapRunnerSpawnedOrphans } from '@/runner/orphanReap';
++import { findStopSessionOrphanTargets, listWindowsProcessesWithCommandLine, reapRunnerSpawnedOrphans } from '@/runner/orphanReap';
+ import { decideUntrackedRunnerWebhook } from '@/runner/lateRunnerWebhook';
+ import {
+     decideKeepWrapperArchive,
+@@ -1201,11 +1201,29 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+ 
+       const readLiveRuntimesForStop = async () => {
+         try {
+-          return (await guard.run(() => readRuntimes({ strict: true }))).filter(runtime =>
++          const scanStarted = Date.now();
++          const records = (await guard.run(() => readRuntimes({ strict: true }))).filter(runtime =>
+             runtime.hub === configuration.apiUrl
+             && runtime.authHash === runtimeAuthHash()
+-            && runtimeMayBeAlive(runtime)
+           );
++          // A fresh, complete process snapshot keeps archive cost independent
++          // of old registry entries. Per-record tasklist/CIM calls made three
++          // reads of nine retired runtimes exceed the 30s StopSession RPC.
++          // Read the registry first, then snapshot; never reuse it across scans.
++          let markers: ReadonlyMap<number, string | null> | undefined;
++          if (isWindows() && records.length > 0) {
++            try {
++              const processes = listWindowsProcessesWithCommandLine();
++              if (!processes.length) throw new Error('Empty Windows process snapshot');
++              markers = new Map(processes.map(proc => [proc.pid, proc.startMarker ?? null]));
++            } catch (error) {
++              logger.warn(`[RUNNER RUN] Cannot verify Windows runtimes during stop of ${sessionId}: ${String(error)}`);
++              return null;
++            }
++          }
++          const live = records.filter(runtime => runtimeMayBeAlive(runtime, markers));
++          logger.debug('[RUNNER RUN] Runtime stop scan', { sessionId, records: records.length, live: live.length, elapsedMs: Date.now() - scanStarted });
++          return live;
+         } catch (error) {
+           logger.warn(
+             `[RUNNER RUN] Codex runtime registry unreadable during stop of ${sessionId}: ${
+@@ -1398,6 +1416,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+             return await guard.run(() => finishKeepWrapperDetach(pid));
+           }
+ 
++          let treeTerminationVerified = false;
+           if (session.startedBy === 'runner') {
+             // Adopted post-restart sessions have no ChildProcess handle — still
+             // tree-kill so agent grandchildren cannot outlive the wrapper.
+@@ -1428,15 +1447,19 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+               }
+             }
+             try {
++              const reportStop: Parameters<typeof killProcessTreeByPid>[2] = report => {
++                logger.debug('[RUNNER RUN] Session process tree stop proof', { sessionId, ...report });
++              };
+               const child = session.childProcess;
+               const treeStopped = await guard.run(() => child
+-                ? killProcessByChildProcess(child)
+-                : killProcessTreeByPid(pid));
++                ? killProcessByChildProcess(child, false, reportStop)
++                : killProcessTreeByPid(pid, false, reportStop));
+               if (!treeStopped) {
+                 logger.debug(`[RUNNER RUN] Process tree for session ${sessionId} is still alive after stop request`);
+                 return 'still_alive';
+               }
+               logger.debug(`[RUNNER RUN] Requested termination for runner-spawned session ${sessionId}`);
++              treeTerminationVerified = true;
+             } catch (error) {
+               logger.debug(`[RUNNER RUN] Failed to kill session ${sessionId}:`, error);
+               return 'still_alive';
+@@ -1459,10 +1482,12 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+             spawnSession.markChildStopping(existingSessionId);
+           }
+           const deadline = Date.now() + 5_000;
+-          while (isProcessAlive(pid) && Date.now() < deadline) {
++          // Full-tree termination already proved this generation exited. A
++          // second raw-PID probe can observe an unrelated, newly reused PID.
++          while (!treeTerminationVerified && isProcessAlive(pid) && Date.now() < deadline) {
+             await guard.run(() => new Promise(resolve => setTimeout(resolve, 50)));
+           }
+-          if (isProcessAlive(pid)) {
++          if (!treeTerminationVerified && isProcessAlive(pid)) {
+             logger.debug(`[RUNNER RUN] Session ${sessionId} process ${pid} is still alive after stop request`);
+             return 'still_alive';
+           }
+diff --git a/cli/src/utils/process.test.ts b/cli/src/utils/process.test.ts
+index 5e2f6f9a3..b6620ca2c 100644
+--- a/cli/src/utils/process.test.ts
++++ b/cli/src/utils/process.test.ts
+@@ -335,6 +335,33 @@ describe('killProcess on Windows (orphanReap / stopSession)', () => {
+         expect(taskkills[0]![1]).toEqual(['/F', '/T', '/PID', '9901'])
+     })
+ 
++    it('services queued control work between Windows tree generation probes', async () => {
++        vi.useRealTimers()
++        const { killProcessTreeByPid } = await import('./process')
++        const alive = new Set([100, 200])
++        let controlServiced = false
++        let controlServicedBeforeSignalling = false
++        setImmediate(() => { controlServiced = true })
++        spawnSyncMock.mockImplementation((cmd: string, args: string[] = []) => {
++            if (cmd === 'powershell') {
++                const script = args.at(-1) ?? ''
++                return completed(script.includes('ParentProcessId') ? 'OK:200,100' : 'generation')
++            }
++            if (cmd === 'tasklist') {
++                const pid = Number(args.find(a => a.startsWith('PID eq '))?.slice(7))
++                return completed(alive.has(pid) ? `proc.exe ${pid} Console` : 'INFO: No tasks')
++            }
++            if (cmd === 'taskkill') {
++                if (alive.size === 2) controlServicedBeforeSignalling = controlServiced
++                alive.delete(Number(args[args.indexOf('/PID') + 1]))
++            }
++            return completed('')
++        })
++        await expect(killProcessTreeByPid(100, true)).resolves.toBe(true)
++        expect(controlServicedBeforeSignalling).toBe(true)
++        expect(alive.size).toBe(0)
++    })
++
+     it('killProcessTreeByPid signals surviving descendants after taskkill /T misses them', async () => {
+         // #1911 bot Major: taskkill /T exit 0 is "signalled", not "tree gone".
+         // When the root dies but a grandchild survives (broken intermediate link),
+@@ -396,8 +423,98 @@ describe('killProcess on Windows (orphanReap / stopSession)', () => {
+         expect(alive.size).toBe(0)
+     })
+ 
++    it('waits for an unverifiable descendant to finish exiting without signalling it', async () => {
++        const { killProcessTreeByPid } = await import('./process')
++        const alive = new Set([100, 200])
++        const signalled: number[] = []
++        spawnSyncMock.mockImplementation((cmd: string, args: string[] = []) => {
++            if (cmd === 'powershell') {
++                const script = args.at(-1) ?? ''
++                if (script.includes('ParentProcessId')) return completed('OK:200,100')
++                return completed(script.includes('ProcessId = 100') ? 'generation-100' : '')
++            }
++            if (cmd === 'tasklist') {
++                const pid = Number(args.find(a => a.startsWith('PID eq '))?.slice(7))
++                return completed(alive.has(pid) ? `proc.exe ${pid} Console` : 'INFO: No tasks')
++            }
++            if (cmd === 'taskkill') {
++                const pid = Number(args[args.indexOf('/PID') + 1])
++                signalled.push(pid);alive.delete(pid)
++                setTimeout(() => alive.delete(200), 200)
++            }
++            return completed('')
++        })
++        const done = killProcessTreeByPid(100, true)
++        await vi.advanceTimersByTimeAsync(3_000)
++        await expect(done).resolves.toBe(true)
++        expect(signalled).toEqual([100])
++    })
++
++    it('does not reintroduce an exited tree member when its PID is reused during the grace wait', async () => {
++        const { killProcessTreeByPid } = await import('./process')
++        const alive = new Set([100, 200, 300])
++        const signalled: number[] = []
++        spawnSyncMock.mockImplementation((cmd: string, args: string[] = []) => {
++            if (cmd === 'powershell') {
++                const script = args.at(-1) ?? ''
++                if (script.includes('ParentProcessId')) return completed('OK:300,200,100')
++                return completed(script.includes('ProcessId = 300') ? '' : 'generation')
++            }
++            if (cmd === 'tasklist') {
++                const pid = Number(args.find(a => a.startsWith('PID eq '))?.slice(7))
++                return completed(alive.has(pid) ? `proc.exe ${pid} Console` : 'INFO: No tasks')
++            }
++            if (cmd === 'taskkill') {
++                const pid = Number(args[args.indexOf('/PID') + 1])
++                signalled.push(pid); alive.delete(pid); alive.delete(200)
++                setTimeout(() => alive.add(200), 100)
++                setTimeout(() => alive.delete(300), 200)
++            }
++            return completed('')
++        })
++        const done = killProcessTreeByPid(100, true)
++        await vi.advanceTimersByTimeAsync(3_000)
++        await expect(done).resolves.toBe(true)
++        expect(signalled).toEqual([100])
++        expect(alive.has(200)).toBe(true)
++    })
++
++    it('fails closed without signalling a surviving descendant whose generation cannot be read', async () => {
++        const { killProcessTreeByPid } = await import('./process')
++        const report = vi.fn()
++        const alive = new Set([100, 200])
++        const signalled: number[] = []
++        spawnSyncMock.mockImplementation((cmd: string, args: string[] = []) => {
++            if (cmd === 'powershell') {
++                const script = args.at(-1) ?? ''
++                if (script.includes('ParentProcessId')) return completed('OK:200,100')
++                return completed(script.includes('ProcessId = 100') ? 'generation-100' : '')
++            }
++            if (cmd === 'tasklist') {
++                const pid = Number(args.find(a => a.startsWith('PID eq '))?.slice(7))
++                return completed(alive.has(pid) ? `proc.exe ${pid} Console` : 'INFO: No tasks')
++            }
++            if (cmd === 'taskkill') {
++                const pid = Number(args[args.indexOf('/PID') + 1])
++                signalled.push(pid); alive.delete(pid)
++            }
++            return completed('')
++        })
++        const done = killProcessTreeByPid(100, true, report)
++        await vi.advanceTimersByTimeAsync(3_000)
++        await expect(done).resolves.toBe(false)
++        expect(signalled).toEqual([100])
++        expect(alive.has(200)).toBe(true)
++        expect(report).toHaveBeenCalledTimes(1)
++        expect(report.mock.calls[0]![0]).toMatchObject({
++            rootPid: 100, outcome: 'unconfirmed',
++            members: expect.arrayContaining([expect.objectContaining({pid: 200, expectedMarker: null, alive: true})])
++        })
++    })
++
+     it('killProcessTreeByPid does not kill a surviving PID that was reused', async () => {
+         const { killProcessTreeByPid } = await import('./process')
++        const report = vi.fn((_report: import('./process').ProcessTreeStopReport) => { throw new Error('diagnostic sink unavailable') })
+         const alive = new Set([100, 200])
+         // After root kill, PID 200 is recycled with a new generation marker.
+         let rootGone = false
+@@ -451,12 +568,20 @@ describe('killProcess on Windows (orphanReap / stopSession)', () => {
+             return completed('')
+         })
+ 
+-        const done = killProcessTreeByPid(100, true)
+-        await vi.advanceTimersByTimeAsync(500)
+-        // Root signalled; reused descendant left alone → tree verify fails closed.
+-        await expect(done).resolves.toBe(false)
++        const done = killProcessTreeByPid(100, true, report)
++        await vi.advanceTimersByTimeAsync(3_000)
++        // A different creation marker proves the original descendant exited.
++        // The new process must remain alive and must not block archive.
++        await expect(done).resolves.toBe(true)
+         expect(taskkillPids).toEqual([100])
+         expect(alive.has(200)).toBe(true)
++        expect(report).toHaveBeenCalledTimes(1)
++        expect(report.mock.calls[0]![0]).toMatchObject({
++            rootPid: 100, outcome: 'verified',
++            members: expect.arrayContaining([expect.objectContaining({
++                pid: 200, expectedMarker: 'gen-200', observedMarker: 'gen-200-reused', resolution: 'generation_changed'
++            })])
++        })
+     })
+ 
+     it('windowsProcessTreeCimCommand is newline-separated (WinPS-parseable)', async () => {
+diff --git a/cli/src/utils/process.ts b/cli/src/utils/process.ts
+index 5acea9b81..7b1bfd2df 100644
+--- a/cli/src/utils/process.ts
++++ b/cli/src/utils/process.ts
+@@ -385,37 +385,113 @@ async function killProcessTree(pid: number, force: boolean): Promise<boolean> {
+   return pids.every((candidate) => !isProcessAlive(candidate));
+ }
+ 
++export type ProcessTreeStopReport = {
++  rootPid: number;
++  outcome: 'verified' | 'scan_failed' | 'unconfirmed';
++  elapsedMs: number;
++  phaseMs: Record<string, number>;
++  members: Array<{
++    pid: number;
++    expectedMarker: string | null;
++    observedMarker?: string | null;
++    alive?: boolean;
++    observedAt?: number;
++    resolution?: 'exited' | 'generation_changed';
++  }>;
++};
++
+ /** Kill a PID and all descendants, verifying the complete tree is gone. */
+-export async function killProcessTreeByPid(pid: number, force: boolean = false): Promise<boolean> {
++export async function killProcessTreeByPid(
++  pid: number,
++  force: boolean = false,
++  onReport?: (report: ProcessTreeStopReport) => void
++): Promise<boolean> {
+   const n = typeof pid === 'number' ? pid : Number(pid)
+   if (!Number.isFinite(n) || n <= 0) return false;
+   if (isWindows()) {
++    const started = Date.now();
++    const phaseMs: Record<string, number> = {};
++    const members = new Map<number, ProcessTreeStopReport['members'][number]>();
++    const finish = (outcome: ProcessTreeStopReport['outcome']): boolean => {
++      // Report observations already made by the verifier. Re-probing here can
++      // both hide the failing instant and add seconds to an archive request.
++      try { onReport?.({ rootPid: n, outcome, elapsedMs: Date.now() - started, phaseMs, members: [...members.values()] }); }
++      catch { /* Diagnostics must not change the termination decision. */ }
++      return outcome === 'verified';
++    };
+     // taskkill /T exit 0 means "signalled", not "every descendant is dead".
+     // Collect the tree + generation markers first, signal the root with /T,
+     // then individually signal any surviving pre-kill PIDs whose generation
+     // still matches (PID reuse must not be killed) (#1911 bot Major).
+     const treePids = collectWindowsProcessTree(n);
++    phaseMs.scan = Date.now() - started;
+     if (treePids === 'scan_failed') {
+       // Still signal the (known) root — scan failure must not mean zero kill —
+       // but never claim stopped without a full-tree verify (#1911 Opus Major).
+       await signalAndWaitWindowsRoot(n, force);
+-      return false;
++      phaseMs.signal = Date.now() - started - phaseMs.scan;
++      return finish('scan_failed');
+     }
+     const markers = new Map<number, string | null>();
+     for (const candidate of treePids) {
++      // CIM/tasklist probes are synchronous and can take seconds per PID.
++      // Let the runner accept session-started webhooks between probes.
++      await new Promise<void>(resolve => setImmediate(resolve));
+       markers.set(candidate, getProcessStartMarker(candidate));
++      members.set(candidate, { pid: candidate, expectedMarker: markers.get(candidate) ?? null });
+     }
++    phaseMs.markers = Date.now() - started - phaseMs.scan;
++    const signallingStarted = Date.now();
+     await signalAndWaitWindowsRoot(n, force);
+     for (const survivor of treePids) {
++      await new Promise<void>(resolve => setImmediate(resolve));
+       if (survivor === n) continue;
+       if (!isProcessAlive(survivor)) continue;
+       const expected = markers.get(survivor);
+       const current = getProcessStartMarker(survivor);
+-      // Unverifiable or reused PID — leave alone; final every() fails closed.
++      Object.assign(members.get(survivor)!, { observedMarker: current, observedAt: Date.now() });
++      // Unverifiable or reused PID — never signal the new/unknown process.
+       if (!expected || !current || current !== expected) continue;
+       await signalAndWaitWindowsRoot(survivor, true);
+     }
+-    return treePids.every((candidate) => !isProcessAlive(candidate));
++    phaseMs.signal = Date.now() - signallingStarted;
++    // A wrapper can exit before its descendants finish draining. Keep the
++    // full-tree proof, allowing a bounded grace period without signalling an
++    // unverified or reused PID.
++    const deadline = Date.now() + 2_000;
++    const verificationStarted = Date.now();
++    const remaining = new Set(treePids);
++    for (;;) {
++      for (const candidate of remaining) {
++        await new Promise<void>(resolve => setImmediate(resolve));
++        const member = members.get(candidate)!;
++        const alive = isProcessAlive(candidate);
++        Object.assign(member, { alive, observedAt: Date.now() });
++        if (!alive) {
++          member.resolution = 'exited';
++          remaining.delete(candidate);
++          continue;
++        }
++        const expected = markers.get(candidate);
++        const current = expected ? getProcessStartMarker(candidate) : null;
++        member.observedMarker = current;
++        // A different known generation proves this tree member exited. Once
++        // proven gone, a PID must never re-enter the tree through later reuse.
++        // A missing marker alone is ambiguous and cannot prove termination.
++        if (expected && current && current !== expected) {
++          member.resolution = 'generation_changed';
++          remaining.delete(candidate);
++        } else if (!isProcessAlive(candidate)) {
++          Object.assign(member, { alive: false, resolution: 'exited' });
++          remaining.delete(candidate);
++        }
++        member.observedAt = Date.now();
++      }
++      phaseMs.verify = Date.now() - verificationStarted;
++      if (remaining.size === 0) return finish('verified');
++      if (Date.now() >= deadline) return finish('unconfirmed');
++      await new Promise(resolve => setTimeout(resolve, 100));
++    }
+   }
+   return killProcessTree(n, force);
+ }
+@@ -457,7 +533,8 @@ async function waitForProcessToDie(pid: number, force: boolean): Promise<void> {
+ 
+ export async function killProcessByChildProcess(
+   child: ChildProcess,
+-  force: boolean = false
++  force: boolean = false,
++  onReport?: (report: ProcessTreeStopReport) => void
+ ): Promise<boolean> {
+   const pid = child.pid;
+   if (!pid) {
+@@ -465,5 +542,5 @@ export async function killProcessByChildProcess(
+   }
+ 
+   // Both platforms: tree-kill + full-tree verify (win32 must not trust root-only).
+-  return killProcessTreeByPid(pid, force);
++  return killProcessTreeByPid(pid, force, onReport);
+ }

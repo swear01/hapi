@@ -1,0 +1,741 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Mon, 19 Oct 2026 15:39:30 +0000
+Subject: [PATCH 41/94] carry(upstream): PR #2061 fix(web,cli): clarify archive
+ cleanup progress and bound shutdown waits
+
+Upstream-head: 1c675a90c2c8c5b84573291b3d3c9c205a13fc57
+---
+ cli/src/utils/process.test.ts                 |  44 ++++++++
+ cli/src/utils/process.ts                      |  23 ++--
+ .../components/ArchiveSessionDialog.test.tsx  | 104 ++++++++++++++++++
+ web/src/components/ArchiveSessionDialog.tsx   |  44 ++++++++
+ web/src/components/DeleteSessionDialog.tsx    |  30 +++++
+ .../SessionHeader.archive-delete.test.tsx     |  53 +++++++++
+ web/src/components/SessionHeader.tsx          |  23 ++--
+ web/src/components/SessionList.tsx            |  23 ++--
+ web/src/components/ui/ConfirmDialog.tsx       |  26 ++++-
+ .../mutations/useSessionActions.test.tsx      |  30 +++++
+ web/src/hooks/mutations/useSessionActions.ts  |  11 +-
+ web/src/lib/locales/en.ts                     |   6 +
+ web/src/lib/locales/ru.ts                     |   6 +
+ web/src/lib/locales/zh-CN.ts                  |   6 +
+ 14 files changed, 385 insertions(+), 44 deletions(-)
+ create mode 100644 web/src/components/ArchiveSessionDialog.test.tsx
+ create mode 100644 web/src/components/ArchiveSessionDialog.tsx
+ create mode 100644 web/src/components/DeleteSessionDialog.tsx
+ create mode 100644 web/src/components/SessionHeader.archive-delete.test.tsx
+
+diff --git a/cli/src/utils/process.test.ts b/cli/src/utils/process.test.ts
+index 7c2b15594..bbbcbdecb 100644
+--- a/cli/src/utils/process.test.ts
++++ b/cli/src/utils/process.test.ts
+@@ -226,6 +226,50 @@ describe('getHapiRunnerProcessIdentity on Windows', () => {
+ })
+ 
+ describe('killProcess on Windows (orphanReap / stopSession)', () => {
++    it('includes slow liveness probes in the graceful shutdown deadline', async () => {
++        let graceStarted: number | undefined
++        let alive = true
++        let forcedAt: number | undefined
++        spawnSyncMock.mockImplementation((command: string, args: string[] = []) => {
++            if (command === 'tasklist') {
++                // A synchronous OS query consumes real time even though it is
++                // not part of the timer used to yield between observations.
++                vi.setSystemTime(Date.now() + 400)
++                return completed(alive ? 'hapi.exe 7788 Console' : 'INFO: No tasks')
++            }
++            if (command === 'taskkill' && args.includes('/F')) {
++                forcedAt = Date.now()
++                alive = false
++            } else if (command === 'taskkill') {
++                graceStarted = Date.now()
++            }
++            return completed('')
++        })
++        const stopped = killProcess(7788)
++        await vi.runAllTimersAsync()
++        await expect(stopped).resolves.toBe(true)
++        expect(forcedAt).toBeDefined()
++        expect(graceStarted).toBeDefined()
++        // The two-second wait plus the final observation and taskkill's own
++        // liveness recheck, each taking 400ms in this scenario.
++        expect(forcedAt! - graceStarted!).toBeLessThanOrEqual(2_800)
++    })
++
++    it('bounds slow probes after forced shutdown without treating a live process as stopped', async () => {
++        const started = Date.now()
++        spawnSyncMock.mockImplementation((command: string) => {
++            if (command === 'tasklist') {
++                vi.setSystemTime(Date.now() + 400)
++                return completed('hapi.exe 7788 Console')
++            }
++            return completed('')
++        })
++        const stopped = killProcess(7788, true)
++        await vi.runAllTimersAsync()
++        await expect(stopped).resolves.toBe(false)
++        expect(Date.now() - started).toBeLessThanOrEqual(3_200)
++    })
++
+     beforeAll(() => {
+         if (!originalPlatformDescriptor?.configurable) {
+             throw new Error('process.platform is not configurable in this runtime')
+diff --git a/cli/src/utils/process.ts b/cli/src/utils/process.ts
+index 3786e7602..1842e0369 100644
+--- a/cli/src/utils/process.ts
++++ b/cli/src/utils/process.ts
+@@ -573,11 +573,15 @@ async function waitForProcessToDie(pid: number, force: boolean): Promise<void> {
+   // Windows isProcessAlive shells out to tasklist; keep the poll coarse so a
+   // stop cannot burn the runner event loop for seconds (#1911 Overseer).
+   const pollInterval = isWindows() ? 100 : 20;
+-  let waited = 0;
+-
+-  while (isProcessAlive(pid) && waited < maxWait) {
+-    await new Promise(r => setTimeout(r, pollInterval));
+-    waited += pollInterval;
++  let deadline = Date.now() + maxWait;
++
++  // OS probes are synchronous on Windows. Count their time against the
++  // grace period too, otherwise twenty slow tasklist calls can turn two
++  // seconds of graceful shutdown into a much longer archive request.
++  while (Date.now() < deadline && isProcessAlive(pid)) {
++    const remaining = deadline - Date.now();
++    if (remaining <= 0) break;
++    await new Promise(r => setTimeout(r, Math.min(pollInterval, remaining)));
+   }
+ 
+   // Graceful kill didn't finish — escalate (same structure on both platforms).
+@@ -591,10 +595,11 @@ async function waitForProcessToDie(pid: number, force: boolean): Promise<void> {
+     } catch {
+       return;
+     }
+-    waited = 0;
+-    while (isProcessAlive(pid) && waited < 1000) {
+-      await new Promise(r => setTimeout(r, pollInterval));
+-      waited += pollInterval;
++    deadline = Date.now() + 1000;
++    while (Date.now() < deadline && isProcessAlive(pid)) {
++      const remaining = deadline - Date.now();
++      if (remaining <= 0) break;
++      await new Promise(r => setTimeout(r, Math.min(pollInterval, remaining)));
+     }
+   }
+ }
+diff --git a/web/src/components/ArchiveSessionDialog.test.tsx b/web/src/components/ArchiveSessionDialog.test.tsx
+new file mode 100644
+index 000000000..0b3a414b4
+--- /dev/null
++++ b/web/src/components/ArchiveSessionDialog.test.tsx
+@@ -0,0 +1,104 @@
++import { StrictMode, useState } from 'react'
++import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import { I18nProvider } from '@/lib/i18n-context'
++import { ToastProvider, useToast } from '@/lib/toast-context'
++import { ArchiveSessionDialog } from './ArchiveSessionDialog'
++
++afterEach(cleanup)
++
++function pendingArchive() {
++    let resolve!: () => void
++    let reject!: (error: Error) => void
++    const promise = new Promise<void>((done, fail) => { resolve = done; reject = fail })
++    return { promise, resolve, reject }
++}
++
++function Harness(props: { active: boolean; confirm: () => Promise<void>; unmountOnClose?: boolean }) {
++    const [open, setOpen] = useState(true)
++    const [pending, setPending] = useState(false)
++    const { toasts } = useToast()
++    return <>
++        {open || !props.unmountOnClose ? <ArchiveSessionDialog
++            isOpen={open} onClose={() => setOpen(false)}
++            sessionId="session-1" sessionName="My session" active={props.active}
++            isPending={pending} onConfirm={async () => {
++                setPending(true)
++                try { await props.confirm() } finally { setPending(false) }
++            }}
++        /> : null}
++        {toasts.map(toast => <div key={toast.id} role="alert">{toast.title}: {toast.body}</div>)}
++    </>
++}
++
++function view(active: boolean, confirm: () => Promise<void>, unmountOnClose = false) {
++    return <StrictMode><I18nProvider><ToastProvider>
++        <Harness active={active} confirm={confirm} unmountOnClose={unmountOnClose} />
++    </ToastProvider></I18nProvider></StrictMode>
++}
++
++describe('ArchiveSessionDialog', () => {
++    it('shows cleanup progress after inactive SSE and still waits for HTTP success', async () => {
++        const archive = pendingArchive()
++        const confirm = vi.fn(() => archive.promise)
++        const rendered = render(view(true, confirm))
++        fireEvent.click(screen.getByRole('button', { name: 'Archive' }))
++        expect(screen.getByRole('button', { name: 'Archiving…' })).toBeDisabled()
++        expect(screen.getByText(/Archiving this session\. You can close this window/)).toBeVisible()
++        expect(within(screen.getByRole('dialog')).getAllByRole('button', { name: 'Close' })).toHaveLength(2)
++        rendered.rerender(view(false, confirm))
++        expect(screen.getByText(/Session disconnected\. Confirming archive/)).toBeVisible()
++        expect(screen.getByRole('button', { name: 'Confirming cleanup…' })).toBeDisabled()
++        expect(within(screen.getByRole('dialog')).getAllByRole('button', { name: 'Close' })[0]).toBeEnabled()
++        expect(confirm).toHaveBeenCalledTimes(1)
++        await act(async () => archive.resolve())
++        await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
++        expect(screen.queryByRole('alert')).not.toBeInTheDocument()
++    })
++
++    it.each([
++        { active: true, unmountOnClose: false },
++        { active: true, unmountOnClose: true },
++        { active: false, unmountOnClose: false },
++        { active: false, unmountOnClose: true },
++    ])('surfaces a failure after dismissal (active=$active, unmount=$unmountOnClose)', async ({ active, unmountOnClose }) => {
++        const archive = pendingArchive()
++        const confirm = vi.fn(() => archive.promise)
++        const rendered = render(view(true, confirm, unmountOnClose))
++        fireEvent.click(screen.getByRole('button', { name: 'Archive' }))
++        rendered.rerender(view(active, confirm, unmountOnClose))
++        expect(within(screen.getByRole('dialog')).getAllByRole('button', { name: 'Close' })).toHaveLength(2)
++        fireEvent.click(within(screen.getByRole('dialog')).getAllByRole('button', { name: 'Close' })[0]!)
++        expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
++        await act(async () => archive.reject(new Error('Session process is still running')))
++        expect(await screen.findByRole('alert')).toHaveTextContent('Archive could not be confirmed: Session process is still running')
++        expect(confirm).toHaveBeenCalledTimes(1)
++    })
++
++    it.each([true, false])('keeps the archive running after closing (active=%s)', async active => {
++        const archive = pendingArchive()
++        const confirm = vi.fn(() => archive.promise)
++        render(view(active, confirm))
++        fireEvent.click(screen.getByRole('button', { name: 'Archive' }))
++        const dialog = screen.getByRole('dialog')
++        const closeButtons = within(dialog).getAllByRole('button', { name: 'Close' })
++        expect(closeButtons).toHaveLength(2)
++        fireEvent.click(closeButtons[0]!)
++        expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
++        expect(confirm).toHaveBeenCalledTimes(1)
++        await act(async () => archive.resolve())
++        expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
++        expect(screen.queryByRole('alert')).not.toBeInTheDocument()
++    })
++
++    it('keeps failures visible in an open dialog without claiming success', async () => {
++        const archive = pendingArchive()
++        render(view(false, () => archive.promise))
++        fireEvent.click(screen.getByRole('button', { name: 'Archive' }))
++        await act(async () => archive.reject(new Error('Stop not confirmed')))
++        expect(screen.getByRole('dialog')).toBeVisible()
++        expect(screen.getByText('Stop not confirmed')).toBeVisible()
++        expect(screen.getByRole('button', { name: 'Archive' })).toBeEnabled()
++        expect(screen.queryByRole('alert')).not.toBeInTheDocument()
++    })
++})
+diff --git a/web/src/components/ArchiveSessionDialog.tsx b/web/src/components/ArchiveSessionDialog.tsx
+new file mode 100644
+index 000000000..09f224188
+--- /dev/null
++++ b/web/src/components/ArchiveSessionDialog.tsx
+@@ -0,0 +1,44 @@
++import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
++import { useTranslation } from '@/lib/use-translation'
++import { useToast } from '@/lib/toast-context'
++
++type ArchiveSessionDialogProps = {
++    isOpen: boolean
++    onClose: () => void
++    sessionId: string
++    sessionName: string
++    active: boolean
++    onConfirm: () => Promise<void>
++    isPending: boolean
++}
++
++export function ArchiveSessionDialog(props: ArchiveSessionDialogProps) {
++    const { t } = useTranslation()
++    const { addToast } = useToast()
++    // Inactive SSE can arrive before the archive request has finished its
++    // process checks. It is progress, not proof that cleanup succeeded.
++    const confirmingCleanup = props.isPending && !props.active
++    return (
++        <ConfirmDialog
++            isOpen={props.isOpen}
++            onClose={props.onClose}
++            title={t('dialog.archive.title')}
++            description={confirmingCleanup
++                ? t('dialog.archive.cleanupDescription')
++                : props.isPending
++                    ? t('dialog.archive.pendingDescription')
++                    : t('dialog.archive.description', { name: props.sessionName })}
++            confirmLabel={t('dialog.archive.confirm')}
++            confirmingLabel={t(confirmingCleanup ? 'dialog.archive.cleaning' : 'dialog.archive.confirming')}
++            onConfirm={props.onConfirm}
++            isPending={props.isPending}
++            allowDismissWhilePending
++            onBackgroundError={(message) => addToast({
++                title: t('dialog.archive.error'), body: message,
++                sessionId: props.sessionId, url: `/sessions/${props.sessionId}`
++            })}
++            destructive
++            centerTitle
++        />
++    )
++}
+diff --git a/web/src/components/DeleteSessionDialog.tsx b/web/src/components/DeleteSessionDialog.tsx
+new file mode 100644
+index 000000000..9298e4326
+--- /dev/null
++++ b/web/src/components/DeleteSessionDialog.tsx
+@@ -0,0 +1,30 @@
++import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
++import { useTranslation } from '@/lib/use-translation'
++
++type DeleteSessionDialogProps = {
++    isOpen: boolean
++    onClose: () => void
++    description: string
++    onConfirm: () => Promise<void>
++    isPending: boolean
++    isArchiving: boolean
++}
++
++export function DeleteSessionDialog(props: DeleteSessionDialogProps) {
++    const { t } = useTranslation()
++    return (
++        <ConfirmDialog
++            isOpen={props.isOpen}
++            onClose={props.onClose}
++            title={t('dialog.delete.title')}
++            description={props.isArchiving ? t('dialog.delete.waitingForArchiveDescription') : props.description}
++            confirmLabel={t(props.isArchiving ? 'dialog.delete.waitingForArchive' : 'dialog.delete.confirm')}
++            confirmingLabel={t('dialog.delete.confirming')}
++            onConfirm={props.onConfirm}
++            isPending={props.isPending && !props.isArchiving}
++            isConfirmDisabled={props.isArchiving}
++            destructive
++            centerTitle
++        />
++    )
++}
+diff --git a/web/src/components/SessionHeader.archive-delete.test.tsx b/web/src/components/SessionHeader.archive-delete.test.tsx
+new file mode 100644
+index 000000000..7cc286c58
+--- /dev/null
++++ b/web/src/components/SessionHeader.archive-delete.test.tsx
+@@ -0,0 +1,53 @@
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
++import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
++import { afterEach, expect, it, vi } from 'vitest'
++import { SessionHeader } from './SessionHeader'
++import { ToastProvider } from '@/lib/toast-context'
++import { I18nProvider } from '@/lib/i18n-context'
++import type { Session } from '@/types/api'
++import type { ApiClient } from '@/api/client'
++
++afterEach(() => { cleanup(); localStorage.clear() })
++
++it('waits for archive confirmation before allowing an explicitly confirmed delete', async () => {
++    let finishArchive!: () => void
++    const archivePromise = new Promise<void>(resolve => { finishArchive = resolve })
++    const archiveSession = vi.fn(() => archivePromise)
++    let finishDelete!: () => void
++    const deletePromise = new Promise<void>(resolve => { finishDelete = resolve })
++    const deleteSession = vi.fn(() => deletePromise)
++    const api = { archiveSession, deleteSession, getMachines: vi.fn(async () => ({ machines: [] })),
++        getScratchlist: vi.fn(async () => ({ entries: [] })) } as unknown as ApiClient
++    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
++    const session: Session = { id: 'archive-delete-test', namespace: 'default', seq: 0, createdAt: 0, updatedAt: 0,
++        active: true, activeAt: 0, metadata: { flavor: 'codex', path: '/repo', host: 'test' }, metadataVersion: 0,
++        agentState: null, agentStateVersion: 0, thinking: false, thinkingAt: 0, model: null,
++        modelReasoningEffort: null, effort: null, serviceTier: null }
++    const view = (active: boolean) => <QueryClientProvider client={client}><ToastProvider><I18nProvider>
++        <SessionHeader session={{ ...session, active }} api={api} onBack={vi.fn()} />
++    </I18nProvider></ToastProvider></QueryClientProvider>
++    const rendered = render(view(true))
++    fireEvent.click(screen.getByTitle('More actions'))
++    fireEvent.click(screen.getByRole('menuitem', { name: 'Archive' }))
++    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Archive' }))
++    await waitFor(() => expect(archiveSession).toHaveBeenCalledOnce())
++    rendered.rerender(view(false))
++    await waitFor(() => expect(screen.getByRole('button', { name: 'Confirming cleanup…' })).toBeVisible())
++    fireEvent.click(within(screen.getByRole('dialog')).getAllByRole('button', { name: 'Close' })[0]!)
++    fireEvent.click(screen.getByTitle('More actions'))
++    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }))
++    const dialog = screen.getByRole('dialog')
++    expect(within(dialog).getByRole('button', { name: 'Waiting for archive to finish…' })).toBeDisabled()
++    expect(within(dialog).getByText('Archiving is still in progress. Wait for it to finish, then confirm deletion.')).toBeVisible()
++    expect(within(dialog).getByRole('button', { name: 'Cancel' })).toBeEnabled()
++    expect(within(dialog).queryByRole('button', { name: 'Deleting…' })).not.toBeInTheDocument()
++    expect(deleteSession).not.toHaveBeenCalled()
++    await act(async () => finishArchive())
++    await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Delete' })).toBeEnabled())
++    expect(deleteSession).not.toHaveBeenCalled()
++    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }))
++    await waitFor(() => expect(deleteSession).toHaveBeenCalledOnce())
++    expect(within(dialog).getByRole('button', { name: 'Deleting…' })).toBeDisabled()
++    await act(async () => finishDelete())
++    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
++})
+diff --git a/web/src/components/SessionHeader.tsx b/web/src/components/SessionHeader.tsx
+index 0685557f6..d2605f8c6 100644
+--- a/web/src/components/SessionHeader.tsx
++++ b/web/src/components/SessionHeader.tsx
+@@ -8,6 +8,8 @@ import { SessionActionMenu } from '@/components/SessionActionMenu'
+ import { SessionExportDialog } from '@/components/SessionExportDialog'
+ import { RenameSessionDialog } from '@/components/RenameSessionDialog'
+ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
++import { ArchiveSessionDialog } from '@/components/ArchiveSessionDialog'
++import { DeleteSessionDialog } from '@/components/DeleteSessionDialog'
+ import { useScratchlistCount } from '@/lib/use-scratchlist-count'
+ import { formatReopenError } from '@/lib/reopenError'
+ import { formatReasoningLabel, getReasoningEffortForFlavor } from '@/lib/codexStatusLabels'
+@@ -246,7 +248,7 @@ export function SessionHeader(props: {
+     const [isSyncingCodex, setIsSyncingCodex] = useState(false)
+     const [isSyncingPi, setIsSyncingPi] = useState(false)
+ 
+-    const { archiveSession, reopenSession, renameSession, suggestSessionTitle, updateSessionSummary, setPinMode, deleteSession, isPending } = useSessionActions(
++    const { archiveSession, reopenSession, renameSession, suggestSessionTitle, updateSessionSummary, setPinMode, deleteSession, isPending, isArchiving } = useSessionActions(
+         api,
+         session.id,
+         session.metadata?.flavor ?? null
+@@ -608,23 +610,19 @@ export function SessionHeader(props: {
+                 api={api}
+             />
+ 
+-            <ConfirmDialog
++            <ArchiveSessionDialog
+                 isOpen={archiveOpen}
+                 onClose={() => setArchiveOpen(false)}
+-                title={t('dialog.archive.title')}
+-                description={t('dialog.archive.description', { name: title })}
+-                confirmLabel={t('dialog.archive.confirm')}
+-                confirmingLabel={t('dialog.archive.confirming')}
++                sessionId={session.id}
++                sessionName={title}
++                active={session.active}
+                 onConfirm={archiveSession}
+                 isPending={isPending}
+-                destructive
+-                centerTitle
+             />
+ 
+-            <ConfirmDialog
++            <DeleteSessionDialog
+                 isOpen={deleteOpen}
+                 onClose={() => setDeleteOpen(false)}
+-                title={t('dialog.delete.title')}
+                 description={
+                     scratchlistCount > 0
+                         ? `${t('dialog.delete.description', { name: title })} ${t(
+@@ -635,12 +633,9 @@ export function SessionHeader(props: {
+                         )}`
+                         : t('dialog.delete.description', { name: title })
+                 }
+-                confirmLabel={t('dialog.delete.confirm')}
+-                confirmingLabel={t('dialog.delete.confirming')}
+                 onConfirm={handleDelete}
+                 isPending={isPending}
+-                destructive
+-                centerTitle
++                isArchiving={isArchiving}
+             />
+         </>
+     )
+diff --git a/web/src/components/SessionList.tsx b/web/src/components/SessionList.tsx
+index f0f5458f8..5b0ba0103 100644
+--- a/web/src/components/SessionList.tsx
++++ b/web/src/components/SessionList.tsx
+@@ -18,6 +18,8 @@ import { SessionActionMenu } from '@/components/SessionActionMenu'
+ import { SessionExportDialog } from '@/components/SessionExportDialog'
+ import { RenameSessionDialog } from '@/components/RenameSessionDialog'
+ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
++import { ArchiveSessionDialog } from '@/components/ArchiveSessionDialog'
++import { DeleteSessionDialog } from '@/components/DeleteSessionDialog'
+ import { CopyIcon, CheckIcon, MarkAllReadIcon } from '@/components/icons'
+ 
+ function PinnedSectionIcon(props: { className?: string }) {
+@@ -1254,7 +1256,7 @@ function SessionItem(props: {
+         ? t('session.action.reopenCursorUnverified')
+         : undefined
+ 
+-    const { archiveSession, reopenSession, renameSession, suggestSessionTitle, updateSessionSummary, deleteSession, setPinMode, isPending } = useSessionActions(
++    const { archiveSession, reopenSession, renameSession, suggestSessionTitle, updateSessionSummary, deleteSession, setPinMode, isPending, isArchiving } = useSessionActions(
+         api,
+         s.id,
+         s.metadata?.flavor ?? null
+@@ -1406,32 +1408,25 @@ function SessionItem(props: {
+             ) : null}
+ 
+             {archiveOpen ? (
+-                <ConfirmDialog
++                <ArchiveSessionDialog
+                     isOpen={true}
+                     onClose={() => setArchiveOpen(false)}
+-                    title={t('dialog.archive.title')}
+-                    description={t('dialog.archive.description', { name: sessionName })}
+-                    confirmLabel={t('dialog.archive.confirm')}
+-                    confirmingLabel={t('dialog.archive.confirming')}
++                    sessionId={s.id}
++                    sessionName={sessionName}
++                    active={s.active}
+                     onConfirm={archiveSession}
+                     isPending={isPending}
+-                    destructive
+-                    centerTitle
+                 />
+             ) : null}
+ 
+             {deleteOpen ? (
+-                <ConfirmDialog
++                <DeleteSessionDialog
+                     isOpen={true}
+                     onClose={() => setDeleteOpen(false)}
+-                    title={t('dialog.delete.title')}
+                     description={t('dialog.delete.description', { name: sessionName })}
+-                    confirmLabel={t('dialog.delete.confirm')}
+-                    confirmingLabel={t('dialog.delete.confirming')}
+                     onConfirm={deleteSession}
+                     isPending={isPending}
+-                    destructive
+-                    centerTitle
++                    isArchiving={isArchiving}
+                 />
+             ) : null}
+         </>
+diff --git a/web/src/components/ui/ConfirmDialog.tsx b/web/src/components/ui/ConfirmDialog.tsx
+index 21234e1c5..fba82f01f 100644
+--- a/web/src/components/ui/ConfirmDialog.tsx
++++ b/web/src/components/ui/ConfirmDialog.tsx
+@@ -1,4 +1,4 @@
+-import { useState, useEffect } from 'react'
++import { useState, useEffect, useRef } from 'react'
+ import {
+     Dialog,
+     DialogContent,
+@@ -18,6 +18,9 @@ type ConfirmDialogProps = {
+     confirmingLabel: string
+     onConfirm: () => Promise<void>
+     isPending: boolean
++    isConfirmDisabled?: boolean
++    allowDismissWhilePending?: boolean
++    onBackgroundError?: (message: string) => void
+     destructive?: boolean
+     centerTitle?: boolean
+ }
+@@ -33,11 +36,20 @@ export function ConfirmDialog(props: ConfirmDialogProps) {
+         confirmingLabel,
+         onConfirm,
+         isPending,
++        isConfirmDisabled = false,
++        allowDismissWhilePending = false,
++        onBackgroundError,
+         destructive = false,
+         centerTitle = false
+     } = props
+ 
+     const [error, setError] = useState<string | null>(null)
++    const openRef = useRef(isOpen)
++    openRef.current = isOpen
++    useEffect(() => {
++        openRef.current = isOpen
++        return () => { openRef.current = false }
++    }, [isOpen])
+ 
+     // Clear error when dialog opens/closes
+     useEffect(() => {
+@@ -56,7 +68,11 @@ export function ConfirmDialog(props: ConfirmDialogProps) {
+                 err instanceof Error && err.message
+                     ? err.message
+                     : t('dialog.error.default')
+-            setError(message)
++            if (openRef.current) {
++                setError(message)
++            } else {
++                onBackgroundError?.(message)
++            }
+         }
+     }
+ 
+@@ -87,15 +103,15 @@ export function ConfirmDialog(props: ConfirmDialogProps) {
+                         type="button"
+                         variant="secondary"
+                         onClick={onClose}
+-                        disabled={isPending}
++                        disabled={isPending && !allowDismissWhilePending}
+                     >
+-                        {t('button.cancel')}
++                        {t(isPending && allowDismissWhilePending ? 'button.close' : 'button.cancel')}
+                     </Button>
+                     <Button
+                         type="button"
+                         variant={destructive ? 'destructive' : 'secondary'}
+                         onClick={handleConfirm}
+-                        disabled={isPending}
++                        disabled={isPending || isConfirmDisabled}
+                     >
+                         {isPending ? confirmingLabel : confirmLabel}
+                     </Button>
+diff --git a/web/src/hooks/mutations/useSessionActions.test.tsx b/web/src/hooks/mutations/useSessionActions.test.tsx
+index f62d60655..843356ddf 100644
+--- a/web/src/hooks/mutations/useSessionActions.test.tsx
++++ b/web/src/hooks/mutations/useSessionActions.test.tsx
+@@ -26,6 +26,36 @@ afterEach(() => {
+     vi.restoreAllMocks()
+ })
+ 
++describe('useSessionActions - archive progress across views', () => {
++    it.each(['success', 'failure'])('tracks an unfinished archive after its initiating view unmounts (%s)', async outcome => {
++        let resolve!: () => void
++        let reject!: (error: Error) => void
++        const archivePromise = new Promise<void>((done, fail) => { resolve = done; reject = fail })
++        const api = { archiveSession: vi.fn(() => archivePromise) } as unknown as ApiClient
++        const wrapper = createWrapper()
++        const initiator = renderHook(() => useSessionActions(api, 'session-A'), { wrapper })
++        let pending!: Promise<unknown>
++        act(() => { pending = initiator.result.current.archiveSession().catch(error => error) })
++        await waitFor(() => expect(initiator.result.current.isArchiving).toBe(true))
++        initiator.unmount()
++        const observer = renderHook(() => useSessionActions(api, 'session-A'), { wrapper })
++        const otherSession = renderHook(() => useSessionActions(api, 'session-B'), { wrapper })
++        expect(observer.result.current.isArchiving).toBe(true)
++        expect(observer.result.current.isPending).toBe(true)
++        expect(otherSession.result.current.isArchiving).toBe(false)
++        expect(otherSession.result.current.isPending).toBe(false)
++        await act(async () => {
++            if (outcome === 'success') resolve()
++            else reject(new Error('Archive failed'))
++            await pending
++        })
++        await waitFor(() => expect(observer.result.current.isArchiving).toBe(false))
++        expect(observer.result.current.isPending).toBe(false)
++        observer.unmount()
++        otherSession.unmount()
++    })
++})
++
+ describe('useSessionActions - reopenSession', () => {
+     it('invokes api.reopenSession with the session id and forwards the response', async () => {
+         const reopen = vi.fn(async (_sessionId: string) => ({
+diff --git a/web/src/hooks/mutations/useSessionActions.ts b/web/src/hooks/mutations/useSessionActions.ts
+index b48a5e814..2afa35c9e 100644
+--- a/web/src/hooks/mutations/useSessionActions.ts
++++ b/web/src/hooks/mutations/useSessionActions.ts
+@@ -1,4 +1,4 @@
+-import { useMutation, useQueryClient } from '@tanstack/react-query'
++import { useIsMutating, useMutation, useQueryClient } from '@tanstack/react-query'
+ import { isPermissionModeAllowedForFlavor } from '@hapi/protocol'
+ import type { ApiClient } from '@/api/client'
+ import type { CodexCollaborationMode, CopilotAgentMode, PermissionMode, SessionResponse, SessionsResponse } from '@/types/api'
+@@ -8,6 +8,7 @@ import { clearMessageWindow } from '@/lib/message-window-store'
+ import { isKnownFlavor } from '@hapi/protocol'
+ 
+ export const sessionModelMutationKey = (sessionId: string) => ['session-model', sessionId] as const
++export const sessionArchiveMutationKey = (sessionId: string | null) => ['session-archive', sessionId] as const
+ 
+ export function useSessionActions(
+     api: ApiClient | null,
+@@ -33,9 +34,13 @@ export function useSessionActions(
+     updateSessionSummary: (text: string) => Promise<void>
+     setPinMode: (mode: 'none' | 'project' | 'global') => Promise<void>
+     deleteSession: () => Promise<void>
++    isArchiving: boolean
+     isPending: boolean
+ } {
+     const queryClient = useQueryClient()
++    // Header and list can each observe the same session, and a list row can
++    // remount after the inactive event. Keep archive progress per session.
++    const isArchiving = useIsMutating({ mutationKey: sessionArchiveMutationKey(sessionId), exact: true }) > 0
+ 
+     const markSessionActiveInCache = (targetSessionId: string) => {
+         // 中文注释：恢复/重开接口成功后，session-alive SSE 可能已经先到或稍后才到。
+@@ -90,6 +95,7 @@ export function useSessionActions(
+     })
+ 
+     const archiveMutation = useMutation({
++        mutationKey: sessionArchiveMutationKey(sessionId),
+         mutationFn: async () => {
+             if (!api || !sessionId) {
+                 throw new Error('Session unavailable')
+@@ -301,7 +307,8 @@ export function useSessionActions(
+         updateSessionSummary: summaryMutation.mutateAsync,
+         setPinMode: pinMutation.mutateAsync,
+         deleteSession: deleteMutation.mutateAsync,
+-        isPending: abortMutation.isPending
++        isArchiving,
++        isPending: isArchiving || abortMutation.isPending
+             || archiveMutation.isPending
+             || reopenMutation.isPending
+             || switchMutation.isPending
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index 2e2380582..727d50dbd 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -298,6 +298,10 @@ export default {
+   'dialog.archive.description': 'Are you sure you want to archive "{name}"? This will disconnect active session.',
+   'dialog.archive.confirm': 'Archive',
+   'dialog.archive.confirming': 'Archiving…',
++  'dialog.archive.pendingDescription': 'Archiving this session. You can close this window; archiving will continue in the background.',
++  'dialog.archive.cleaning': 'Confirming cleanup…',
++  'dialog.archive.cleanupDescription': 'Session disconnected. Confirming archive and background cleanup. You can close this window; archiving will continue.',
++  'dialog.archive.error': 'Archive could not be confirmed',
+   'dialog.reopen.errorTitle': 'Could not reopen session',
+   'dialog.reopen.dismiss': 'Dismiss',
+   'dialog.delete.title': 'Delete Session',
+@@ -306,6 +310,8 @@ export default {
+   'dialog.delete.scratchlist.other': 'This will also delete {n} scratchlist entries.',
+   'dialog.delete.confirm': 'Delete',
+   'dialog.delete.confirming': 'Deleting…',
++  'dialog.delete.waitingForArchive': 'Waiting for archive to finish…',
++  'dialog.delete.waitingForArchiveDescription': 'Archiving is still in progress. Wait for it to finish, then confirm deletion.',
+   'dialog.error.default': 'Operation failed. Please try again.',
+ 
+   // Session export
+diff --git a/web/src/lib/locales/ru.ts b/web/src/lib/locales/ru.ts
+index 7a90aed8d..2c3602685 100644
+--- a/web/src/lib/locales/ru.ts
++++ b/web/src/lib/locales/ru.ts
+@@ -297,6 +297,10 @@ export default {
+   'dialog.archive.description': 'Вы уверены, что хотите архивировать «{name}»? Активная сессия будет отключена.',
+   'dialog.archive.confirm': 'Архивировать',
+   'dialog.archive.confirming': 'Архивирование…',
++  'dialog.archive.pendingDescription': 'Архивируем сессию. Это окно можно закрыть: архивирование продолжится в фоне.',
++  'dialog.archive.cleaning': 'Проверка завершения…',
++  'dialog.archive.cleanupDescription': 'Сессия отключена. Проверяем архивирование и завершение фоновых процессов. Это окно можно закрыть: архивирование продолжится.',
++  'dialog.archive.error': 'Не удалось подтвердить архивирование',
+   'dialog.reopen.errorTitle': 'Не удалось открыть сессию заново',
+   'dialog.reopen.dismiss': 'Закрыть',
+   'dialog.delete.title': 'Удалить сессию',
+@@ -305,6 +309,8 @@ export default {
+   'dialog.delete.scratchlist.other': 'Также будут удалены записи блокнота: {n}.',
+   'dialog.delete.confirm': 'Удалить',
+   'dialog.delete.confirming': 'Удаление…',
++  'dialog.delete.waitingForArchive': 'Ожидание завершения архивации…',
++  'dialog.delete.waitingForArchiveDescription': 'Архивирование ещё продолжается. Дождитесь его завершения, затем подтвердите удаление.',
+   'dialog.error.default': 'Операция не удалась. Попробуйте ещё раз.',
+ 
+   // Экспорт сессии
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index 1c865ebff..4d481831a 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -299,6 +299,10 @@ export default {
+   'dialog.archive.description': '确定要归档 "{name}" 吗？这将断开活动会话。',
+   'dialog.archive.confirm': '归档',
+   'dialog.archive.confirming': '归档中…',
++  'dialog.archive.pendingDescription': '正在归档会话。关闭此窗口后，归档将在后台继续。',
++  'dialog.archive.cleaning': '正在确认清理…',
++  'dialog.archive.cleanupDescription': '会话已断开，正在确认归档和后台清理。关闭此窗口不会取消归档。',
++  'dialog.archive.error': '归档尚未确认完成',
+ 
+   'dialog.reopen.errorTitle': '无法重新打开会话',
+   'dialog.reopen.dismiss': '关闭',
+@@ -309,6 +313,8 @@ export default {
+   'dialog.delete.scratchlist.other': '这也将删除 {n} 条草稿清单条目。',
+   'dialog.delete.confirm': '删除',
+   'dialog.delete.confirming': '删除中…',
++  'dialog.delete.waitingForArchive': '等待归档完成…',
++  'dialog.delete.waitingForArchiveDescription': '归档尚未完成，暂时无法删除。请等待归档完成后再确认删除。',
+ 
+   'dialog.error.default': '操作失败，请重试。',
+ 

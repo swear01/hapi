@@ -1,0 +1,388 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Tue, 20 Oct 2026 06:33:05 +0000
+Subject: [PATCH 45/95] carry(upstream): PR #2070 fix(web): preserve composer
+ image previews across updates
+
+Upstream-head: 6f897d332aec316bd93a4e0c523ccec69a47b216
+---
+ e2e/composer-image-preview.spec.ts            |  72 +++++++++++++
+ playwright.image-preview.config.ts            |  12 +++
+ .../composer-image-preview-fixture.html       |  12 +++
+ .../composer-image-preview-fixture.tsx        |  80 ++++++++++++++
+ ...rtableComposerAttachments.preview.test.tsx | 100 ++++++++++++++++++
+ .../SortableComposerAttachments.tsx           |  28 +++--
+ 6 files changed, 295 insertions(+), 9 deletions(-)
+ create mode 100644 e2e/composer-image-preview.spec.ts
+ create mode 100644 playwright.image-preview.config.ts
+ create mode 100644 web/e2e-fixtures/composer-image-preview-fixture.html
+ create mode 100644 web/e2e-fixtures/composer-image-preview-fixture.tsx
+ create mode 100644 web/src/components/AssistantChat/SortableComposerAttachments.preview.test.tsx
+
+diff --git a/e2e/composer-image-preview.spec.ts b/e2e/composer-image-preview.spec.ts
+new file mode 100644
+index 000000000..3ea3408d1
+--- /dev/null
++++ b/e2e/composer-image-preview.spec.ts
+@@ -0,0 +1,72 @@
++import { expect, test } from '@playwright/test'
++
++const fixtureUrl = '/e2e-fixtures/composer-image-preview-fixture.html'
++const attachment = (name: string) => `[data-hapi-composer-attachment-id="${name}"]`
++
++for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
++    test.describe(`composer image preview at ${viewport.width}px`, () => {
++        test.use({ viewport })
++        test.beforeEach(async ({ page }) => {
++            await page.goto(fixtureUrl)
++            await expect(page.locator(attachment('second.png'))).toBeVisible()
++        })
++
++        test('retains active image, zoom and draft across repeated status updates', async ({ page }) => {
++            await page.getByRole('textbox', { name: 'Draft' }).fill('draft stays intact')
++            await page.locator(attachment('first.png')).getByTitle('Click to zoom').click()
++            const dialog = page.getByRole('dialog')
++            await dialog.getByRole('button', { name: 'Next image' }).click()
++            await dialog.getByTitle('Zoom in', { exact: true }).click()
++            const ticks = Number(await page.getByTestId('refresh-count').textContent())
++            await expect.poll(async () => Number(await page.getByTestId('refresh-count').textContent())).toBeGreaterThan(ticks + 10)
++            await expect(page.getByRole('dialog', { name: 'second.png' })).toBeVisible()
++            await expect(dialog.getByTitle('Reset zoom')).toHaveText('125%')
++            await dialog.getByTitle('Close', { exact: true }).click()
++            await expect(dialog).toBeHidden()
++            await expect(page.getByRole('textbox', { name: 'Draft' })).toHaveValue('draft stays intact')
++        })
++
++        test('retains preview while drag controls change and clears removed attachments', async ({ page }) => {
++            await page.locator(attachment('first.png')).getByTitle('Click to zoom').click()
++            await page.evaluate(() => window.__composerImagePreview!.setDisabled(true))
++            await expect(page.getByRole('dialog', { name: 'first.png' })).toBeVisible()
++            await expect(page.getByRole('button', { name: 'Reorder attachment first.png' })).toHaveCount(0)
++            await page.evaluate(() => window.__composerImagePreview!.setDisabled(false))
++            await expect(page.getByRole('button', { name: 'Reorder attachment first.png' })).toHaveCount(1)
++            await expect(page.getByRole('dialog', { name: 'first.png' })).toBeVisible()
++            await page.evaluate(() => window.__composerImagePreview!.clearAttachments())
++            await expect(page.getByRole('dialog')).toBeHidden()
++            await expect(page.locator('[data-hapi-composer-attachment-id]')).toHaveCount(0)
++        })
++
++        test('keeps keyboard and pointer reordering, removal and explicit closing functional', async ({ page }) => {
++            const first = page.locator(attachment('first.png'))
++            await first.getByRole('button', { name: 'Reorder attachment first.png' }).press('ArrowRight')
++            await expect(page.locator('[data-hapi-composer-attachment-id]').first()).toHaveAttribute('data-hapi-composer-attachment-id', 'second.png')
++            const handle = await first.getByRole('button', { name: 'Reorder attachment first.png' }).boundingBox()
++            const target = await page.locator(attachment('second.png')).boundingBox()
++            await page.mouse.move(handle!.x + handle!.width / 2, handle!.y + handle!.height / 2)
++            await page.mouse.down()
++            await page.mouse.move(target!.x + 5, target!.y + target!.height / 2, { steps: 8 })
++            await page.mouse.up()
++            await expect(page.locator('[data-hapi-composer-attachment-id]').first()).toHaveAttribute('data-hapi-composer-attachment-id', 'first.png')
++            await expect(page.getByRole('dialog')).toBeHidden()
++            await page.locator(attachment('second.png')).getByTitle('Click to zoom').click()
++            await page.keyboard.press('Escape')
++            await expect(page.getByRole('dialog')).toBeHidden()
++            await page.locator(attachment('second.png')).getByRole('button', { name: 'Remove attachment' }).click()
++            await expect(page.locator(attachment('second.png'))).toHaveCount(0)
++        })
++
++        test('preserves sent-image preview on parent refresh and closes only on a backdrop click', async ({ page }) => {
++            await page.getByRole('region', { name: 'Sent images' }).getByTitle('Click to zoom').click()
++            const dialog = page.getByRole('dialog', { name: 'sent.png' })
++            await dialog.getByRole('img', { name: 'sent.png' }).click()
++            const ticks = Number(await page.getByTestId('refresh-count').textContent())
++            await expect.poll(async () => Number(await page.getByTestId('refresh-count').textContent())).toBeGreaterThan(ticks + 5)
++            await expect(dialog).toBeVisible()
++            await dialog.locator('div').last().click({ position: { x: 5, y: 5 } })
++            await expect(dialog).toBeHidden()
++        })
++    })
++}
+diff --git a/playwright.image-preview.config.ts b/playwright.image-preview.config.ts
+new file mode 100644
+index 000000000..5cf40e292
+--- /dev/null
++++ b/playwright.image-preview.config.ts
+@@ -0,0 +1,12 @@
++import { defineConfig } from '@playwright/test'
++import base from './playwright.config'
++
++export default defineConfig({
++    ...base,
++    testMatch: '**/composer-image-preview.spec.ts',
++    projects: [
++        ...base.projects!,
++        { name: 'firefox', use: { browserName: 'firefox' } },
++        { name: 'webkit', use: { browserName: 'webkit' } },
++    ],
++})
+diff --git a/web/e2e-fixtures/composer-image-preview-fixture.html b/web/e2e-fixtures/composer-image-preview-fixture.html
+new file mode 100644
+index 000000000..d638a4c63
+--- /dev/null
++++ b/web/e2e-fixtures/composer-image-preview-fixture.html
+@@ -0,0 +1,12 @@
++<!doctype html>
++<html lang="en">
++    <head>
++        <meta charset="UTF-8" />
++        <meta name="viewport" content="width=device-width, initial-scale=1" />
++        <title>HAPI composer image preview fixture</title>
++    </head>
++    <body>
++        <div id="root"></div>
++        <script type="module" src="./composer-image-preview-fixture.tsx"></script>
++    </body>
++</html>
+diff --git a/web/e2e-fixtures/composer-image-preview-fixture.tsx b/web/e2e-fixtures/composer-image-preview-fixture.tsx
+new file mode 100644
+index 000000000..be16b256e
+--- /dev/null
++++ b/web/e2e-fixtures/composer-image-preview-fixture.tsx
+@@ -0,0 +1,80 @@
++import React, { useEffect, useState } from 'react'
++import ReactDOM from 'react-dom/client'
++import { AssistantRuntimeProvider, ComposerPrimitive, useAuiState, useLocalRuntime, type AttachmentAdapter, type ChatModelAdapter } from '@assistant-ui/react'
++import '../src/index.css'
++import { SortableComposerAttachments } from '../src/components/AssistantChat/SortableComposerAttachments'
++import { MessageAttachments } from '../src/components/AssistantChat/messages/MessageAttachments'
++import { moveAttachmentId, reconcileAttachmentOrder } from '../src/lib/attachmentOrder'
++
++const previewUrl = `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="360" height="220"><rect width="360" height="220" fill="#1769aa"/><circle cx="180" cy="110" r="70" fill="#ffc107"/></svg>')}`
++const model: ChatModelAdapter = { async *run() {} }
++const attachmentAdapter: AttachmentAdapter = {
++    accept: 'image/*',
++    async add({ file }) {
++        return {
++            id: file.name, name: file.name, type: 'image', contentType: file.type, file,
++            status: { type: 'requires-action', reason: 'composer-send' }, previewUrl,
++        }
++    },
++    async remove() {},
++    async send(attachment) {
++        return { ...attachment, status: { type: 'complete' }, content: [{ type: 'image', image: previewUrl }] }
++    },
++}
++
++declare global {
++    interface Window {
++        __composerImagePreview?: {
++            setDisabled: (disabled: boolean) => void
++            clearAttachments: () => Promise<void>
++        }
++    }
++}
++
++function Composer({ disabled }: { disabled: boolean }) {
++    const attachments = useAuiState((s) => s.composer.attachments)
++    const [order, setOrder] = useState<string[]>([])
++    const [ticks, setTicks] = useState(0)
++    useEffect(() => {
++        // Simulate status updates without a hub or a running agent.
++        const interval = window.setInterval(() => setTicks((value) => value + 1), 100)
++        return () => window.clearInterval(interval)
++    }, [])
++    const orderedIds = reconcileAttachmentOrder(order, attachments.map((a) => a.id))
++    return (
++        <main className="mx-auto max-w-2xl p-4">
++            <p data-testid="refresh-count">{ticks}</p>
++            <section aria-label="Sent images" className="mb-4">
++                <MessageAttachments attachments={[{ id: 'sent', filename: 'sent.png', mimeType: 'image/png', size: 1, path: '/sent.png', previewUrl }]} />
++            </section>
++            <section aria-label="Composer" className="rounded-xl border p-4">
++                <div className="flex flex-wrap gap-2">
++                    <SortableComposerAttachments
++                        attachments={attachments}
++                        orderedAttachmentIds={orderedIds}
++                        disabled={disabled}
++                        onReorder={(activeId, targetId, position) => setOrder(moveAttachmentId(orderedIds, activeId, targetId, position))}
++                    />
++                </div>
++                <ComposerPrimitive.Input aria-label="Draft" className="mt-4 w-full border" />
++            </section>
++        </main>
++    )
++}
++
++function App() {
++    const runtime = useLocalRuntime(model, { adapters: { attachments: attachmentAdapter } })
++    const [disabled, setDisabled] = useState(false)
++    useEffect(() => {
++        window.__composerImagePreview = { setDisabled, clearAttachments: () => runtime.thread.composer.clearAttachments() }
++        void (async () => {
++            for (const name of ['first.png', 'second.png']) {
++                await runtime.thread.composer.addAttachment(new File(['image'], name, { type: 'image/png' }))
++            }
++        })()
++        return () => { delete window.__composerImagePreview }
++    }, [runtime])
++    return <AssistantRuntimeProvider runtime={runtime}><Composer disabled={disabled} /></AssistantRuntimeProvider>
++}
++
++ReactDOM.createRoot(document.getElementById('root')!).render(<App />)
+diff --git a/web/src/components/AssistantChat/SortableComposerAttachments.preview.test.tsx b/web/src/components/AssistantChat/SortableComposerAttachments.preview.test.tsx
+new file mode 100644
+index 000000000..3b454b4a9
+--- /dev/null
++++ b/web/src/components/AssistantChat/SortableComposerAttachments.preview.test.tsx
+@@ -0,0 +1,100 @@
++import { AssistantRuntimeProvider, useLocalRuntime, useAuiState, type AssistantRuntime, type AttachmentAdapter, type ChatModelAdapter } from '@assistant-ui/react'
++import { act, fireEvent, render, screen, within } from '@testing-library/react'
++import { describe, expect, it, vi } from 'vitest'
++import { SortableComposerAttachments } from './SortableComposerAttachments'
++import { reconcileAttachmentOrder } from '@/lib/attachmentOrder'
++
++const previewUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jP1sAAAAASUVORK5CYII='
++const model: ChatModelAdapter = { async *run() {} }
++const attachmentAdapter: AttachmentAdapter = {
++    accept: 'image/*',
++    async add({ file }) {
++        return {
++            id: file.name, name: file.name, type: 'image', contentType: file.type, file,
++            status: { type: 'requires-action', reason: 'composer-send' }, previewUrl,
++        }
++    },
++    async remove() {},
++    async send(attachment) {
++        return { ...attachment, status: { type: 'complete' }, content: [{ type: 'image', image: previewUrl }] }
++    },
++}
++
++type HarnessProps = {
++    disabled?: boolean
++    order?: string[]
++    onReorder?: (activeId: string, targetId: string, position: 'before' | 'after') => void
++    runtimeRef: { current?: AssistantRuntime }
++}
++const noop = () => {}
++
++function Attachments(props: HarnessProps) {
++    const attachments = useAuiState((s) => s.composer.attachments)
++    // HappyComposer also reconciles order on every render, returning a fresh array.
++    const order = reconcileAttachmentOrder(props.order ?? [], attachments.map((a) => a.id))
++    return <SortableComposerAttachments attachments={attachments} orderedAttachmentIds={order} disabled={props.disabled} onReorder={props.onReorder ?? noop} />
++}
++
++function Harness(props: HarnessProps) {
++    const runtime = useLocalRuntime(model, { adapters: { attachments: attachmentAdapter } })
++    props.runtimeRef.current = runtime
++    return <AssistantRuntimeProvider runtime={runtime}><Attachments {...props} /></AssistantRuntimeProvider>
++}
++
++async function setup() {
++    const runtimeRef: HarnessProps['runtimeRef'] = {}
++    const view = render(<Harness runtimeRef={runtimeRef} />)
++    await act(async () => {
++        for (const name of ['first.png', 'second.png']) {
++            await runtimeRef.current!.thread.composer.addAttachment(new File(['image'], name, { type: 'image/png' }))
++        }
++    })
++    fireEvent.click(screen.getAllByTitle('Click to zoom')[0]!)
++    return { ...view, runtimeRef }
++}
++
++describe('sortable composer image preview with the real attachment runtime', () => {
++    it('keeps the active image and zoom across draft and parent updates', async () => {
++        const { rerender, runtimeRef } = await setup()
++        fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Next image' }))
++        fireEvent.click(within(screen.getByRole('dialog')).getByTitle('Zoom in'))
++
++        act(() => runtimeRef.current!.thread.composer.setText('draft update'))
++        rerender(<Harness runtimeRef={runtimeRef} onReorder={vi.fn()} />)
++
++        const dialog = screen.getByRole('dialog', { name: 'second.png' })
++        expect(within(dialog).getByTitle('Reset zoom')).toHaveTextContent('125%')
++        expect(within(dialog).getByRole('img')).toHaveAttribute('src', previewUrl)
++    })
++
++    it('keeps the preview while controls are disabled and re-enabled', async () => {
++        const { rerender, runtimeRef } = await setup()
++        rerender(<Harness runtimeRef={runtimeRef} disabled />)
++        expect(screen.getByRole('dialog', { name: 'first.png' })).toBeInTheDocument()
++        expect(screen.queryByRole('button', { name: 'Reorder attachment first.png' })).not.toBeInTheDocument()
++        rerender(<Harness runtimeRef={runtimeRef} />)
++        expect(screen.getByRole('dialog', { name: 'first.png' })).toBeInTheDocument()
++        expect(screen.getByRole('button', { name: 'Reorder attachment first.png' })).toBeInTheDocument()
++    })
++
++    it('preserves the viewer across reordering and uses the latest keyboard callback', async () => {
++        const { rerender, runtimeRef, container } = await setup()
++        const onReorder = vi.fn()
++        rerender(<Harness runtimeRef={runtimeRef} order={['second.png', 'first.png']} onReorder={onReorder} />)
++        expect(screen.getByRole('dialog', { name: 'first.png' })).toBeInTheDocument()
++        fireEvent.keyDown(window, { key: 'Escape' })
++        fireEvent.keyDown(screen.getByRole('button', { name: 'Reorder attachment first.png' }), { key: 'ArrowLeft' })
++        expect(onReorder).toHaveBeenCalledWith('first.png', 'second.png', 'before')
++        expect(Array.from(container.querySelectorAll<HTMLElement>('[data-hapi-composer-attachment-id]')).map((el) => el.dataset.hapiComposerAttachmentId)).toEqual(['second.png', 'first.png'])
++    })
++
++    it('still closes explicitly and removes an attachment through the real runtime', async () => {
++        const { runtimeRef, container } = await setup()
++        fireEvent.click(within(screen.getByRole('dialog')).getByTitle('Close'))
++        expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
++        fireEvent.click(screen.getAllByTitle('Click to zoom')[0]!)
++        await act(async () => runtimeRef.current!.thread.composer.clearAttachments())
++        expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
++        expect(container.querySelector('[data-hapi-composer-attachment-id]')).toBeNull()
++    })
++})
+diff --git a/web/src/components/AssistantChat/SortableComposerAttachments.tsx b/web/src/components/AssistantChat/SortableComposerAttachments.tsx
+index b7326f024..652f6d74a 100644
+--- a/web/src/components/AssistantChat/SortableComposerAttachments.tsx
++++ b/web/src/components/AssistantChat/SortableComposerAttachments.tsx
+@@ -4,7 +4,9 @@ import {
+     type KeyboardEvent as ReactKeyboardEvent,
+     type MouseEvent as ReactMouseEvent,
+     type PointerEvent as ReactPointerEvent,
++    createContext,
+     useCallback,
++    useContext,
+     useEffect,
+     useMemo,
+     useRef,
+@@ -39,6 +41,16 @@ type AttachmentDropTarget = {
+     position: AttachmentDropPosition
+ }
+ 
++const AttachmentDragHandleContext = createContext<AttachmentDragHandleProps | undefined>(undefined)
++
++function SortableAttachmentItem() {
++    const dragHandleProps = useContext(AttachmentDragHandleContext)
++    return <AttachmentItem dragHandleProps={dragHandleProps} />
++}
++
++// Updating drag handlers must not replace the attachment component and reset its image viewer.
++const SORTABLE_ATTACHMENT_COMPONENTS = { Attachment: SortableAttachmentItem }
++
+ function findAttachmentDropTarget(clientX: number, clientY: number): AttachmentDropTarget | null {
+     if (typeof document.elementsFromPoint !== 'function') return null
+ 
+@@ -97,11 +109,7 @@ function SortableComposerAttachment(props: SortableComposerAttachmentProps) {
+                 onSurfaceContextMenu: handleContextMenu,
+                 onSurfaceClick: handleClick,
+             },
+-        [attachment.name, disabled, handleKeyDown, handlePointerDown],
+-    )
+-    const AttachmentWithHandle = useCallback(
+-        () => <AttachmentItem dragHandleProps={dragHandleProps} />,
+-        [dragHandleProps],
++        [attachment.name, disabled, handleClick, handleContextMenu, handleKeyDown, handlePointerDown, handleSurfacePointerDown],
+     )
+ 
+     return (
+@@ -110,10 +118,12 @@ function SortableComposerAttachment(props: SortableComposerAttachmentProps) {
+             data-hapi-composer-attachment-dragging={isDragging || undefined}
+             className={isDragging ? 'opacity-60' : undefined}
+         >
+-            <ComposerPrimitive.AttachmentByIndex
+-                index={index}
+-                components={{ Attachment: AttachmentWithHandle }}
+-            />
++            <AttachmentDragHandleContext.Provider value={dragHandleProps}>
++                <ComposerPrimitive.AttachmentByIndex
++                    index={index}
++                    components={SORTABLE_ATTACHMENT_COMPONENTS}
++                />
++            </AttachmentDragHandleContext.Provider>
+         </div>
+     )
+ }

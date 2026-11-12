@@ -1,0 +1,3619 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Fri, 23 Oct 2026 18:38:39 +0000
+Subject: [PATCH 78/95] carry(upstream): PR #1662 feat(web): unify composer
+ model and effort controls
+
+---
+ .../agent/backends/acp/AcpSdkBackend.test.ts  |  39 ++
+ cli/src/agent/backends/acp/AcpSdkBackend.ts   |   5 +-
+ cli/src/agy/runAgy.test.ts                    |  79 ++++
+ cli/src/agy/runAgy.ts                         |   4 +
+ cli/src/commands/copilot.ts                   |   7 +
+ cli/src/commands/kimi.ts                      |   7 +
+ cli/src/commands/resume.test.ts               |  68 ++++
+ cli/src/commands/resume.ts                    |   4 +-
+ cli/src/copilot/copilotLocal.test.ts          |   5 +
+ cli/src/copilot/copilotLocal.ts               |   4 +
+ cli/src/copilot/copilotLocalLauncher.ts       |   2 +
+ cli/src/copilot/copilotRemoteLauncher.test.ts | 173 +++++++-
+ cli/src/copilot/copilotRemoteLauncher.ts      | 129 +++++-
+ cli/src/copilot/loop.ts                       |  10 +-
+ cli/src/copilot/runCopilot.ts                 |  34 +-
+ cli/src/copilot/session.ts                    |  25 +-
+ cli/src/copilot/types.ts                      |   1 +
+ cli/src/kimi/kimiRemoteLauncher.test.ts       | 162 +++++++-
+ cli/src/kimi/kimiRemoteLauncher.ts            | 140 ++++++-
+ cli/src/kimi/loop.ts                          |  11 +-
+ cli/src/kimi/runKimi.ts                       |  41 +-
+ cli/src/kimi/session.ts                       |  24 +-
+ cli/src/kimi/types.ts                         |   1 +
+ cli/src/runner/buildCliArgs.test.ts           |  19 +
+ cli/src/runner/run.ts                         |   5 +-
+ docs/api/client-contract/rest.md              |   3 +-
+ docs/guide/agents.md                          |   4 +-
+ docs/notes.md                                 |   4 +
+ hub/src/sync/rpcGateway.ts                    |   6 +
+ hub/src/sync/syncEngine.ts                    |   6 +
+ hub/src/web/routes/sessions.test.ts           |  68 ++++
+ hub/src/web/routes/sessions.ts                |  25 ++
+ shared/src/agentConfig.test.ts                |  16 +-
+ shared/src/agentConfig.ts                     |  24 +-
+ shared/src/apiTypes.ts                        |  13 +
+ shared/src/flavors.test.ts                    |  16 +-
+ shared/src/flavors.ts                         |   6 +-
+ shared/src/rpcMethods.ts                      |   1 +
+ web/README.md                                 |   5 +-
+ web/src/api/client.ts                         |   7 +
+ .../HappyComposer.modelEffortButtons.test.tsx | 202 ++++++++-
+ .../HappyComposer.sendError.test.tsx          |   1 +
+ .../AssistantChat/HappyComposer.tsx           | 384 +++++++++++-------
+ .../NewSession/EffortField.test.tsx           |  19 +-
+ web/src/components/NewSession/EffortField.tsx |  13 +-
+ web/src/components/NewSession/index.tsx       |   2 +-
+ web/src/components/SessionChat.tsx            |  18 +-
+ .../useSessionReasoningEffortOptions.test.ts  |  86 ++++
+ .../useSessionReasoningEffortOptions.ts       |  73 ++++
+ .../hooks/useComposerToolbarLayout.test.ts    |  14 +
+ web/src/lib/query-keys.ts                     |   1 +
+ web/src/types/api.ts                          |   2 +
+ 52 files changed, 1798 insertions(+), 220 deletions(-)
+ create mode 100644 cli/src/agy/runAgy.test.ts
+ create mode 100644 docs/notes.md
+ create mode 100644 web/src/hooks/queries/useSessionReasoningEffortOptions.test.ts
+ create mode 100644 web/src/hooks/queries/useSessionReasoningEffortOptions.ts
+
+diff --git a/cli/src/agent/backends/acp/AcpSdkBackend.test.ts b/cli/src/agent/backends/acp/AcpSdkBackend.test.ts
+index dcc995dbd..a3ac2b269 100644
+--- a/cli/src/agent/backends/acp/AcpSdkBackend.test.ts
++++ b/cli/src/agent/backends/acp/AcpSdkBackend.test.ts
+@@ -403,6 +403,45 @@ describe('AcpSdkBackend', () => {
+         expect(backend.getThoughtLevelConfigOption(sessionId)?.currentValue).toBe('high');
+     });
+ 
++    it('does not overwrite thought-level state for an unrelated session mode', async () => {
++        const backend = new AcpSdkBackend({ command: 'agent' });
++        const backendInternal = backend as unknown as {
++            transport: {
++                sendRequest: (method: string, params: unknown) => Promise<unknown>;
++                registerRequestHandler: (method: string, handler: unknown) => void;
++                close: () => Promise<void>;
++            } | null;
++            sessionConfigOptions: Map<string, Array<{
++                id: string;
++                category?: string;
++                currentValue?: string;
++                options: Array<{ value: string }>;
++            }> >;
++        };
++        backendInternal.transport = {
++            sendRequest: async () => null,
++            registerRequestHandler: () => {},
++            close: async () => {}
++        };
++        backendInternal.sessionConfigOptions.set('session-1', [
++            {
++                id: 'thought-level',
++                category: 'thought_level',
++                currentValue: 'low',
++                options: [{ value: 'low' }, { value: 'high' }]
++            },
++            {
++                id: 'mode',
++                category: 'mode',
++                options: [{ value: 'agent' }, { value: 'plan' }]
++            }
++        ]);
++
++        await backend.setMode('session-1', 'plan');
++
++        expect(backend.getThoughtLevelConfigOption('session-1')?.currentValue).toBe('low');
++    });
++
+     it('merges configOptions model variants into availableModels when both are present', async () => {
+         const backend = new AcpSdkBackend({ command: 'agent' });
+         const backendInternal = backend as unknown as {
+diff --git a/cli/src/agent/backends/acp/AcpSdkBackend.ts b/cli/src/agent/backends/acp/AcpSdkBackend.ts
+index 9c5febaed..59bee1602 100644
+--- a/cli/src/agent/backends/acp/AcpSdkBackend.ts
++++ b/cli/src/agent/backends/acp/AcpSdkBackend.ts
+@@ -327,7 +327,10 @@ export class AcpSdkBackend implements AgentBackend {
+             try {
+                 await this.transport.sendRequest('session/set_mode', { sessionId, modeId });
+                 this.setModeSupported = true;
+-                this.updateThoughtLevelCurrentValue(sessionId, modeId);
++                const thoughtLevelOption = this.getThoughtLevelConfigOption(sessionId);
++                if (thoughtLevelOption?.options.some((option) => option.value === modeId)) {
++                    this.updateThoughtLevelCurrentValue(sessionId, modeId);
++                }
+                 return;
+             } catch (error) {
+                 const message = error instanceof Error ? error.message : String(error);
+diff --git a/cli/src/agy/runAgy.test.ts b/cli/src/agy/runAgy.test.ts
+new file mode 100644
+index 000000000..6b6ad7f73
+--- /dev/null
++++ b/cli/src/agy/runAgy.test.ts
+@@ -0,0 +1,79 @@
++import { beforeEach, describe, expect, it, vi } from 'vitest'
++import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
++
++const harness = vi.hoisted(() => ({
++    registerHandler: vi.fn(),
++    session: {
++        onUserMessage: vi.fn(),
++        onCancelQueuedMessage: vi.fn(),
++        rpcHandlerManager: { registerHandler: vi.fn() }
++    },
++    wrapper: {
++        setPermissionMode: vi.fn(),
++        setModel: vi.fn(),
++        setEffort: vi.fn(),
++        pushKeepAlive: vi.fn(),
++        stopKeepAlive: vi.fn(),
++        kill: vi.fn()
++    }
++}))
++
++vi.mock('@/agent/sessionFactory', () => ({
++    bootstrapSession: vi.fn(async () => ({ api: {}, session: harness.session })),
++    bootstrapExistingSession: vi.fn(async () => ({ api: {}, session: harness.session }))
++}))
++
++vi.mock('./loop', () => ({
++    agyLoop: vi.fn(async (options: Record<string, unknown>) => {
++        const onSessionReady = options.onSessionReady as (session: unknown) => void
++        onSessionReady(harness.wrapper)
++    })
++}))
++
++vi.mock('@/claude/registerKillSessionHandler', () => ({
++    registerKillSessionHandler: vi.fn()
++}))
++
++vi.mock('@/agent/localHandoff', () => ({
++    registerLocalHandoffHandler: vi.fn()
++}))
++
++vi.mock('@/agent/runnerLifecycle', () => ({
++    createModeChangeHandler: vi.fn(() => vi.fn()),
++    createRunnerLifecycle: vi.fn(() => ({
++        registerProcessHandlers: vi.fn(),
++        cleanupAndExit: vi.fn(async () => {}),
++        markCrash: vi.fn(),
++        setSessionEndReason: vi.fn()
++    }))
++}))
++
++vi.mock('@/ui/logger', () => ({
++    logger: { debug: vi.fn() }
++}))
++
++import { runAgy } from './runAgy'
++
++describe('runAgy set-session-config handler', () => {
++    beforeEach(() => {
++        harness.session.rpcHandlerManager.registerHandler.mockReset()
++        harness.wrapper.setPermissionMode.mockReset()
++        harness.wrapper.setModel.mockReset()
++        harness.wrapper.setEffort.mockReset()
++        harness.wrapper.pushKeepAlive.mockReset()
++    })
++
++    it('persists null when resetting effort to Auto', async () => {
++        await runAgy({ effort: 'high', workingDirectory: '/tmp/project' })
++        harness.wrapper.setEffort.mockClear()
++
++        const call = harness.session.rpcHandlerManager.registerHandler.mock.calls.find(
++            (args) => args[0] === RPC_METHODS.SetSessionConfig
++        )
++        expect(call).toBeDefined()
++
++        await call![1]({ effort: null })
++
++        expect(harness.wrapper.setEffort).toHaveBeenCalledWith(null)
++    })
++})
+diff --git a/cli/src/agy/runAgy.ts b/cli/src/agy/runAgy.ts
+index e0c481dc2..f5a42b80c 100644
+--- a/cli/src/agy/runAgy.ts
++++ b/cli/src/agy/runAgy.ts
+@@ -128,6 +128,7 @@ export async function runAgy(opts: {
+             rpcHandlerManager: session.rpcHandlerManager,
+             flavor: 'agy',
+             modelMode: 'nullable',
++            effortMode: 'nullable',
+             onApply: async (config) => {
+                 if (config.permissionMode !== undefined) {
+                     currentPermissionMode = config.permissionMode;
+@@ -135,6 +136,9 @@ export async function runAgy(opts: {
+                 if (config.model !== undefined) {
+                     sessionModel = config.model;
+                 }
++                if (config.effort !== undefined) {
++                    sessionEffort = config.effort;
++                }
+             },
+             onAfterApply: syncSessionMode
+         });
+diff --git a/cli/src/commands/copilot.ts b/cli/src/commands/copilot.ts
+index 99dad464c..cadf46d7a 100644
+--- a/cli/src/commands/copilot.ts
++++ b/cli/src/commands/copilot.ts
+@@ -17,6 +17,7 @@ export const copilotCommand: CommandDefinition = {
+                 startingMode?: 'local' | 'remote'
+                 permissionMode?: CopilotPermissionMode
+                 model?: string
++                effort?: string
+                 copilotAgentMode?: CopilotAgentMode
+                 resumeSessionId?: string
+                 existingSessionId?: string
+@@ -74,6 +75,12 @@ export const copilotCommand: CommandDefinition = {
+                         throw new Error('Missing --model value')
+                     }
+                     options.model = model
++                } else if (arg === '--effort') {
++                    const effort = commandArgs[++i]
++                    if (!effort) {
++                        throw new Error('Missing --effort value')
++                    }
++                    options.effort = effort
+                 } else if (arg === '--copilot-agent-mode' || arg === '--mode') {
+                     const mode = commandArgs[++i]
+                     if (!mode || !isCopilotAgentMode(mode)) {
+diff --git a/cli/src/commands/kimi.ts b/cli/src/commands/kimi.ts
+index 4019e6d2c..da4eae653 100644
+--- a/cli/src/commands/kimi.ts
++++ b/cli/src/commands/kimi.ts
+@@ -16,6 +16,7 @@ export const kimiCommand: CommandDefinition = {
+                 startingMode?: 'local' | 'remote'
+                 permissionMode?: KimiPermissionMode
+                 model?: string
++                effort?: string
+                 resumeSessionId?: string
+                 existingSessionId?: string
+                 reservedSessionId?: string
+@@ -72,6 +73,12 @@ export const kimiCommand: CommandDefinition = {
+                         throw new Error('Missing --model value')
+                     }
+                     options.model = model
++                } else if (arg === '--hapi-effort') {
++                    const effort = commandArgs[++i]
++                    if (!effort) {
++                        throw new Error('Missing --hapi-effort value')
++                    }
++                    options.effort = effort
+                 }
+             }
+ 
+diff --git a/cli/src/commands/resume.test.ts b/cli/src/commands/resume.test.ts
+index 43492a889..6231a97a6 100644
+--- a/cli/src/commands/resume.test.ts
++++ b/cli/src/commands/resume.test.ts
+@@ -11,6 +11,8 @@ const {
+     runCodexMock,
+     runClaudeMock,
+     runGrokMock,
++    runKimiMock,
++    runCopilotMock,
+     runPiMock,
+     runAgyMock,
+     assertCodexLocalSupportedMock,
+@@ -26,6 +28,8 @@ const {
+     runCodexMock: vi.fn(async () => {}),
+     runClaudeMock: vi.fn(async () => {}),
+     runGrokMock: vi.fn(async () => {}),
++    runKimiMock: vi.fn(async () => {}),
++    runCopilotMock: vi.fn(async () => {}),
+     runPiMock: vi.fn(async () => {}),
+     runAgyMock: vi.fn(async () => {}),
+     assertCodexLocalSupportedMock: vi.fn(),
+@@ -51,6 +55,8 @@ vi.mock('@/ui/ink/ResumeSessionPicker', () => ({
+ vi.mock('@/codex/runCodex', () => ({ runCodex: runCodexMock }))
+ vi.mock('@/claude/runClaude', () => ({ runClaude: runClaudeMock }))
+ vi.mock('@/grok/runGrok', () => ({ runGrok: runGrokMock }))
++vi.mock('@/kimi/runKimi', () => ({ runKimi: runKimiMock }))
++vi.mock('@/copilot/runCopilot', () => ({ runCopilot: runCopilotMock }))
+ vi.mock('@/pi/runPi', () => ({ runPi: runPiMock }))
+ vi.mock('@/agy/runAgy', () => ({ runAgy: runAgyMock }))
+ vi.mock('@/codex/utils/codexVersion', () => ({ assertCodexLocalSupported: assertCodexLocalSupportedMock }))
+@@ -82,6 +88,8 @@ describe('resumeCommand', () => {
+         runCodexMock.mockClear()
+         runClaudeMock.mockClear()
+         runGrokMock.mockClear()
++        runKimiMock.mockClear()
++        runCopilotMock.mockClear()
+         runPiMock.mockClear()
+         runAgyMock.mockClear()
+         assertCodexLocalSupportedMock.mockClear()
+@@ -297,6 +305,66 @@ describe('resumeCommand', () => {
+         }
+     })
+ 
++    it('resumes a Kimi target with stored effort', async () => {
++        getLocalResumeTargetMock.mockResolvedValue({
++            sessionId: 'hapi-session-kimi',
++            flavor: 'kimi',
++            directory: '/tmp/project',
++            machineId: 'machine-1',
++            active: false,
++            thinking: false,
++            controlledByUser: false,
++            agentSessionId: 'kimi-session-1',
++            model: 'kimi-k2',
++            effort: 'high',
++            permissionMode: 'default'
++        })
++
++        await resumeCommand.run(createContext(['hapi-session-kimi']))
++
++        expect(runKimiMock).toHaveBeenCalledWith({
++            existingSessionId: 'hapi-session-kimi',
++            workingDirectory: '/tmp/project',
++            resumeSessionId: 'kimi-session-1',
++            startedBy: 'terminal',
++            permissionMode: 'default',
++            startingMode: 'local',
++            model: 'kimi-k2',
++            effort: 'high'
++        })
++    })
++
++    it('resumes a Copilot target with stored effort', async () => {
++        getLocalResumeTargetMock.mockResolvedValue({
++            sessionId: 'hapi-session-copilot',
++            flavor: 'copilot',
++            directory: '/tmp/project',
++            machineId: 'machine-1',
++            active: false,
++            thinking: false,
++            controlledByUser: false,
++            agentSessionId: 'copilot-session-1',
++            model: 'gpt-5.6',
++            effort: 'high',
++            permissionMode: 'default',
++            copilotAgentMode: 'interactive'
++        })
++
++        await resumeCommand.run(createContext(['hapi-session-copilot']))
++
++        expect(runCopilotMock).toHaveBeenCalledWith({
++            existingSessionId: 'hapi-session-copilot',
++            workingDirectory: '/tmp/project',
++            resumeSessionId: 'copilot-session-1',
++            startedBy: 'terminal',
++            permissionMode: 'default',
++            startingMode: 'local',
++            model: 'gpt-5.6',
++            effort: 'high',
++            copilotAgentMode: 'interactive'
++        })
++    })
++
+     it('resumes an inactive local target even when controlledByUser is sticky', async () => {
+         const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+         const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+diff --git a/cli/src/commands/resume.ts b/cli/src/commands/resume.ts
+index 4582d0f45..74f6e75a6 100644
+--- a/cli/src/commands/resume.ts
++++ b/cli/src/commands/resume.ts
+@@ -145,7 +145,8 @@ async function dispatchLocalResume(target: LocalResumeTarget): Promise<void> {
+             startedBy: base.startedBy,
+             permissionMode: base.permissionMode as KimiPermissionMode | undefined,
+             startingMode: 'local',
+-            model: target.model ?? undefined
++            model: target.model ?? undefined,
++            effort: target.effort ?? undefined
+         })
+         return
+     }
+@@ -175,6 +176,7 @@ async function dispatchLocalResume(target: LocalResumeTarget): Promise<void> {
+             permissionMode: base.permissionMode as CopilotPermissionMode | undefined,
+             startingMode: 'local',
+             model: target.model ?? undefined,
++            effort: target.effort ?? undefined,
+             copilotAgentMode: target.copilotAgentMode
+         })
+         return
+diff --git a/cli/src/copilot/copilotLocal.test.ts b/cli/src/copilot/copilotLocal.test.ts
+index 01a6bfd92..c487d2179 100644
+--- a/cli/src/copilot/copilotLocal.test.ts
++++ b/cli/src/copilot/copilotLocal.test.ts
+@@ -13,6 +13,11 @@ describe('buildCopilotLocalArgs', () => {
+             .toEqual(['--resume=session-1', '--model', 'gpt-5', '--allow-all', '--mode', 'plan']);
+     });
+ 
++    it('passes effort through to the local Copilot process', () => {
++        expect(buildCopilotLocalArgs({ sessionId: 'session-1', effort: 'high' }))
++            .toEqual(['--resume=session-1', '--effort', 'high']);
++    });
++
+     it('rejects shell metacharacters in dynamic Windows arguments', () => {
+         Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+ 
+diff --git a/cli/src/copilot/copilotLocal.ts b/cli/src/copilot/copilotLocal.ts
+index 93fc94ee9..ae74ff018 100644
+--- a/cli/src/copilot/copilotLocal.ts
++++ b/cli/src/copilot/copilotLocal.ts
+@@ -8,15 +8,18 @@ import { assertSafeWindowsShellArg } from '@/grok/utils/windowsShellArgs';
+ export function buildCopilotLocalArgs(opts: {
+     sessionId: string | null;
+     model?: string;
++    effort?: string | null;
+     yolo?: boolean;
+     agentMode?: CopilotAgentMode;
+ }): string[] {
+     if (opts.sessionId) assertSafeWindowsShellArg(opts.sessionId, 'sessionId');
+     if (opts.model) assertSafeWindowsShellArg(opts.model, 'model');
++    if (opts.effort) assertSafeWindowsShellArg(opts.effort, 'effort');
+ 
+     const args: string[] = [];
+     if (opts.sessionId) args.push(`--resume=${opts.sessionId}`);
+     if (opts.model) args.push('--model', opts.model);
++    if (opts.effort) args.push('--effort', opts.effort);
+     if (opts.yolo) args.push('--allow-all');
+     if (opts.agentMode && opts.agentMode !== 'interactive') args.push('--mode', opts.agentMode);
+     return args;
+@@ -27,6 +30,7 @@ export async function copilotLocal(opts: {
+     sessionId: string | null;
+     abort: AbortSignal;
+     model?: string;
++    effort?: string | null;
+     yolo?: boolean;
+     agentMode?: CopilotAgentMode;
+ }): Promise<void> {
+diff --git a/cli/src/copilot/copilotLocalLauncher.ts b/cli/src/copilot/copilotLocalLauncher.ts
+index 6491eb968..7873ec7bf 100644
+--- a/cli/src/copilot/copilotLocalLauncher.ts
++++ b/cli/src/copilot/copilotLocalLauncher.ts
+@@ -17,6 +17,7 @@ export async function copilotLocalLauncher(
+     session: CopilotSession,
+     opts: {
+         model?: string;
++        effort?: string | null;
+     }
+ ): Promise<'switch' | 'exit'> {
+     const startupTimestampMs = Date.now();
+@@ -54,6 +55,7 @@ export async function copilotLocalLauncher(
+                 sessionId: session.sessionId,
+                 abort: abortSignal,
+                 model: opts.model,
++                effort: opts.effort,
+                 yolo: approval.yolo,
+                 agentMode: session.getAgentMode()
+             });
+diff --git a/cli/src/copilot/copilotRemoteLauncher.test.ts b/cli/src/copilot/copilotRemoteLauncher.test.ts
+index a67196cbe..e0ce135f4 100644
+--- a/cli/src/copilot/copilotRemoteLauncher.test.ts
++++ b/cli/src/copilot/copilotRemoteLauncher.test.ts
+@@ -2,6 +2,10 @@ import { describe, expect, it, vi } from 'vitest';
+ import type { CopilotSession } from './session';
+ import { CopilotRemoteLauncher } from './copilotRemoteLauncher';
+ import type { AgentMessage } from '@/agent/types';
++import * as bridge from '@/codex/utils/buildHapiMcpBridge';
++import * as copilotBackend from './utils/copilotBackend';
++import { MessageQueue2 } from '@/utils/MessageQueue2';
++import type { CopilotMode } from './types';
+ 
+ type LauncherInternals = {
+     backend: {
+@@ -12,34 +16,134 @@ type LauncherInternals = {
+             id: string;
+             options: Array<{ value: string }>;
+         } | undefined;
++        getThoughtLevelConfigOption?: (sessionId: string) => {
++            id: string;
++            currentValue?: string;
++            options: Array<{ value: string }>;
++        } | undefined;
+     } | null;
+     activeSessionId: string | null;
+     currentAgentMode: string;
+     displayAgentMode: string | null;
+     applyInitialAgentMode: () => Promise<void>;
+     currentBackendModel: string | null;
++    appliedModelSelection: string | null;
++    reconcileAppliedModelSelection: () => void;
++    defaultBackendEffort: string | null;
+     applyQueuedModel: (model: string) => Promise<string | null>;
++    applyEffort: (effort: string | null) => Promise<string | null>;
++    syncDiscoveredEffort: (sessionId: string) => void;
+     handleAgentMessage: (message: AgentMessage) => void;
+ };
+ 
+ function createLauncher(
+     setMode: (sessionId: string, mode: string) => Promise<void>,
+-    onModelRollback?: (model: string | null) => void
++    onModelRollback?: (model: string | null) => void,
++    onEffortChange?: (effort: string | null) => void,
++    effort?: string
+ ) {
+     const session = {
+         sendSessionEvent: vi.fn(),
+         sendAgentMessage: vi.fn(),
+         setModel: vi.fn(),
++        getModel: vi.fn(() => null),
++        setEffort: vi.fn(),
+         pushKeepAlive: vi.fn()
+     } as unknown as CopilotSession;
+-    const launcher = new CopilotRemoteLauncher(session, { onModelRollback });
++    const launcher = new CopilotRemoteLauncher(session, { onModelRollback, onEffortChange, effort });
+     const internals = launcher as unknown as LauncherInternals;
+-    internals.backend = { setMode };
++    internals.backend = {
++        setMode,
++        getThoughtLevelConfigOption: vi.fn().mockReturnValue(undefined),
++    };
+     internals.activeSessionId = 'copilot-session';
+     return { launcher, internals, session };
+ }
+ 
+ describe('CopilotRemoteLauncher.applyAgentMode', () => {
++    it.each(['queued', 'startup'])('delivers a prompt when an advertised effort is rejected during %s', async (phase) => {
++        const { launcher, session } = createLauncher(vi.fn(), undefined, undefined, phase === 'startup' ? 'low' : undefined);
++        const queue = new MessageQueue2<CopilotMode>(mode => JSON.stringify(mode));
++        queue.push('deliver this prompt', { permissionMode: 'default', effort: phase === 'queued' ? 'low' : undefined });
++        queue.close();
++        const backend = {
++            initialize: vi.fn(async () => {}), newSession: vi.fn(async () => 'copilot-session'),
++            onStderrError: vi.fn(), setSessionInfoUpdateListener: vi.fn(), onPermissionRequest: vi.fn(),
++            getConfigOptionByCategory: vi.fn(), getSessionModelsMetadata: vi.fn(),
++            getThoughtLevelConfigOption: vi.fn(() => ({ id: 'thought_level', options: [{ value: 'low' }, { value: 'medium' }], currentValue: 'medium' })),
++            setConfigOption: vi.fn(async () => { throw new Error('Invalid params'); }),
++            setMode: vi.fn(async () => {}), prompt: vi.fn(async () => {}), refreshSessionInfo: vi.fn(async () => {}),
++        };
++        Object.assign(session, {
++            queue, getAgentMode: () => 'interactive', getPermissionMode: () => 'default',
++            onSessionFound: vi.fn(), setRemoteAgentModeApplier: vi.fn(), setRemoteEffortApplier: vi.fn(), onThinkingChange: vi.fn(),
++            client: { rpcHandlerManager: { registerHandler: vi.fn() }, updateAgentState: vi.fn() },
++        });
++        const bridgeSpy = vi.spyOn(bridge, 'buildHapiMcpBridge').mockResolvedValue({ server: { stop: vi.fn() }, mcpServers: {} } as never);
++        const backendSpy = vi.spyOn(copilotBackend, 'createCopilotBackend').mockReturnValue(backend as never);
++        try {
++            await (launcher as unknown as { runMainLoop: () => Promise<void> }).runMainLoop();
++            expect(backend.setConfigOption).toHaveBeenCalledWith('copilot-session', 'thought_level', 'low');
++            expect(session.setEffort).toHaveBeenCalledWith('medium');
++            expect(backend.prompt).toHaveBeenCalledWith('copilot-session', [{ type: 'text', text: 'deliver this prompt' }], expect.any(Function));
++            expect(session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining('Invalid params') }));
++        } finally {
++            bridgeSpy.mockRestore();
++            backendSpy.mockRestore();
++        }
++    });
++    it('rejects discovery after its backend is retired or the launcher exits', async () => {
++        const { launcher, internals, session } = createLauncher(vi.fn());
++        const backend = {
++            initialize: vi.fn(async () => {}),
++            newSession: vi.fn(async () => 'copilot-session'),
++            onStderrError: vi.fn(),
++            setSessionInfoUpdateListener: vi.fn(),
++            getThoughtLevelConfigOption: vi.fn(() => ({ options: [{ value: 'low' }], currentValue: 'low' })),
++        };
++        let discover: (() => Promise<unknown>) | undefined;
++        const registered = new Error('discovery registered');
++        Object.assign(session, {
++            getAgentMode: () => 'interactive',
++            onSessionFound: vi.fn(),
++            setRemoteAgentModeApplier: vi.fn(),
++            setRemoteEffortApplier: vi.fn(),
++            client: { rpcHandlerManager: { registerHandler: (_method: string, handler: () => Promise<unknown>) => {
++                discover = handler;
++                throw registered;
++            } } },
++        });
++        const bridgeSpy = vi.spyOn(bridge, 'buildHapiMcpBridge').mockResolvedValue({ server: { stop: vi.fn() }, mcpServers: {} } as never);
++        const backendSpy = vi.spyOn(copilotBackend, 'createCopilotBackend').mockReturnValue(backend as never);
++        try {
++            const lifecycle = launcher as unknown as { runMainLoop: () => Promise<void>; shouldExit: boolean };
++            await expect(lifecycle.runMainLoop()).rejects.toBe(registered);
++            await expect(discover?.()).resolves.toMatchObject({ success: true });
++            internals.backend = null;
++            await expect(discover?.()).resolves.toMatchObject({ success: false });
++            internals.backend = backend as never;
++            lifecycle.shouldExit = true;
++            await expect(discover?.()).resolves.toMatchObject({ success: false });
++            expect(backend.getThoughtLevelConfigOption).toHaveBeenCalledTimes(1);
++        } finally {
++            bridgeSpy.mockRestore();
++            backendSpy.mockRestore();
++        }
++    });
++    it('reconciles equivalent selections but keeps the applied tag during a real model switch', () => {
++        const { internals, session } = createLauncher(vi.fn());
++        internals.currentBackendModel = 'gpt-5.6';
++        vi.mocked(session.getModel).mockReturnValue('gpt-5.6');
++        internals.reconcileAppliedModelSelection();
++        expect(internals.appliedModelSelection).toBe('gpt-5.6');
++        vi.mocked(session.getModel).mockReturnValue('gpt-next');
++        internals.reconcileAppliedModelSelection();
++        expect(internals.appliedModelSelection).toBe('gpt-5.6');
++        internals.currentBackendModel = 'auto';
++        vi.mocked(session.getModel).mockReturnValue(null);
++        internals.reconcileAppliedModelSelection();
++        expect(internals.appliedModelSelection).toBeNull();
++    });
+     it('attributes usage to the active Copilot model', () => {
+         const { internals, session } = createLauncher(vi.fn().mockResolvedValue(undefined));
+         internals.currentBackendModel = 'gpt-5.6';
+@@ -133,6 +237,32 @@ describe('CopilotRemoteLauncher.applyAgentMode', () => {
+ 
+         expect(setModel).toHaveBeenCalledWith('copilot-session', 'auto');
+         expect(internals.currentBackendModel).toBe('auto');
++        expect(internals.appliedModelSelection).toBeNull();
++    });
++
++    it('publishes the discovered effort after switching models', async () => {
++        const onEffortChange = vi.fn();
++        const setModel = vi.fn().mockResolvedValue(undefined);
++        const { internals, session } = createLauncher(
++            vi.fn().mockResolvedValue(undefined),
++            undefined,
++            onEffortChange
++        );
++        internals.backend = {
++            setMode: vi.fn().mockResolvedValue(undefined),
++            setModel,
++            getThoughtLevelConfigOption: vi.fn().mockReturnValue({
++                id: 'thought_level',
++                currentValue: 'medium',
++                options: [{ value: 'low' }, { value: 'medium' }],
++            }),
++        };
++        internals.currentBackendModel = 'gpt-5.4';
++
++        await expect(internals.applyQueuedModel('gpt-5.6')).resolves.toBe('gpt-5.6');
++
++        expect(session.setEffort).toHaveBeenCalledWith('medium');
++        expect(onEffortChange).toHaveBeenCalledWith('medium');
+     });
+ 
+     it('rolls back the published model when switching fails', async () => {
+@@ -154,6 +284,43 @@ describe('CopilotRemoteLauncher.applyAgentMode', () => {
+         expect(onModelRollback).toHaveBeenCalledWith('gpt-5.4');
+     });
+ 
++    it('uses the discovered model default when resetting effort', async () => {
++        const setConfigOption = vi.fn().mockResolvedValue(undefined);
++        const { internals } = createLauncher(vi.fn().mockResolvedValue(undefined));
++        internals.defaultBackendEffort = 'medium';
++        internals.backend = {
++            setMode: vi.fn().mockResolvedValue(undefined),
++            setConfigOption,
++            getThoughtLevelConfigOption: vi.fn().mockReturnValue({
++                id: 'thought_level',
++                options: [{ value: 'low' }, { value: 'medium' }, { value: 'high' }],
++            }),
++        };
++
++        await expect(internals.applyEffort(null)).resolves.toBeNull();
++
++        expect(setConfigOption).toHaveBeenCalledWith('copilot-session', 'thought_level', 'medium');
++    });
++
++    it('applies ACP thought-level effort through the discovered config option', async () => {
++        const setConfigOption = vi.fn().mockResolvedValue(undefined)
++        const { internals, session } = createLauncher(vi.fn().mockResolvedValue(undefined))
++        internals.backend = {
++            setMode: vi.fn().mockResolvedValue(undefined),
++            setConfigOption,
++            getThoughtLevelConfigOption: vi.fn().mockReturnValue({
++                id: 'thought_level',
++                options: [{ value: 'low' }, { value: 'high' }],
++            }),
++        }
++
++        await expect(internals.applyEffort('high')).resolves.toBe('high')
++
++        expect(setConfigOption).toHaveBeenCalledWith('copilot-session', 'thought_level', 'high')
++        expect(session.setEffort).toHaveBeenCalledWith('high')
++        expect(session.pushKeepAlive).toHaveBeenCalledOnce()
++    })
++
+     it('falls back to the model config option when setModel is unavailable', async () => {
+         const setModel = vi.fn().mockRejectedValue(new Error('Method not found'));
+         const setConfigOption = vi.fn().mockResolvedValue(undefined);
+diff --git a/cli/src/copilot/copilotRemoteLauncher.ts b/cli/src/copilot/copilotRemoteLauncher.ts
+index 611a80c61..ad3597a49 100644
+--- a/cli/src/copilot/copilotRemoteLauncher.ts
++++ b/cli/src/copilot/copilotRemoteLauncher.ts
+@@ -18,7 +18,9 @@ import { buildCopilotModelsResponseFromBackend } from '@/modules/common/copilotM
+ export class CopilotRemoteLauncher extends RemoteLauncherBase {
+     private readonly session: CopilotSession;
+     private readonly model?: string;
++    private readonly effort?: string | null;
+     private readonly onModelRollback?: (model: string | null) => void;
++    private readonly onEffortChange?: (effort: string | null) => void;
+     private backend: ReturnType<typeof createCopilotBackend> | null = null;
+     private permissionHandler: CopilotPermissionHandler | null = null;
+     private happyServer: { stop: () => void } | null = null;
+@@ -28,6 +30,9 @@ export class CopilotRemoteLauncher extends RemoteLauncherBase {
+     private displayAgentMode: CopilotAgentMode | null = null;
+     private currentAgentMode: CopilotAgentMode = 'interactive';
+     private currentBackendModel: string | null = null;
++    private appliedModelSelection: string | null = null;
++    private currentBackendEffort: string | null = null;
++    private defaultBackendEffort: string | null = null;
+     private setModelSupported: boolean | undefined = undefined;
+     private setModeSupported: boolean | undefined = undefined;
+     private activeSessionId: string | null = null;
+@@ -35,12 +40,16 @@ export class CopilotRemoteLauncher extends RemoteLauncherBase {
+ 
+     constructor(session: CopilotSession, opts: {
+         model?: string;
++        effort?: string | null;
+         onModelRollback?: (model: string | null) => void;
++        onEffortChange?: (effort: string | null) => void;
+     }) {
+         super(process.env.DEBUG ? session.logPath : undefined);
+         this.session = session;
+         this.model = opts.model;
++        this.effort = opts.effort;
+         this.onModelRollback = opts.onModelRollback;
++        this.onEffortChange = opts.onEffortChange;
+     }
+ 
+     public async launch(): Promise<RemoteLauncherExitReason> {
+@@ -108,6 +117,20 @@ export class CopilotRemoteLauncher extends RemoteLauncherBase {
+         session.onSessionFound(acpSessionId);
+         this.activeSessionId = acpSessionId;
+         session.setRemoteAgentModeApplier((agentMode) => this.applyAgentMode(agentMode));
++        session.setRemoteEffortApplier((effort) => this.applyEffort(effort));
++        session.client.rpcHandlerManager.registerHandler(RPC_METHODS.ListSessionReasoningEffortOptions, async () => {
++            if (this.shouldExit || this.backend !== backend) {
++                return { success: false, error: 'Remote session is not ready' };
++            }
++            this.reconcileAppliedModelSelection();
++            const option = backend.getThoughtLevelConfigOption(acpSessionId);
++            return {
++                success: true,
++                model: this.appliedModelSelection,
++                options: option?.options ?? [],
++                currentValue: option?.currentValue ?? null,
++            };
++        });
+ 
+         this.permissionHandler = new CopilotPermissionHandler(
+             session.client,
+@@ -125,6 +148,24 @@ export class CopilotRemoteLauncher extends RemoteLauncherBase {
+                 ?? null;
+         }
+         this.currentBackendModel = effectiveModel;
++        this.recordAppliedModelSelection(effectiveModel);
++        const discoveredEffort = backend.getThoughtLevelConfigOption(acpSessionId)?.currentValue ?? null;
++        this.defaultBackendEffort = discoveredEffort;
++        if (this.effort !== undefined && this.effort !== null) {
++            try {
++                await this.applyEffort(this.effort);
++            } catch (error) {
++                const message = error instanceof Error ? error.message : String(error);
++                logger.warn('[copilot-remote] Startup effort is unavailable for the active model', error);
++                this.publishEffort(discoveredEffort);
++                session.sendSessionEvent({
++                    type: 'message',
++                    message: `Copilot effort ${this.effort} is unavailable for the active model: ${message}. Using ${discoveredEffort ?? 'default'}.`
++                });
++            }
++        } else {
++            this.publishEffort(discoveredEffort);
++        }
+         if (runtimeConfig.model && effectiveModel !== runtimeConfig.model) {
+             this.rollbackModel();
+         }
+@@ -161,6 +202,20 @@ export class CopilotRemoteLauncher extends RemoteLauncherBase {
+             if (batch.mode.model && batch.mode.model !== this.currentBackendModel) {
+                 batch.mode.model = await this.applyQueuedModel(batch.mode.model) ?? undefined;
+             }
++            if (batch.mode.effort !== undefined && batch.mode.effort !== this.currentBackendEffort) {
++                const requestedEffort = batch.mode.effort;
++                try {
++                    await this.applyEffort(requestedEffort);
++                } catch (error) {
++                    const message = error instanceof Error ? error.message : String(error);
++                    logger.warn('[copilot-remote] Inline effort switch failed', error);
++                    this.rollbackEffort(batch, this.currentBackendEffort);
++                    session.sendSessionEvent({
++                        type: 'message',
++                        message: `Failed to switch Copilot effort to ${requestedEffort ?? 'default'}: ${message}. Continuing with ${this.currentBackendEffort ?? 'default'}.`
++                    });
++                }
++            }
+ 
+             const desiredAgentMode = batch.mode.agentMode ?? session.getAgentMode();
+             if (desiredAgentMode !== this.currentAgentMode) {
+@@ -213,6 +268,7 @@ export class CopilotRemoteLauncher extends RemoteLauncherBase {
+     protected async cleanup(): Promise<void> {
+         this.clearAbortHandlers(this.session.client.rpcHandlerManager);
+         this.session.setRemoteAgentModeApplier(null);
++        this.session.setRemoteEffortApplier(null);
+         this.activeSessionId = null;
+ 
+         if (this.permissionHandler) {
+@@ -406,7 +462,9 @@ export class CopilotRemoteLauncher extends RemoteLauncherBase {
+             try {
+                 await backend.setModel(sessionId, model);
+                 this.currentBackendModel = model;
++                this.recordAppliedModelSelection(model);
+                 this.setModelSupported = true;
++                this.syncDiscoveredEffort(sessionId);
+                 return model;
+             } catch (error) {
+                 const message = error instanceof Error ? error.message : String(error);
+@@ -431,6 +489,8 @@ export class CopilotRemoteLauncher extends RemoteLauncherBase {
+         try {
+             await backend.setConfigOption(sessionId, option.id, model);
+             this.currentBackendModel = model;
++            this.recordAppliedModelSelection(model);
++            this.syncDiscoveredEffort(sessionId);
+             return model;
+         } catch (error) {
+             const message = error instanceof Error ? error.message : String(error);
+@@ -443,9 +503,71 @@ export class CopilotRemoteLauncher extends RemoteLauncherBase {
+         }
+     }
+ 
++    private syncDiscoveredEffort(sessionId: string): void {
++        const discoveredEffort = this.backend?.getThoughtLevelConfigOption?.(sessionId)?.currentValue ?? null;
++        this.defaultBackendEffort = discoveredEffort;
++        this.publishEffort(discoveredEffort);
++    }
++
++    private reconcileAppliedModelSelection(): void {
++        const selectedModel = this.session.getModel() ?? null;
++        if ((selectedModel ?? 'auto') === this.currentBackendModel) {
++            this.appliedModelSelection = selectedModel;
++        }
++    }
++
++    private recordAppliedModelSelection(backendModel: string | null): void {
++        const selection = this.session.getModel() ?? null;
++        this.appliedModelSelection = selection === null || selection === backendModel
++            ? selection
++            : backendModel;
++    }
++
++    private publishEffort(effort: string | null): void {
++        this.currentBackendEffort = effort;
++        this.session.setEffort(effort);
++        this.session.pushKeepAlive();
++        this.onEffortChange?.(effort);
++    }
++
++    private rollbackEffort(batch: { mode: { effort?: string | null } }, effort: string | null): void {
++        batch.mode.effort = effort;
++        this.publishEffort(effort);
++    }
++
++    public async applyEffort(effort: string | null): Promise<string | null> {
++        const backend = this.backend;
++        const sessionId = this.activeSessionId;
++        if (!backend || !sessionId) {
++            throw new Error('Copilot effort switching is unavailable before the remote session is ready');
++        }
++
++        const option = backend.getThoughtLevelConfigOption(sessionId);
++        if (!option) {
++            throw new Error('Copilot effort switching is unavailable for this session');
++        }
++        const target = effort ?? option.options.find((candidate) => {
++            const value = candidate.value.toLowerCase();
++            const name = candidate.name?.toLowerCase() ?? '';
++            return value === 'default' || value === 'auto' || name === 'default' || name === 'auto';
++        })?.value ?? this.defaultBackendEffort;
++        if (!target) {
++            throw new Error('Copilot effort reset is unavailable for this session');
++        }
++        if (!option.options.some((candidate) => candidate.value === target)) {
++            throw new Error(`Unsupported Copilot effort: ${effort}`);
++        }
++
++        await backend.setConfigOption(sessionId, option.id, target);
++        const applied = effort === null ? null : target;
++        this.publishEffort(applied);
++        return applied;
++    }
++
+     private rollbackModel(): string | null {
+         const model = this.currentBackendModel === 'auto' ? null : this.currentBackendModel;
+         this.session.setModel(model);
++        this.recordAppliedModelSelection(this.currentBackendModel);
+         this.session.pushKeepAlive();
+         this.onModelRollback?.(model);
+         return this.currentBackendModel;
+@@ -489,7 +611,12 @@ function toAcpMcpServers(config: Record<string, { command: string; args: string[
+ 
+ export async function copilotRemoteLauncher(
+     session: CopilotSession,
+-    opts: { model?: string; onModelRollback?: (model: string | null) => void }
++    opts: {
++        model?: string;
++        effort?: string | null;
++        onModelRollback?: (model: string | null) => void;
++        onEffortChange?: (effort: string | null) => void;
++    }
+ ): Promise<'switch' | 'exit'> {
+     const launcher = new CopilotRemoteLauncher(session, opts);
+     return launcher.launch();
+diff --git a/cli/src/copilot/loop.ts b/cli/src/copilot/loop.ts
+index 6ebabb507..b22b7b4d9 100644
+--- a/cli/src/copilot/loop.ts
++++ b/cli/src/copilot/loop.ts
+@@ -18,10 +18,12 @@ interface CopilotLoopOptions {
+     api: ApiClient;
+     permissionMode?: PermissionMode;
+     model?: string;
++    effort?: string | null;
+     copilotAgentMode?: CopilotAgentMode;
+     resumeSessionId?: string;
+     onSessionReady?: (session: CopilotSession) => void;
+     onModelRollback?: (model: string | null) => void;
++    onEffortChange?: (effort: string | null) => void;
+ }
+ 
+ export async function copilotLoop(opts: CopilotLoopOptions): Promise<void> {
+@@ -41,6 +43,7 @@ export async function copilotLoop(opts: CopilotLoopOptions): Promise<void> {
+         startedBy,
+         startingMode,
+         permissionMode: opts.permissionMode ?? 'default',
++        effort: opts.effort,
+         agentMode: opts.copilotAgentMode ?? 'interactive'
+     });
+ 
+@@ -55,11 +58,14 @@ export async function copilotLoop(opts: CopilotLoopOptions): Promise<void> {
+         startingMode: opts.startingMode,
+         logTag: 'copilot-loop',
+         runLocal: (instance) => copilotLocalLauncher(instance, {
+-            model: getCurrentModel()
++            model: getCurrentModel(),
++            effort: instance.getEffort()
+         }),
+         runRemote: (instance) => copilotRemoteLauncher(instance, {
+             model: getCurrentModel(),
+-            onModelRollback: opts.onModelRollback
++            effort: instance.getEffort(),
++            onModelRollback: opts.onModelRollback,
++            onEffortChange: opts.onEffortChange
+         }),
+         onSessionReady: opts.onSessionReady
+     });
+diff --git a/cli/src/copilot/runCopilot.ts b/cli/src/copilot/runCopilot.ts
+index 2c97eb565..398b0ce1a 100644
+--- a/cli/src/copilot/runCopilot.ts
++++ b/cli/src/copilot/runCopilot.ts
+@@ -42,6 +42,7 @@ export async function runCopilot(opts: {
+     startingMode?: 'local' | 'remote';
+     permissionMode?: PermissionMode;
+     model?: string;
++    effort?: string;
+     copilotAgentMode?: import('@hapi/protocol').CopilotAgentMode;
+     resumeSessionId?: string;
+     existingSessionId?: string;
+@@ -81,7 +82,8 @@ export async function runCopilot(opts: {
+             workingDirectory,
+             agentState: initialState,
+             model: persistedModel,
+-            reservedSessionId: opts.reservedSessionId
++            reservedSessionId: opts.reservedSessionId,
++            effort: opts.effort
+         });
+     const { api, session } = bootstrap;
+ 
+@@ -93,6 +95,7 @@ export async function runCopilot(opts: {
+     const messageQueue = new MessageQueue2<CopilotMode>((mode) => hashObject({
+         permissionMode: mode.permissionMode,
+         model: mode.model,
++        effort: mode.effort,
+         agentMode: mode.agentMode
+     }));
+ 
+@@ -100,6 +103,7 @@ export async function runCopilot(opts: {
+     let currentPermissionMode: PermissionMode = opts.permissionMode ?? 'default';
+     let currentAgentMode = opts.copilotAgentMode ?? 'interactive';
+     let sessionModel: string | null = persistedModel ?? null;
++    let sessionEffort: string | null | undefined = opts.effort;
+     let resolvedModel = sessionModel ?? runtimeConfig.model ?? null;
+ 
+     const lifecycle = createRunnerLifecycle({
+@@ -119,6 +123,11 @@ export async function runCopilot(opts: {
+         }
+         sessionInstance.setPermissionMode(currentPermissionMode);
+         sessionInstance.setModel(sessionModel);
++        if (sessionEffort === undefined) {
++            sessionEffort = sessionInstance.getEffort();
++        } else {
++            sessionInstance.setEffort(sessionEffort);
++        }
+         sessionInstance.setAgentMode(currentAgentMode);
+         sessionInstance.pushKeepAlive();
+ 
+@@ -128,6 +137,7 @@ export async function runCopilot(opts: {
+     const buildMode = (): CopilotMode => ({
+         permissionMode: currentPermissionMode,
+         model: resolvedModel ?? undefined,
++        effort: sessionEffort,
+         agentMode: currentAgentMode
+     });
+ 
+@@ -277,7 +287,7 @@ export async function runCopilot(opts: {
+         if (!payload || typeof payload !== 'object') {
+             throw new Error('Invalid session config payload');
+         }
+-        const config = payload as { permissionMode?: unknown; model?: unknown; copilotAgentMode?: unknown };
++        const config = payload as { permissionMode?: unknown; model?: unknown; effort?: unknown; copilotAgentMode?: unknown };
+         const applied: Record<string, unknown> = {};
+ 
+         if (config.permissionMode !== undefined) {
+@@ -297,6 +307,22 @@ export async function runCopilot(opts: {
+             applied.model = sessionModel;
+         }
+ 
++        if (config.effort !== undefined) {
++            if (sessionWrapperRef.current?.mode === 'local') {
++                throw new Error('Copilot effort can only be changed for remote sessions');
++            }
++            if (config.effort !== null && (typeof config.effort !== 'string' || config.effort.trim().length === 0)) {
++                throw new Error('Invalid effort');
++            }
++            const nextEffort = config.effort === null ? null : config.effort.trim();
++            const activeSession = sessionWrapperRef.current;
++            if (!activeSession) {
++                throw new Error('Copilot remote session is not ready for effort switching');
++            }
++            sessionEffort = await activeSession.applyRemoteEffort(nextEffort);
++            applied.effort = sessionEffort;
++        }
++
+         if (config.copilotAgentMode !== undefined) {
+             if (!isCopilotAgentMode(config.copilotAgentMode)) {
+                 throw new Error('Invalid copilot agent mode');
+@@ -328,6 +354,7 @@ export async function runCopilot(opts: {
+             api,
+             permissionMode: currentPermissionMode,
+             model: runtimeConfig.model,
++            effort: opts.effort,
+             copilotAgentMode: currentAgentMode,
+             resumeSessionId: opts.resumeSessionId,
+             onModeChange: createModeChangeHandler(session),
+@@ -338,6 +365,9 @@ export async function runCopilot(opts: {
+             onModelRollback: (model) => {
+                 sessionModel = model;
+                 resolvedModel = resolveCopilotQueueModel(model);
++            },
++            onEffortChange: (effort) => {
++                sessionEffort = effort;
+             }
+         });
+     } catch (error) {
+diff --git a/cli/src/copilot/session.ts b/cli/src/copilot/session.ts
+index 335d6f7b0..9ed4ba47b 100644
+--- a/cli/src/copilot/session.ts
++++ b/cli/src/copilot/session.ts
+@@ -15,6 +15,7 @@ export class CopilotSession extends AgentSessionBase<CopilotMode> {
+     readonly startingMode: 'local' | 'remote';
+     localLaunchFailure: LocalLaunchFailure | null = null;
+     private remoteAgentModeApplier: ((mode: CopilotAgentMode) => Promise<void>) | null = null;
++    private remoteEffortApplier: ((effort: string | null) => Promise<string | null>) | null = null;
+ 
+     constructor(opts: {
+         api: ApiClient;
+@@ -28,6 +29,7 @@ export class CopilotSession extends AgentSessionBase<CopilotMode> {
+         startedBy: 'runner' | 'terminal';
+         startingMode: 'local' | 'remote';
+         permissionMode?: PermissionMode;
++        effort?: string | null;
+         agentMode?: CopilotAgentMode;
+     }) {
+         super({
+@@ -45,12 +47,14 @@ export class CopilotSession extends AgentSessionBase<CopilotMode> {
+                 ...metadata,
+                 copilotSessionId: sessionId
+             }),
+-            permissionMode: opts.permissionMode
++            permissionMode: opts.permissionMode,
++            effort: opts.effort
+         });
+ 
+         this.startedBy = opts.startedBy;
+         this.startingMode = opts.startingMode;
+         this.permissionMode = opts.permissionMode;
++        this.effort = opts.effort;
+         this.agentMode = opts.agentMode ?? 'interactive';
+     }
+ 
+@@ -64,6 +68,10 @@ export class CopilotSession extends AgentSessionBase<CopilotMode> {
+         this.model = model;
+     };
+ 
++    setEffort = (effort: string | null | undefined): void => {
++        this.effort = effort;
++    };
++
+     setAgentMode = (mode: CopilotAgentMode): void => {
+         this.agentMode = mode;
+     };
+@@ -74,6 +82,10 @@ export class CopilotSession extends AgentSessionBase<CopilotMode> {
+         this.remoteAgentModeApplier = applier;
+     };
+ 
++    setRemoteEffortApplier = (applier: ((effort: string | null) => Promise<string | null>) | null): void => {
++        this.remoteEffortApplier = applier;
++    };
++
+     applyRemoteAgentMode = async (mode: CopilotAgentMode): Promise<void> => {
+         if (this.thinking) {
+             throw new Error('Wait for the current Copilot turn to finish before changing agent mode');
+@@ -84,6 +96,16 @@ export class CopilotSession extends AgentSessionBase<CopilotMode> {
+         await this.remoteAgentModeApplier(mode);
+     };
+ 
++    applyRemoteEffort = async (effort: string | null): Promise<string | null> => {
++        if (this.thinking) {
++            throw new Error('Wait for the current Copilot turn to finish before changing effort');
++        }
++        if (!this.remoteEffortApplier) {
++            throw new Error('Copilot effort switching is unavailable for this session');
++        }
++        return await this.remoteEffortApplier(effort);
++    };
++
+     protected override getKeepAliveRuntime() {
+         return {
+             ...(super.getKeepAliveRuntime() ?? {}),
+@@ -95,6 +117,7 @@ export class CopilotSession extends AgentSessionBase<CopilotMode> {
+         this.client.keepAlive(this.thinking, this.mode, {
+             permissionMode: this.permissionMode,
+             model: this.model,
++            effort: this.effort,
+             copilotAgentMode: this.agentMode
+         });
+     };
+diff --git a/cli/src/copilot/types.ts b/cli/src/copilot/types.ts
+index 1952c7ed0..949631689 100644
+--- a/cli/src/copilot/types.ts
++++ b/cli/src/copilot/types.ts
+@@ -6,5 +6,6 @@ export type PermissionMode = CopilotPermissionMode;
+ export interface CopilotMode {
+     permissionMode: PermissionMode;
+     model?: string;
++    effort?: string | null;
+     agentMode?: CopilotAgentMode;
+ }
+diff --git a/cli/src/kimi/kimiRemoteLauncher.test.ts b/cli/src/kimi/kimiRemoteLauncher.test.ts
+index b0debeba5..f06da7699 100644
+--- a/cli/src/kimi/kimiRemoteLauncher.test.ts
++++ b/cli/src/kimi/kimiRemoteLauncher.test.ts
+@@ -1,9 +1,19 @@
+ import { afterEach, describe, expect, it, vi } from 'vitest'
+ import { MessageQueue2 } from '@/utils/MessageQueue2'
+ import type { KimiMode } from './types'
++import * as kimiConfig from './utils/config'
+ 
+ const harness = vi.hoisted(() => ({
+-    prompts: [] as unknown[][]
++    prompts: [] as unknown[][],
++    setConfigOptionCalls: [] as unknown[][],
++    rejectedModel: null as string | null,
++    rejectEffort: false,
++    onPrompt: null as (() => Promise<void>) | null,
++    thoughtLevelOption: {
++        id: 'thought_level',
++        currentValue: 'medium',
++        options: [{ value: 'low', name: 'Low' }, { value: 'medium', name: 'Medium' }],
++    }
+ }))
+ 
+ vi.mock('./utils/kimiBackend', () => ({
+@@ -11,9 +21,33 @@ vi.mock('./utils/kimiBackend', () => ({
+         initialize: vi.fn(async () => {}),
+         newSession: vi.fn(async () => 'kimi-session-1'),
+         loadSession: vi.fn(async () => 'kimi-session-1'),
+-        setModel: vi.fn(async () => {}),
++        setModel: vi.fn(async (_sessionId: string, model: string) => {
++            if (model === harness.rejectedModel) {
++                throw new Error('model rejected')
++            }
++            harness.thoughtLevelOption = model === 'kimi-new'
++                ? {
++                    id: 'thought_level',
++                    currentValue: 'low',
++                    options: [{ value: 'low', name: 'Low' }],
++                }
++                : {
++                    id: 'thought_level',
++                    currentValue: 'medium',
++                    options: [{ value: 'low', name: 'Low' }, { value: 'medium', name: 'Medium' }],
++                }
++        }),
++        setConfigOption: vi.fn(async (...args: unknown[]) => {
++            harness.setConfigOptionCalls.push(args)
++            if (harness.rejectEffort) throw new Error('Invalid params')
++        }),
++        getConfigOptionByCategory: vi.fn((_sessionId: string, category: string) => category === 'model'
++            ? { id: 'model', currentValue: 'kimi-default', options: [{ value: 'kimi-default' }] }
++            : undefined),
++        getThoughtLevelConfigOption: vi.fn(() => harness.thoughtLevelOption),
+         prompt: vi.fn(async (_sessionId: string, content: unknown[]) => {
+             harness.prompts.push(content)
++            await harness.onPrompt?.()
+         }),
+         cancelPrompt: vi.fn(async () => {}),
+         respondToPermission: vi.fn(async () => {}),
+@@ -45,27 +79,41 @@ vi.mock('@/ui/logger', () => ({
+ 
+ import { kimiRemoteLauncher } from './kimiRemoteLauncher'
+ 
+-function createSession() {
++function createSession(
++    firstMode: KimiMode = { permissionMode: 'default', model: 'kimi-k2' },
++    secondMode: KimiMode = { permissionMode: 'default', model: 'kimi-k2' }
++) {
++    const rpcHandlers = new Map<string, (...args: unknown[]) => unknown>()
+     const queue = new MessageQueue2<KimiMode>((mode) => JSON.stringify(mode))
+-    queue.pushIsolateAndClear('first', { permissionMode: 'default', model: 'kimi-k2' })
+-    queue.push('second', { permissionMode: 'default', model: 'kimi-k2' })
++    queue.pushIsolateAndClear('first', firstMode)
++    queue.push('second', secondMode)
+     queue.close()
+ 
+     const session = {
+         path: '/tmp/kimi-test',
+         logPath: '/tmp/kimi-test/test.log',
+         client: {
+-            rpcHandlerManager: { registerHandler: vi.fn() },
++            rpcHandlerManager: {
++                registerHandler: vi.fn((method: string, handler: (...args: unknown[]) => unknown) => {
++                    rpcHandlers.set(method, handler)
++                })
++            },
+             sendAgentMessage: vi.fn(),
+             sendSessionEvent: vi.fn()
+         },
+         queue,
+         sessionId: null as string | null,
++        setEffort: vi.fn(),
++        setModel: vi.fn(),
++        setRemoteEffortApplier: vi.fn(),
++        pushKeepAlive: vi.fn(),
++        getModel: () => firstMode.model ?? null,
+         getPermissionMode: () => 'default' as const,
+         onSessionFound(id: string) { session.sessionId = id },
+         onThinkingChange: vi.fn(),
+         sendAgentMessage: vi.fn(),
+-        sendSessionEvent: vi.fn()
++        sendSessionEvent: vi.fn(),
++        rpcHandlers
+     }
+     return session
+ }
+@@ -73,6 +121,106 @@ function createSession() {
+ describe('kimiRemoteLauncher skill lookup instruction', () => {
+     afterEach(() => {
+         harness.prompts = []
++        harness.setConfigOptionCalls = []
++        harness.rejectedModel = null
++        harness.rejectEffort = false
++        harness.onPrompt = null
++        vi.restoreAllMocks()
++        harness.thoughtLevelOption = {
++            id: 'thought_level',
++            currentValue: 'medium',
++            options: [{ value: 'low', name: 'Low' }, { value: 'medium', name: 'Medium' }],
++        }
++    })
++
++    it('uses the discovered effort after a model switch invalidates a queued effort', async () => {
++        const session = createSession(
++            { permissionMode: 'default', model: 'kimi-new', effort: 'high' },
++            { permissionMode: 'default', model: 'kimi-new', effort: 'low' }
++        )
++        harness.onPrompt = async () => {
++            await expect(session.rpcHandlers.get('listSessionReasoningEffortOptions')?.()).resolves.toMatchObject({
++                success: true, model: 'kimi-new', options: [{ value: 'low', name: 'Low' }]
++            })
++        }
++
++        await expect(kimiRemoteLauncher(session as never, { model: 'kimi-k2' })).resolves.toBe('exit')
++
++        expect(harness.prompts).toHaveLength(2)
++        expect(harness.setConfigOptionCalls).not.toContainEqual(['kimi-session-1', 'thought_level', 'high'])
++        expect(session.setEffort).toHaveBeenCalledWith('low')
++        await expect(session.rpcHandlers.get('listSessionReasoningEffortOptions')?.()).resolves.toMatchObject({
++            success: false, error: 'Remote session is not ready'
++        })
++    })
++
++    it.each(['queued', 'startup'])('delivers prompts when an advertised effort is rejected during %s', async (phase) => {
++        harness.rejectEffort = true
++        const session = createSession({ permissionMode: 'default', model: 'kimi-k2', effort: phase === 'queued' ? 'low' : undefined })
++        await expect(kimiRemoteLauncher(session as never, { model: 'kimi-k2', effort: phase === 'startup' ? 'low' : undefined })).resolves.toBe('exit')
++        expect(harness.setConfigOptionCalls).toContainEqual(['kimi-session-1', 'thought_level', 'low'])
++        expect(session.setEffort).toHaveBeenCalledWith('medium')
++        expect(harness.prompts).toHaveLength(2)
++        expect(session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining('Invalid params') }))
++    })
++
++    it('falls back when the startup effort is unsupported by the model', async () => {
++        const session = createSession()
++
++        await expect(kimiRemoteLauncher(session as never, { model: 'kimi-k2', effort: 'high' })).resolves.toBe('exit')
++
++        expect(harness.prompts).toHaveLength(2)
++        expect(harness.setConfigOptionCalls).not.toContainEqual(['kimi-session-1', 'thought_level', 'high'])
++        expect(session.setEffort).toHaveBeenCalledWith('medium')
++    })
++
++    it('keeps effort discovery available when Default resolves to the unchanged backend', async () => {
++        vi.spyOn(kimiConfig, 'resolveKimiRuntimeConfig').mockReturnValue({ model: 'kimi-k2', modelSource: 'local' })
++        const session = createSession()
++        let selectedModel: string | null = 'kimi-k2'
++        session.getModel = () => selectedModel
++        let checks = 0
++        harness.onPrompt = async () => {
++            selectedModel = null
++            await expect(session.rpcHandlers.get('listSessionReasoningEffortOptions')?.()).resolves.toMatchObject({
++                success: true, model: null, options: harness.thoughtLevelOption.options
++            })
++            checks += 1
++            selectedModel = 'kimi-pending'
++            await expect(session.rpcHandlers.get('listSessionReasoningEffortOptions')?.()).resolves.toMatchObject({ model: null })
++        }
++        await kimiRemoteLauncher(session as never, { model: 'kimi-k2' })
++        expect(checks).toBe(2)
++        await expect(session.rpcHandlers.get('listSessionReasoningEffortOptions')?.()).resolves.toMatchObject({ success: false })
++    })
++
++    it('reports the default HAPI model selection for a concrete backend default', async () => {
++        const defaultMode: KimiMode = { permissionMode: 'default' }
++        const session = createSession(defaultMode, defaultMode)
++        harness.onPrompt = async () => {
++            await expect(session.rpcHandlers.get('listSessionReasoningEffortOptions')?.()).resolves.toMatchObject({ success: true, model: null })
++        }
++
++        await expect(kimiRemoteLauncher(session as never, {})).resolves.toBe('exit')
++
++        await expect(session.rpcHandlers.get('listSessionReasoningEffortOptions')?.()).resolves.toMatchObject({
++            success: false
++        })
++    })
++
++    it('rolls the HAPI model back when an inline backend switch fails', async () => {
++        harness.rejectedModel = 'kimi-bad'
++        const session = createSession(
++            { permissionMode: 'default', model: 'kimi-k2' },
++            { permissionMode: 'default', model: 'kimi-bad' }
++        )
++        const onModelRollback = vi.fn()
++        const options = { model: 'kimi-k2', onModelRollback }
++
++        await expect(kimiRemoteLauncher(session as never, options)).resolves.toBe('exit')
++
++        expect(session.setModel).toHaveBeenCalledWith('kimi-k2')
++        expect(onModelRollback).toHaveBeenCalledWith('kimi-k2')
+     })
+ 
+     it('does not prepend skill_lookup instructions onto user turns', async () => {
+diff --git a/cli/src/kimi/kimiRemoteLauncher.ts b/cli/src/kimi/kimiRemoteLauncher.ts
+index 913181479..454f1fd5d 100644
+--- a/cli/src/kimi/kimiRemoteLauncher.ts
++++ b/cli/src/kimi/kimiRemoteLauncher.ts
+@@ -11,9 +11,13 @@ import type { PermissionMode } from './types';
+ import { createKimiBackend } from './utils/kimiBackend';
+ import { KimiPermissionHandler } from './utils/permissionHandler';
+ import { resolveKimiRuntimeConfig } from './utils/config';
+-class KimiRemoteLauncher extends RemoteLauncherBase {
++import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
++export class KimiRemoteLauncher extends RemoteLauncherBase {
+     private readonly session: KimiSession;
+     private readonly model?: string;
++    private readonly effort?: string | null;
++    private readonly onModelRollback?: (model: string | null) => void;
++    private readonly onEffortChange?: (effort: string | null) => void;
+     private backend: ReturnType<typeof createKimiBackend> | null = null;
+     private permissionHandler: KimiPermissionHandler | null = null;
+     private happyServer: { stop: () => void } | null = null;
+@@ -21,12 +25,23 @@ class KimiRemoteLauncher extends RemoteLauncherBase {
+     private displayModel: string | null = null;
+     private displayPermissionMode: PermissionMode | null = null;
+     private currentBackendModel: string | null = null;
++    private appliedModelSelection: string | null = null;
++    private currentBackendEffort: string | null = null;
++    private defaultBackendEffort: string | null = null;
+     private setModelSupported: boolean | undefined = undefined;
+     private lastDisplayedToolCall = new Map<string, string>();
+-    constructor(session: KimiSession, opts: { model?: string }) {
++    constructor(session: KimiSession, opts: {
++        model?: string;
++        effort?: string | null;
++        onModelRollback?: (model: string | null) => void;
++        onEffortChange?: (effort: string | null) => void;
++    }) {
+         super(process.env.DEBUG ? session.logPath : undefined);
+         this.session = session;
+         this.model = opts.model;
++        this.effort = opts.effort;
++        this.onModelRollback = opts.onModelRollback;
++        this.onEffortChange = opts.onEffortChange;
+     }
+ 
+     public async launch(): Promise<RemoteLauncherExitReason> {
+@@ -91,6 +106,24 @@ class KimiRemoteLauncher extends RemoteLauncherBase {
+             });
+         }
+         session.onSessionFound(acpSessionId);
++        session.setRemoteEffortApplier((effort) => this.applyEffort(effort));
++        session.client.rpcHandlerManager.registerHandler(RPC_METHODS.ListSessionReasoningEffortOptions, async () => {
++            if (this.shouldExit || this.backend !== backend) {
++                return { success: false, error: 'Remote session is not ready' };
++            }
++            const selectedModel = session.getModel() ?? null;
++            const desiredModel = selectedModel ?? resolveKimiRuntimeConfig().model;
++            if (desiredModel === this.currentBackendModel) {
++                this.appliedModelSelection = selectedModel;
++            }
++            const option = backend.getThoughtLevelConfigOption(acpSessionId);
++            return {
++                success: true,
++                model: this.appliedModelSelection,
++                options: option?.options ?? [],
++                currentValue: option?.currentValue ?? null,
++            };
++        });
+ 
+         this.permissionHandler = new KimiPermissionHandler(
+             session.client,
+@@ -111,6 +144,24 @@ class KimiRemoteLauncher extends RemoteLauncherBase {
+                 ?? null;
+         }
+         this.currentBackendModel = effectiveModel;
++        this.recordAppliedModelSelection(effectiveModel);
++        const discoveredEffort = backend.getThoughtLevelConfigOption(acpSessionId)?.currentValue ?? null;
++        this.defaultBackendEffort = discoveredEffort;
++        if (this.effort !== undefined && this.effort !== null) {
++            try {
++                await this.applyEffort(this.effort);
++            } catch (error) {
++                const message = error instanceof Error ? error.message : String(error);
++                logger.warn('[kimi-remote] Startup effort is unavailable for the active model', error);
++                this.publishEffort(discoveredEffort);
++                session.sendSessionEvent({
++                    type: 'message',
++                    message: `Kimi effort ${this.effort} is unavailable for the active model: ${message}. Using ${discoveredEffort ?? 'default'}.`
++                });
++            }
++        } else {
++            this.publishEffort(discoveredEffort);
++        }
+         if (effectiveModel) {
+             this.displayModel = effectiveModel;
+             messageBuffer.addMessage(`[MODEL:${effectiveModel}]`, 'system');
+@@ -137,13 +188,17 @@ class KimiRemoteLauncher extends RemoteLauncherBase {
+ 
+             if (batch.mode.model && batch.mode.model !== this.currentBackendModel) {
+                 if (!backend.setModel || this.setModelSupported === false) {
+-                    batch.mode.model = this.currentBackendModel ?? undefined;
++                    this.rollbackModel(batch);
+                 } else {
+                     logger.debug(`[kimi-remote] Switching model inline: ${this.currentBackendModel} -> ${batch.mode.model}`);
+                     try {
+                         await backend.setModel(acpSessionId, batch.mode.model);
+                         this.currentBackendModel = batch.mode.model;
++                        this.recordAppliedModelSelection(batch.mode.model);
+                         this.setModelSupported = true;
++                        const discoveredEffort = backend.getThoughtLevelConfigOption(acpSessionId)?.currentValue ?? null;
++                        this.defaultBackendEffort = discoveredEffort;
++                        this.publishEffort(discoveredEffort);
+                     } catch (error) {
+                         const message = error instanceof Error ? error.message : String(error);
+                         const methodNotFound = /method not found/i.test(message);
+@@ -161,11 +216,25 @@ class KimiRemoteLauncher extends RemoteLauncherBase {
+                                 message: `Failed to switch model to ${batch.mode.model}. Continuing with ${this.currentBackendModel}.`
+                             });
+                         }
+-                        batch.mode.model = this.currentBackendModel ?? undefined;
++                        this.rollbackModel(batch);
+                     }
+                 }
+             }
+ 
++            if (batch.mode.effort !== undefined && batch.mode.effort !== this.currentBackendEffort) {
++                const requestedEffort = batch.mode.effort;
++                try {
++                    await this.applyEffort(requestedEffort);
++                } catch (error) {
++                    const message = error instanceof Error ? error.message : String(error);
++                    this.rollbackEffort(batch, this.currentBackendEffort);
++                    session.sendSessionEvent({
++                        type: 'message',
++                        message: `Failed to switch Kimi effort to ${requestedEffort ?? 'default'}: ${message}. Continuing with ${this.currentBackendEffort ?? 'default'}.`
++                    });
++                }
++            }
++
+             this.applyDisplayMode(batch.mode.permissionMode, batch.mode.model);
+             messageBuffer.addMessage(batch.message, 'user');
+ 
+@@ -203,6 +272,7 @@ class KimiRemoteLauncher extends RemoteLauncherBase {
+ 
+     protected async cleanup(): Promise<void> {
+         this.clearAbortHandlers(this.session.client.rpcHandlerManager);
++        this.session.setRemoteEffortApplier(null);
+ 
+         if (this.permissionHandler) {
+             await this.permissionHandler.cancelAll('Session ended');
+@@ -270,6 +340,61 @@ class KimiRemoteLauncher extends RemoteLauncherBase {
+         }
+     }
+ 
++    public async applyEffort(effort: string | null): Promise<string | null> {
++        const backend = this.backend;
++        const sessionId = this.session.sessionId;
++        if (!backend || !sessionId) {
++            throw new Error('Kimi effort switching is unavailable before the remote session is ready');
++        }
++
++        const option = backend.getThoughtLevelConfigOption(sessionId);
++        if (!option) {
++            throw new Error('Kimi effort switching is unavailable for this session');
++        }
++        const target = effort ?? option.options.find((candidate) => {
++            const value = candidate.value.toLowerCase();
++            const name = candidate.name?.toLowerCase() ?? '';
++            return value === 'default' || value === 'auto' || name === 'default' || name === 'auto';
++        })?.value ?? this.defaultBackendEffort;
++        if (!target) {
++            throw new Error('Kimi effort reset is unavailable for this session');
++        }
++        if (!option.options.some((candidate) => candidate.value === target)) {
++            throw new Error(`Unsupported Kimi effort: ${effort}`);
++        }
++
++        await backend.setConfigOption(sessionId, option.id, target);
++        const applied = effort === null ? null : target;
++        this.publishEffort(applied);
++        return applied;
++    }
++
++    private publishEffort(effort: string | null): void {
++        this.currentBackendEffort = effort;
++        this.session.setEffort(effort);
++        this.session.pushKeepAlive();
++        this.onEffortChange?.(effort);
++    }
++
++    private recordAppliedModelSelection(backendModel: string | null): void {
++        const selection = this.session.getModel() ?? null;
++        this.appliedModelSelection = selection === null || selection === backendModel
++            ? selection
++            : backendModel;
++    }
++
++    private rollbackModel(batch: { mode: { model?: string } }): void {
++        batch.mode.model = this.currentBackendModel ?? undefined;
++        this.session.setModel(this.appliedModelSelection);
++        this.session.pushKeepAlive();
++        this.onModelRollback?.(this.appliedModelSelection);
++    }
++
++    private rollbackEffort(batch: { mode: { effort?: string | null } }, effort: string | null): void {
++        batch.mode.effort = effort;
++        this.publishEffort(effort);
++    }
++
+     private async applyInitialModel(
+         backend: ReturnType<typeof createKimiBackend>,
+         sessionId: string,
+@@ -355,7 +480,12 @@ function toAcpMcpServers(config: Record<string, { command: string; args: string[
+ 
+ export async function kimiRemoteLauncher(
+     session: KimiSession,
+-    opts: { model?: string }
++    opts: {
++        model?: string;
++        effort?: string | null;
++        onModelRollback?: (model: string | null) => void;
++        onEffortChange?: (effort: string | null) => void;
++    }
+ ): Promise<'switch' | 'exit'> {
+     const launcher = new KimiRemoteLauncher(session, opts);
+     return launcher.launch();
+diff --git a/cli/src/kimi/loop.ts b/cli/src/kimi/loop.ts
+index 29477d40c..7090a1b85 100644
+--- a/cli/src/kimi/loop.ts
++++ b/cli/src/kimi/loop.ts
+@@ -17,8 +17,11 @@ interface KimiLoopOptions {
+     api: ApiClient;
+     permissionMode?: PermissionMode;
+     model?: string;
++    effort?: string | null;
+     resumeSessionId?: string;
+     onSessionReady?: (session: KimiSession) => void;
++    onModelRollback?: (model: string | null) => void;
++    onEffortChange?: (effort: string | null) => void;
+ }
+ 
+ export async function kimiLoop(opts: KimiLoopOptions): Promise<void> {
+@@ -37,7 +40,8 @@ export async function kimiLoop(opts: KimiLoopOptions): Promise<void> {
+         mode: startingMode,
+         startedBy,
+         startingMode,
+-        permissionMode: opts.permissionMode ?? 'default'
++        permissionMode: opts.permissionMode ?? 'default',
++        effort: opts.effort
+     });
+ 
+     if (opts.resumeSessionId) {
+@@ -57,7 +61,10 @@ export async function kimiLoop(opts: KimiLoopOptions): Promise<void> {
+             model: getCurrentModel()
+         }),
+         runRemote: (instance) => kimiRemoteLauncher(instance, {
+-            model: getCurrentModel()
++            model: getCurrentModel(),
++            effort: instance.getEffort(),
++            onModelRollback: opts.onModelRollback,
++            onEffortChange: opts.onEffortChange
+         }),
+         onSessionReady: opts.onSessionReady
+     });
+diff --git a/cli/src/kimi/runKimi.ts b/cli/src/kimi/runKimi.ts
+index 7e8bcd2f3..9229461f7 100644
+--- a/cli/src/kimi/runKimi.ts
++++ b/cli/src/kimi/runKimi.ts
+@@ -21,6 +21,7 @@ export async function runKimi(opts: {
+     startingMode?: 'local' | 'remote';
+     permissionMode?: PermissionMode;
+     model?: string;
++    effort?: string;
+     resumeSessionId?: string;
+     existingSessionId?: string;
+     /** Fresh-spawn reserved hub id from `--hapi-session-id` (create/getOrCreate). */
+@@ -60,7 +61,8 @@ export async function runKimi(opts: {
+             workingDirectory,
+             agentState: initialState,
+             model: persistedModel,
+-            reservedSessionId: opts.reservedSessionId
++            reservedSessionId: opts.reservedSessionId,
++            effort: opts.effort
+         });
+     const { api, session } = bootstrap;
+ 
+@@ -71,12 +73,14 @@ export async function runKimi(opts: {
+ 
+     const messageQueue = new MessageQueue2<KimiMode>((mode) => hashObject({
+         permissionMode: mode.permissionMode,
+-        model: mode.model
++        model: mode.model,
++        effort: mode.effort
+     }));
+ 
+     const sessionWrapperRef: { current: KimiSession | null } = { current: null };
+     let currentPermissionMode: PermissionMode = opts.permissionMode ?? 'default';
+     let sessionModel: string | null = persistedModel ?? null;
++    let sessionEffort: string | null | undefined = opts.effort;
+     let resolvedModel = sessionModel ?? machineDefault;
+ 
+     const lifecycle = createRunnerLifecycle({
+@@ -100,6 +104,11 @@ export async function runKimi(opts: {
+         }
+         sessionInstance.setPermissionMode(currentPermissionMode);
+         sessionInstance.setModel(sessionModel);
++        if (sessionEffort === undefined) {
++            sessionEffort = sessionInstance.getEffort();
++        } else {
++            sessionInstance.setEffort(sessionEffort);
++        }
+         sessionInstance.pushKeepAlive();
+ 
+         logger.debug(`[kimi] Synced session config for keepalive: permissionMode=${currentPermissionMode}, model=${resolvedModel}`);
+@@ -109,7 +118,8 @@ export async function runKimi(opts: {
+         const formattedText = formatMessageWithAttachments(message.content.text, message.content.attachments);
+         const mode: KimiMode = {
+             permissionMode: currentPermissionMode,
+-            model: resolvedModel
++            model: resolvedModel,
++            effort: sessionEffort
+         };
+         messageQueue.push(formattedText, mode, localId);
+     });
+@@ -142,7 +152,7 @@ export async function runKimi(opts: {
+         if (!payload || typeof payload !== 'object') {
+             throw new Error('Invalid session config payload');
+         }
+-        const config = payload as { permissionMode?: unknown; model?: unknown };
++        const config = payload as { permissionMode?: unknown; model?: unknown; effort?: unknown };
+         const applied: Record<string, unknown> = {};
+ 
+         if (config.permissionMode !== undefined) {
+@@ -156,6 +166,21 @@ export async function runKimi(opts: {
+             applied.model = sessionModel;
+         }
+ 
++        if (config.effort !== undefined) {
++            if (sessionWrapperRef.current?.mode === 'local') {
++                throw new Error('Kimi effort can only be changed for remote sessions');
++            }
++            if (config.effort !== null && (typeof config.effort !== 'string' || config.effort.trim().length === 0)) {
++                throw new Error('Invalid effort');
++            }
++            const activeSession = sessionWrapperRef.current;
++            if (!activeSession) {
++                throw new Error('Kimi remote session is not ready for effort switching');
++            }
++            sessionEffort = await activeSession.applyRemoteEffort(config.effort === null ? null : config.effort.trim());
++            applied.effort = sessionEffort;
++        }
++
+         syncSessionMode();
+         return { applied };
+     });
+@@ -172,11 +197,19 @@ export async function runKimi(opts: {
+             api,
+             permissionMode: currentPermissionMode,
+             model: machineDefault,
++            effort: opts.effort,
+             resumeSessionId: opts.resumeSessionId,
+             onModeChange: createModeChangeHandler(session),
+             onSessionReady: (instance) => {
+                 sessionWrapperRef.current = instance;
+                 syncSessionMode();
++            },
++            onModelRollback: (model) => {
++                sessionModel = model;
++                resolvedModel = model ?? machineDefault;
++            },
++            onEffortChange: (effort) => {
++                sessionEffort = effort;
+             }
+         });
+     } catch (error) {
+diff --git a/cli/src/kimi/session.ts b/cli/src/kimi/session.ts
+index b47c3d9bf..250a53311 100644
+--- a/cli/src/kimi/session.ts
++++ b/cli/src/kimi/session.ts
+@@ -13,6 +13,7 @@ export class KimiSession extends AgentSessionBase<KimiMode> {
+     readonly startedBy: 'runner' | 'terminal';
+     readonly startingMode: 'local' | 'remote';
+     localLaunchFailure: LocalLaunchFailure | null = null;
++    private remoteEffortApplier: ((effort: string | null) => Promise<string | null>) | null = null;
+ 
+     constructor(opts: {
+         api: ApiClient;
+@@ -26,6 +27,7 @@ export class KimiSession extends AgentSessionBase<KimiMode> {
+         startedBy: 'runner' | 'terminal';
+         startingMode: 'local' | 'remote';
+         permissionMode?: PermissionMode;
++        effort?: string | null;
+     }) {
+         super({
+             api: opts.api,
+@@ -42,12 +44,14 @@ export class KimiSession extends AgentSessionBase<KimiMode> {
+                 ...metadata,
+                 kimiSessionId: sessionId
+             }),
+-            permissionMode: opts.permissionMode
++            permissionMode: opts.permissionMode,
++            effort: opts.effort
+         });
+ 
+         this.startedBy = opts.startedBy;
+         this.startingMode = opts.startingMode;
+         this.permissionMode = opts.permissionMode;
++        this.effort = opts.effort;
+     }
+ 
+     setPermissionMode = (mode: PermissionMode): void => {
+@@ -58,6 +62,24 @@ export class KimiSession extends AgentSessionBase<KimiMode> {
+         this.model = model;
+     };
+ 
++    setEffort = (effort: string | null | undefined): void => {
++        this.effort = effort;
++    };
++
++    setRemoteEffortApplier = (applier: ((effort: string | null) => Promise<string | null>) | null): void => {
++        this.remoteEffortApplier = applier;
++    };
++
++    applyRemoteEffort = async (effort: string | null): Promise<string | null> => {
++        if (this.thinking) {
++            throw new Error('Wait for the current Kimi turn to finish before changing effort');
++        }
++        if (!this.remoteEffortApplier) {
++            throw new Error('Kimi effort switching is unavailable for this session');
++        }
++        return await this.remoteEffortApplier(effort);
++    };
++
+     recordLocalLaunchFailure = (message: string, exitReason: LocalLaunchExitReason): void => {
+         this.localLaunchFailure = { message, exitReason };
+     };
+diff --git a/cli/src/kimi/types.ts b/cli/src/kimi/types.ts
+index 13b2ccb82..15d148b76 100644
+--- a/cli/src/kimi/types.ts
++++ b/cli/src/kimi/types.ts
+@@ -5,4 +5,5 @@ export type PermissionMode = KimiPermissionMode;
+ export interface KimiMode {
+     permissionMode: PermissionMode;
+     model?: string;
++    effort?: string | null;
+ }
+diff --git a/cli/src/runner/buildCliArgs.test.ts b/cli/src/runner/buildCliArgs.test.ts
+index 2f74af21a..e72fc0fe1 100644
+--- a/cli/src/runner/buildCliArgs.test.ts
++++ b/cli/src/runner/buildCliArgs.test.ts
+@@ -332,6 +332,25 @@ describe('buildCliArgs', () => {
+         expect(args).toContain('high')
+     })
+ 
++    it('passes --effort for Copilot ACP startup', () => {
++        const args = buildCliArgs('copilot', {
++            directory: '/tmp',
++            effort: 'high',
++        })
++        expect(args).toContain('--effort')
++        expect(args).toContain('high')
++    })
++
++    it('passes the HAPI effort bridge for Kimi ACP startup', () => {
++        const args = buildCliArgs('kimi', {
++            directory: '/tmp',
++            effort: 'high',
++        })
++        expect(args).toContain('--hapi-effort')
++        expect(args).toContain('high')
++        expect(args).not.toContain('--effort')
++    })
++
+     it('builds Grok runner resume, model, effort, and permission arguments', () => {
+         const args = buildCliArgs('grok', {
+             directory: '/tmp',
+diff --git a/cli/src/runner/run.ts b/cli/src/runner/run.ts
+index 916228953..2ae6c73c1 100644
+--- a/cli/src/runner/run.ts
++++ b/cli/src/runner/run.ts
+@@ -2219,9 +2219,12 @@ export function buildCliArgs(
+   if (options.model) {
+     args.push('--model', options.model);
+   }
+-  if (options.effort && (agent === 'claude' || agent === 'grok' || agent === 'pi' || agent === 'agy')) {
++  if (options.effort && (agent === 'claude' || agent === 'grok' || agent === 'pi' || agent === 'agy' || agent === 'copilot')) {
+     args.push('--effort', options.effort);
+   }
++  if (options.effort && agent === 'kimi') {
++    args.push('--hapi-effort', options.effort);
++  }
+   if (options.modelReasoningEffort && (agent === 'codex' || agent === 'opencode')) {
+     args.push('--model-reasoning-effort', options.modelReasoningEffort);
+   }
+diff --git a/docs/api/client-contract/rest.md b/docs/api/client-contract/rest.md
+index 0d90425ab..be1ba21c9 100644
+--- a/docs/api/client-contract/rest.md
++++ b/docs/api/client-contract/rest.md
+@@ -106,7 +106,7 @@ Source: `hub/src/web/routes/sessions.ts`; flavor gates in `shared/src/modes.ts`
+ |---|---|---|
+ | `POST /api/sessions/:id/permission-mode` | `{mode: PermissionMode}` | All flavors except `pi` and `dsh` (per-flavor allowed sets in `modes.ts`) |
+ | `POST /api/sessions/:id/model` | `{model: string \| {provider, modelId} \| null}` | Flavors with `supportsModelChange` (not `dsh`); remote-only for codex/cursor/grok |
+-| `POST /api/sessions/:id/effort` | `{effort: string \| null}` | claude, grok, pi (`supportsEffort`) |
++| `POST /api/sessions/:id/effort` | `{effort: string \| null}` | agy, claude, copilot, grok, kimi, pi (`supportsEffort`) |
+ | `POST /api/sessions/:id/model-reasoning-effort` | `{modelReasoningEffort: string \| null}` | codex, opencode (remote-only) |
+ | `POST /api/sessions/:id/service-tier` | `{serviceTier: 'fast' \| 'standard'}` | codex (remote-only) |
+ | `POST /api/sessions/:id/collaboration-mode` | `{mode: 'default' \| 'plan'}` | codex (remote-only) |
+@@ -143,6 +143,7 @@ The configuration routes in the table above respond `{ok: true}`; apply-failures
+ |---|---|
+ | `GET /api/sessions/:id/codex-models`, `/opencode-models`, `/cursor-models`, `/grok-models`, `/copilot-models`, `/kimi-models`, `/pi-models` | Active session of the matching flavor; 400 otherwise |
+ | `GET /api/sessions/:id/opencode-reasoning-effort-options`, `/grok-reasoning-effort-options` | Same pattern |
++| `GET /api/sessions/:id/reasoning-effort-options` | ACP thought-level options for active Copilot or Kimi sessions; successful responses include the applied HAPI `model` selection (`null` for the backend default) |
+ | `GET /api/machines/:id/agy-models`, `/pi-models`, `/codex-models`, `/cursor-models` | Machine-level (pre-spawn pickers). `agy-models` takes `?refresh=true` to skip the machine's cached catalog, and may answer `success: true` with an advisory `error` (see [Errors](./errors.md#rpc-wrapped-endpoints)) |
+ | `GET /api/machines/:id/opencode-models?cwd=`, `/grok-models?cwd=`, `/copilot-models?cwd=`, `/kimi-models?cwd=` | `cwd` query required (400 without) |
+ 
+diff --git a/docs/guide/agents.md b/docs/guide/agents.md
+index 4d5dc3733..01d8b1156 100644
+--- a/docs/guide/agents.md
++++ b/docs/guide/agents.md
+@@ -241,7 +241,9 @@ When the Grok CLI build advertises them, HAPI uses Grok's ACP extension methods
+ 
+ ### Model and effort controls
+ 
+-The Create page discovers Grok's ACP model catalog and the reasoning-effort choices advertised for each model. Remote sessions can switch both model and effort between turns; HAPI applies them through ACP `session/set_model` and `session/set_mode`. From the terminal, pick them at launch with `--model <model>` and `--effort <level>`.
++The Web composer uses the same Model and Effort controls for every agent. On wide screens, available controls can appear as value buttons; Settings contains only controls not already exposed in the toolbar, and narrow screens move them back into Settings. HAPI only shows an Effort control when the runner reports usable choices: Claude/Grok/Pi use native effort values, Codex/OpenCode use model reasoning effort, Cursor uses model variants, Antigravity uses `--effort`, and ACP Copilot/Kimi sessions use their advertised thought-level options. Remote controls apply between turns; unavailable or unsupported options stay hidden.
++
++The Create page exposes static Antigravity effort levels and discovers model-dependent Grok/Codex choices where available. Copilot/Kimi effort choices are discovered after their ACP session starts. Remote sessions can switch model and effort between turns; HAPI applies them through the agent's native config path. From the terminal, use each agent's supported launch flags where available; local Copilot launches pass the selected effort through `--effort <level>`.
+ 
+ HAPI also exposes Grok's common slash commands and discovers skills from `.grok/skills`, `~/.grok/skills`, and shared `.agents/skills`.
+ 
+diff --git a/docs/notes.md b/docs/notes.md
+new file mode 100644
+index 000000000..c60445f3a
+--- /dev/null
++++ b/docs/notes.md
+@@ -0,0 +1,4 @@
++# Engineering notes
++
++- ACP session config caches separate `mode` and `thought_level` domains. Only reconcile the thought-level cache when the requested value is advertised by that thought-level option; Copilot agent modes such as `plan` must not overwrite effort state.
++- Copilot and Kimi ACP effort handlers register after session initialization. Web discovery must tolerate transient `handler-not-registered` responses until the remote session is ready.
+diff --git a/hub/src/sync/rpcGateway.ts b/hub/src/sync/rpcGateway.ts
+index 7fa7e9e90..d8de6d743 100644
+--- a/hub/src/sync/rpcGateway.ts
++++ b/hub/src/sync/rpcGateway.ts
+@@ -35,6 +35,7 @@ import type {
+     OpencodeModelSummary,
+     OpencodeModelVariantsResponse,
+     OpencodeReasoningEffortResponse,
++    SessionReasoningEffortResponse,
+     PathExistsResponse,
+     PiModelsResponse,
+     SlashCommandsResponse,
+@@ -142,6 +143,7 @@ export type RpcListCopilotModelsResponse = CopilotModelsResponse
+ export type RpcListKimiModelsResponse = KimiModelsResponse
+ export type RpcListGrokReasoningEffortOptionsResponse = GrokReasoningEffortResponse
+ export type RpcListOpencodeReasoningEffortOptionsResponse = OpencodeReasoningEffortResponse
++export type RpcListSessionReasoningEffortOptionsResponse = SessionReasoningEffortResponse
+ export type RpcListAgyModelsResponse = AgyModelsResponse
+ export type RpcListPiModelsResponse = PiModelsResponse
+ export type RpcListClaudeModelsResponse = ClaudeModelsResponse
+@@ -638,6 +640,10 @@ export class RpcGateway {
+         return await this.sessionRpc(sessionId, RPC_METHODS.ListOpencodeReasoningEffortOptions, {}) as RpcListOpencodeReasoningEffortOptionsResponse
+     }
+ 
++    async listSessionReasoningEffortOptionsForSession(sessionId: string): Promise<RpcListSessionReasoningEffortOptionsResponse> {
++        return await this.sessionRpc(sessionId, RPC_METHODS.ListSessionReasoningEffortOptions, {}) as RpcListSessionReasoningEffortOptionsResponse
++    }
++
+     async listAgyModelsForMachine(machineId: string, options?: { refresh?: boolean }): Promise<RpcListAgyModelsResponse> {
+         const params = { refresh: options?.refresh === true }
+         return await this.machineRpc(machineId, RPC_METHODS.ListAgyModels, params, MODEL_LIST_RPC_TIMEOUT_MS) as RpcListAgyModelsResponse
+diff --git a/hub/src/sync/syncEngine.ts b/hub/src/sync/syncEngine.ts
+index 96ecc90b8..a4ebe9898 100644
+--- a/hub/src/sync/syncEngine.ts
++++ b/hub/src/sync/syncEngine.ts
+@@ -58,6 +58,7 @@ import {
+     type RpcListKimiModelsResponse,
+     type RpcListGrokReasoningEffortOptionsResponse,
+     type RpcListOpencodeReasoningEffortOptionsResponse,
++    type RpcListSessionReasoningEffortOptionsResponse,
+     type RpcCursorModel,
+     type RpcCursorChatStoreStatus,
+     type RpcOpencodeModel,
+@@ -95,6 +96,7 @@ export type {
+     RpcListKimiModelsResponse,
+     RpcListGrokReasoningEffortOptionsResponse,
+     RpcListOpencodeReasoningEffortOptionsResponse,
++    RpcListSessionReasoningEffortOptionsResponse,
+     RpcCursorModel,
+     RpcCursorChatStoreStatus,
+     RpcOpencodeModel,
+@@ -5018,4 +5020,8 @@ export class SyncEngine {
+     async listOpencodeReasoningEffortOptionsForSession(sessionId: string): Promise<RpcListOpencodeReasoningEffortOptionsResponse> {
+         return await this.rpcGateway.listOpencodeReasoningEffortOptionsForSession(sessionId)
+     }
++
++    async listSessionReasoningEffortOptionsForSession(sessionId: string): Promise<RpcListSessionReasoningEffortOptionsResponse> {
++        return await this.rpcGateway.listSessionReasoningEffortOptionsForSession(sessionId)
++    }
+ }
+diff --git a/hub/src/web/routes/sessions.test.ts b/hub/src/web/routes/sessions.test.ts
+index 0b7f6c1be..6c1ff23c1 100644
+--- a/hub/src/web/routes/sessions.test.ts
++++ b/hub/src/web/routes/sessions.test.ts
+@@ -68,6 +68,7 @@ function createApp(session: Session, opts?: {
+     stopSession?: (sessionId: string) => Promise<{ alreadyStopped: boolean }>
+     getCursorChatStoreStatus?: SyncEngine['getCursorChatStoreStatus']
+     listCodexModelsForSession?: SyncEngine['listCodexModelsForSession']
++    listSessionReasoningEffortOptionsForSession?: SyncEngine['listSessionReasoningEffortOptionsForSession']
+     forkConversation?: SyncEngine['forkConversation']
+     clearConversation?: SyncEngine['clearConversation']
+     implementCodexPlan?: SyncEngine['implementCodexPlan']
+@@ -132,6 +133,12 @@ function createApp(session: Session, opts?: {
+         ],
+         currentModelId: 'GLM-5.3-flash'
+     })
++    const listSessionReasoningEffortOptionsForSession = opts?.listSessionReasoningEffortOptionsForSession ?? (async () => ({
++        success: true,
++        model: 'gpt-5.6',
++        options: [{ value: 'low', name: 'Low' }, { value: 'high', name: 'High' }],
++        currentValue: 'low'
++    }))
+     const resumeSession = opts?.resumeSession ?? (async (sessionId: string) => ({ type: 'success', sessionId }))
+     const reopenSession = opts?.reopenSession ?? (async (sessionId: string) => ({
+         type: 'success' as const,
+@@ -155,6 +162,7 @@ function createApp(session: Session, opts?: {
+         listGrokModelsForSession,
+         listGrokReasoningEffortOptionsForSession,
+         listKimiModelsForSession,
++        listSessionReasoningEffortOptionsForSession,
+         resumeSession,
+         reopenSession,
+         abortSession: opts?.abortSession ?? (async () => {}),
+@@ -1011,6 +1019,39 @@ describe('sessions routes', () => {
+         ])
+     })
+ 
++    it('applies effort changes for remote Antigravity sessions', async () => {
++        const appState = createApp(createSession({
++            metadata: { path: '/tmp/project', host: 'localhost', flavor: 'agy' }
++        }))
++        const response = await appState.app.request('/api/sessions/session-1/effort', {
++            method: 'POST',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({ effort: 'medium' })
++        })
++        expect(response.status).toBe(200)
++        expect(appState.applySessionConfigCalls).toEqual([
++            ['session-1', { effort: 'medium' }]
++        ])
++    })
++
++    it('applies effort changes for remote Copilot and Kimi sessions', async () => {
++        for (const flavor of ['copilot', 'kimi'] as const) {
++            const session = createSession({
++                metadata: { path: '/tmp/project', host: 'localhost', flavor }
++            })
++            const appState = createApp(session)
++            const response = await appState.app.request('/api/sessions/session-1/effort', {
++                method: 'POST',
++                headers: { 'content-type': 'application/json' },
++                body: JSON.stringify({ effort: 'high' })
++            })
++            expect(response.status).toBe(200)
++            expect(appState.applySessionConfigCalls).toEqual([
++                ['session-1', { effort: 'high' }]
++            ])
++        }
++    })
++
+     it('applies effort changes for remote Grok sessions and rejects local control', async () => {
+         const remote = createSession({
+             metadata: { path: '/tmp/project', host: 'localhost', flavor: 'grok' }
+@@ -1059,6 +1100,33 @@ describe('sessions routes', () => {
+         })
+     })
+ 
++    it('returns generic reasoning effort options for active Copilot and Kimi sessions', async () => {
++        for (const flavor of ['copilot', 'kimi'] as const) {
++            const session = createSession({
++                metadata: { path: '/tmp/project', host: 'localhost', flavor }
++            })
++            const { app } = createApp(session)
++            const response = await app.request('/api/sessions/session-1/reasoning-effort-options')
++
++            expect(response.status).toBe(200)
++            expect(await response.json()).toEqual({
++                success: true,
++                model: 'gpt-5.6',
++                options: [
++                    { value: 'low', name: 'Low' },
++                    { value: 'high', name: 'High' }
++                ],
++                currentValue: 'low'
++            })
++        }
++    })
++
++    it('rejects generic reasoning effort options for unsupported sessions', async () => {
++        const { app } = createApp(createSession())
++        const response = await app.request('/api/sessions/session-1/reasoning-effort-options')
++        expect(response.status).toBe(400)
++    })
++
+     it('returns Grok model and effort catalogs for active Grok sessions', async () => {
+         const session = createSession({
+             metadata: { path: '/tmp/project', host: 'localhost', flavor: 'grok' }
+diff --git a/hub/src/web/routes/sessions.ts b/hub/src/web/routes/sessions.ts
+index 095de6630..3368f227b 100644
+--- a/hub/src/web/routes/sessions.ts
++++ b/hub/src/web/routes/sessions.ts
+@@ -1504,6 +1504,31 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
+         }
+     })
+ 
++    app.get('/sessions/:id/reasoning-effort-options', async (c) => {
++        const engine = requireSyncEngine(c, getSyncEngine)
++        if (engine instanceof Response) return engine
++
++        const sessionResult = requireSessionFromParam(c, engine, { requireActive: true })
++        if (sessionResult instanceof Response) return sessionResult
++
++        const flavor = sessionResult.session.metadata?.flavor
++        if (flavor !== 'copilot' && flavor !== 'kimi') {
++            return c.json({
++                success: false,
++                error: 'Session reasoning effort options are only available for Copilot and Kimi sessions'
++            }, 400)
++        }
++
++        try {
++            return c.json(await engine.listSessionReasoningEffortOptionsForSession(sessionResult.sessionId))
++        } catch (error) {
++            return c.json({
++                success: false,
++                error: error instanceof Error ? error.message : 'Failed to list session reasoning effort options'
++            }, 500)
++        }
++    })
++
+     app.get('/sessions/:id/grok-models', async (c) => {
+         const engine = requireSyncEngine(c, getSyncEngine)
+         if (engine instanceof Response) return engine
+diff --git a/shared/src/agentConfig.test.ts b/shared/src/agentConfig.test.ts
+index 3fc8e0a3d..af9469d36 100644
+--- a/shared/src/agentConfig.test.ts
++++ b/shared/src/agentConfig.test.ts
+@@ -18,13 +18,27 @@ describe('agent config descriptors', () => {
+         ])
+     })
+ 
+-    test('models Cursor variant as a dependent model field rather than a page-specific control', () => {
++    test('models Cursor variant as a dependent model and effort field', () => {
+         const descriptor = getAgentConfigDescriptor('cursor')
+         expect(descriptor.fields).toContainEqual(expect.objectContaining({
+             id: 'model',
+             kind: 'dependent-select',
+             optionSource: 'machine'
+         }))
++        expect(descriptor.fields).toContainEqual(expect.objectContaining({
++            id: 'effort',
++            kind: 'dependent-select',
++            optionSource: 'model'
++        }))
++    })
++
++    test('advertises runtime effort fields for every wired agent', () => {
++        for (const flavor of ['agy', 'copilot', 'kimi'] as const) {
++            expect(getAgentConfigDescriptor(flavor).fields).toContainEqual(expect.objectContaining({
++                id: 'effort',
++                section: 'effort'
++            }))
++        }
+     })
+ 
+     test('reports DSH permission as managed by its ACP composition', () => {
+diff --git a/shared/src/agentConfig.ts b/shared/src/agentConfig.ts
+index 4db886a8c..992be5892 100644
+--- a/shared/src/agentConfig.ts
++++ b/shared/src/agentConfig.ts
+@@ -57,7 +57,11 @@ function fields(...fields: AgentConfigFieldDescriptor[]): AgentConfigFieldDescri
+ }
+ 
+ const BUILTIN_DESCRIPTORS: Record<AgentFlavor, AgentConfigFieldDescriptor[]> = {
+-    agy: fields({ ...MODEL, optionSource: 'machine' }, PERMISSION),
++    agy: fields(
++        { ...MODEL, optionSource: 'machine' },
++        { id: 'effort', section: 'effort', kind: 'select', optionSource: 'static', availability: 'both' },
++        PERMISSION
++    ),
+     claude: fields(MODEL, { id: 'effort', section: 'effort', kind: 'select', optionSource: 'static', availability: 'both' }, PERMISSION),
+     codex: fields(
+         { ...MODEL, optionSource: 'machine' },
+@@ -67,15 +71,27 @@ const BUILTIN_DESCRIPTORS: Record<AgentFlavor, AgentConfigFieldDescriptor[]> = {
+         { id: 'collaborationMode', section: 'settings', kind: 'select', optionSource: 'static', availability: 'both' }
+     ),
+     dsh: fields(MANAGED_PERMISSION),
+-    copilot: fields({ ...MODEL, optionSource: 'directory' }, PERMISSION),
+-    cursor: fields({ id: 'model', section: 'model', kind: 'dependent-select', optionSource: 'machine', availability: 'both' }, PERMISSION),
++    copilot: fields(
++        { ...MODEL, optionSource: 'directory' },
++        { id: 'effort', section: 'effort', kind: 'select', optionSource: 'session', availability: 'session' },
++        PERMISSION
++    ),
++    cursor: fields(
++        { id: 'model', section: 'model', kind: 'dependent-select', optionSource: 'machine', availability: 'both' },
++        { id: 'effort', section: 'effort', kind: 'dependent-select', optionSource: 'model', availability: 'session' },
++        PERMISSION
++    ),
+     gemini: fields(MODEL, PERMISSION),
+     grok: fields(
+         { ...MODEL, optionSource: 'directory' },
+         { id: 'effort', section: 'effort', kind: 'select', optionSource: 'model', availability: 'both' },
+         PERMISSION
+     ),
+-    kimi: fields({ ...MODEL, optionSource: 'directory' }, PERMISSION),
++    kimi: fields(
++        { ...MODEL, optionSource: 'directory' },
++        { id: 'effort', section: 'effort', kind: 'select', optionSource: 'session', availability: 'session' },
++        PERMISSION
++    ),
+     opencode: fields(
+         { ...MODEL, optionSource: 'directory' },
+         { id: 'effort', section: 'effort', kind: 'select', optionSource: 'model', availability: 'both' },
+diff --git a/shared/src/apiTypes.ts b/shared/src/apiTypes.ts
+index 2bcdb5f71..73a6f377c 100644
+--- a/shared/src/apiTypes.ts
++++ b/shared/src/apiTypes.ts
+@@ -913,6 +913,19 @@ export type OpencodeReasoningEffortResponse = {
+     error?: string
+ }
+ 
++export type SessionReasoningEffortOption = {
++    value: string
++    name?: string
++}
++
++export type SessionReasoningEffortResponse = {
++    success: boolean
++    model?: string | null
++    options?: SessionReasoningEffortOption[]
++    currentValue?: string | null
++    error?: string
++}
++
+ export type AgyModelSummary = {
+     modelId: string
+     name?: string
+diff --git a/shared/src/flavors.test.ts b/shared/src/flavors.test.ts
+index 065d8b279..3aa7e9c88 100644
+--- a/shared/src/flavors.test.ts
++++ b/shared/src/flavors.test.ts
+@@ -10,9 +10,9 @@ import {
+ } from './flavors'
+ 
+ describe('hasCapability', () => {
+-    test('agy supports model-change but not effort', () => {
++    test('agy supports model-change and effort', () => {
+         expect(hasCapability('agy', Capabilities.ModelChange)).toBe(true)
+-        expect(hasCapability('agy', Capabilities.Effort)).toBe(false)
++        expect(hasCapability('agy', Capabilities.Effort)).toBe(true)
+     })
+ 
+     test('claude supports model-change', () => {
+@@ -53,14 +53,14 @@ describe('hasCapability', () => {
+         expect(hasCapability('pi', Capabilities.Effort)).toBe(true)
+     })
+ 
+-    test('kimi supports model-change but not effort', () => {
++    test('kimi supports model-change and effort', () => {
+         expect(hasCapability('kimi', Capabilities.ModelChange)).toBe(true)
+-        expect(hasCapability('kimi', Capabilities.Effort)).toBe(false)
++        expect(hasCapability('kimi', Capabilities.Effort)).toBe(true)
+     })
+ 
+-    test('copilot supports model-change but not effort', () => {
++    test('copilot supports model-change and effort', () => {
+         expect(hasCapability('copilot', Capabilities.ModelChange)).toBe(true)
+-        expect(hasCapability('copilot', Capabilities.Effort)).toBe(false)
++        expect(hasCapability('copilot', Capabilities.Effort)).toBe(true)
+     })
+ 
+     test('grok supports runtime model and effort switching through ACP', () => {
+@@ -143,12 +143,14 @@ describe('convenience functions', () => {
+     })
+ 
+     test('supportsEffort matches hasCapability', () => {
++        expect(supportsEffort('agy')).toBe(true)
+         expect(supportsEffort('claude')).toBe(true)
+         expect(supportsEffort('codex')).toBe(false)
+         expect(supportsEffort('gemini')).toBe(false)
+         expect(supportsEffort('pi')).toBe(true)
+         expect(supportsEffort('grok')).toBe(true)
+-        expect(supportsEffort('kimi')).toBe(false)
++        expect(supportsEffort('kimi')).toBe(true)
++        expect(supportsEffort('copilot')).toBe(true)
+         expect(supportsEffort(null)).toBe(false)
+     })
+ })
+diff --git a/shared/src/flavors.ts b/shared/src/flavors.ts
+index 7cd111e03..6faf46ee3 100644
+--- a/shared/src/flavors.ts
++++ b/shared/src/flavors.ts
+@@ -10,11 +10,11 @@ export type Capability = typeof Capabilities[keyof typeof Capabilities]
+ 
+ // --- Per-flavor capability sets ---
+ const FLAVOR_CAPS: Record<AgentFlavor, ReadonlySet<Capability>> = {
+-    agy: new Set([Capabilities.ModelChange]),
++    agy: new Set([Capabilities.ModelChange, Capabilities.Effort]),
+     claude: new Set([Capabilities.ModelChange, Capabilities.Effort]),
+     gemini: new Set([Capabilities.ModelChange]),
+-    kimi: new Set([Capabilities.ModelChange]),
+-    copilot: new Set([Capabilities.ModelChange]),
++    kimi: new Set([Capabilities.ModelChange, Capabilities.Effort]),
++    copilot: new Set([Capabilities.ModelChange, Capabilities.Effort]),
+     grok: new Set([Capabilities.ModelChange, Capabilities.Effort]),
+     codex: new Set([Capabilities.ModelChange]),
+     dsh: new Set(),
+diff --git a/shared/src/rpcMethods.ts b/shared/src/rpcMethods.ts
+index 6235ddaf7..fcabe4eb0 100644
+--- a/shared/src/rpcMethods.ts
++++ b/shared/src/rpcMethods.ts
+@@ -46,6 +46,7 @@ export const RPC_METHODS = {
+     ListKimiModelsForCwd: 'listKimiModelsForCwd',
+     ListKimiModels: 'listKimiModels',
+     ListOpencodeReasoningEffortOptions: 'listOpencodeReasoningEffortOptions',
++    ListSessionReasoningEffortOptions: 'listSessionReasoningEffortOptions',
+     ListAgyModels: 'listAgyModels',
+     ListClaudeModels: 'listClaudeModels',
+     /** Deliver one queued message into the active Pi turn (native steer). */
+diff --git a/web/README.md b/web/README.md
+index ff30e4483..77256b2e1 100644
+--- a/web/README.md
++++ b/web/README.md
+@@ -11,7 +11,7 @@ React Mini App / PWA for monitoring and controlling hapi sessions.
+   focuses optional notes, supports empty notes, and preserves the canonical
+   wire value across languages. Recorded other answers and notes remain visible
+   in live and historical cards; Pi/MCP forms without the flag are unchanged.
+-- Permission mode and model selection.
++- Permission mode plus capability-driven Model and Effort selection.
+ - Machine list and remote session spawn.
+ - File browser and git status/diff views.
+ - PWA install prompt and offline banner.
+@@ -64,7 +64,8 @@ See `src/router.tsx` for route definitions.
+ 
+ - Message thread with infinite scroll.
+ - Composer for sending messages.
+-- Permission mode and model selection for supported agents.
++- Permission mode selection for supported agents.
++- Model and Effort controls use the same picker across supported agents; unavailable choices stay hidden.
+   Cursor Auto uses CLI Auto for new/resumed sessions configured with Auto. When ACP does not advertise a literal Auto option, the session picker warns that switching back from a concrete model requires a restart; HAPI does not automatically restart an active session.
+ - Session abort and handoff controls.
+ - Codex **Continue planning** hides the current proposal's action menu locally
+diff --git a/web/src/api/client.ts b/web/src/api/client.ts
+index 72e1047c3..ea371f594 100644
+--- a/web/src/api/client.ts
++++ b/web/src/api/client.ts
+@@ -51,6 +51,7 @@ import type {
+     OpencodeModelsResponse,
+     OpencodeModelVariantsResponse,
+     OpencodeReasoningEffortResponse,
++    SessionReasoningEffortResponse,
+     PiModelsResponse,
+     ClaudeModelsResponse,
+     QueuedStateResponse,
+@@ -933,6 +934,12 @@ export class ApiClient {
+         )
+     }
+ 
++    async getSessionReasoningEffortOptions(sessionId: string): Promise<SessionReasoningEffortResponse> {
++        return await this.request<SessionReasoningEffortResponse>(
++            `/api/sessions/${encodeURIComponent(sessionId)}/reasoning-effort-options`
++        )
++    }
++
+     async getSessionCursorModels(sessionId: string): Promise<CursorModelsResponse> {
+         return await this.request<CursorModelsResponse>(
+             `/api/sessions/${encodeURIComponent(sessionId)}/cursor-models`
+diff --git a/web/src/components/AssistantChat/HappyComposer.modelEffortButtons.test.tsx b/web/src/components/AssistantChat/HappyComposer.modelEffortButtons.test.tsx
+index 3382aec06..db40a7bd6 100644
+--- a/web/src/components/AssistantChat/HappyComposer.modelEffortButtons.test.tsx
++++ b/web/src/components/AssistantChat/HappyComposer.modelEffortButtons.test.tsx
+@@ -36,6 +36,7 @@ const runtime = vi.hoisted(() => ({
+     sentIntents: [] as ComposerSendIntent[],
+     narrowViewport: false,
+     toolbarLayout: null as ComposerToolbarLayout | null,
++    haptic: { impact: vi.fn(), notification: vi.fn() },
+ }))
+ 
+ vi.mock('@assistant-ui/react', async () => {
+@@ -107,7 +108,7 @@ vi.mock('@/hooks/useComposerDraft', () => ({
+     useComposerDraft: () => ({ sessionId: undefined, complete: true, restoredAny: false, hasStoredAttachments: false }),
+ }))
+ vi.mock('@/hooks/useComposerEnterBehavior', () => ({ useComposerEnterBehavior: () => ({ composerEnterBehavior: 'send' }) }))
+-vi.mock('@/hooks/usePlatform', () => ({ usePlatform: () => ({ haptic: { impact: () => {}, notification: () => {} }, isTouch: false }) }))
++vi.mock('@/hooks/usePlatform', () => ({ usePlatform: () => ({ haptic: runtime.haptic, isTouch: false }) }))
+ vi.mock('@/hooks/usePWAInstall', () => ({ usePWAInstall: () => ({ isStandalone: false, isIOS: false }) }))
+ vi.mock('@/hooks/useActiveWord', () => ({ useActiveWord: () => null }))
+ vi.mock('@/hooks/useActiveSuggestions', () => ({ useActiveSuggestions: () => [[], -1, () => {}, () => {}, () => {}] }))
+@@ -161,10 +162,90 @@ describe('HappyComposer generic model/effort value buttons', () => {
+         expect(screen.queryByRole('button', { name: 'XHigh' })).toBeNull()
+     })
+ 
+-    it('shows only the model button for flavors without effort support', () => {
+-        renderComposer('codex')
++    it('shows Codex reasoning effort through the generic Effort button', () => {
++        renderComposer('codex', {
++            modelReasoningEffort: 'high',
++            availableModelReasoningEffortOptions: [
++                { value: 'low' },
++                { value: 'medium' },
++                { value: 'high' },
++            ],
++            onModelReasoningEffortChange: vi.fn(),
++        })
+         expect(screen.getByRole('button', { name: 'Sonnet 4' })).toBeTruthy()
+-        expect(screen.queryByRole('button', { name: 'High' })).toBeNull()
++        expect(screen.getByRole('button', { name: 'High' })).toBeTruthy()
++    })
++
++    it('keeps the default AGY model and effort controls visible', () => {
++        renderComposer('agy', {
++            model: null,
++            effort: null,
++            availableModelOptions: [{ value: 'gemini-3.6-flash-low', label: 'Gemini 3.6 Flash (Low)' }],
++        })
++        expect(screen.getByRole('button', { name: 'Default' })).toBeTruthy()
++        expect(screen.getByRole('button', { name: 'Auto' })).toBeTruthy()
++    })
++
++    it('keeps the default ACP effort control visible and resettable', () => {
++        const effortChanges: Array<string | null> = []
++        renderComposer('copilot', {
++            model: 'gpt-5.6',
++            effort: null,
++            availableEffortOptions: [
++                { value: 'low', name: 'Low' },
++                { value: 'high', name: 'High' },
++            ],
++            onEffortChange: (effort) => effortChanges.push(effort),
++        })
++        const defaultButtons = screen.getAllByRole('button', { name: 'Default' })
++        expect(defaultButtons.length).toBeGreaterThan(0)
++        fireEvent.click(defaultButtons[0]!)
++        fireEvent.click(screen.getAllByRole('button', { name: 'Default' })[0]!)
++        expect(effortChanges).toEqual([null])
++    })
++
++    it('shows Antigravity effort through the generic Effort button', () => {
++        renderComposer('agy', { effort: 'medium' })
++        expect(screen.getByRole('button', { name: 'Medium' })).toBeTruthy()
++    })
++
++    it('shows ACP-discovered Copilot effort through the generic Effort button', () => {
++        renderComposer('copilot', {
++            effort: 'high',
++            availableEffortOptions: [
++                { value: 'low', name: 'Low' },
++                { value: 'high', name: 'High' },
++            ],
++        })
++        expect(screen.getByRole('button', { name: 'High' })).toBeTruthy()
++    })
++
++    it('shows ACP-discovered Kimi effort through the generic Effort button', () => {
++        renderComposer('kimi', {
++            effort: 'medium',
++            availableEffortOptions: [
++                { value: 'low', name: 'Low' },
++                { value: 'medium', name: 'Medium' },
++            ],
++        })
++        expect(screen.getByRole('button', { name: 'Medium' })).toBeTruthy()
++    })
++
++    it('shows Cursor model variants through the generic Effort button', () => {
++        renderComposer('cursor', {
++            model: 'composer-2.5-fast',
++            selectedModelBase: 'composer-2.5',
++            selectedModelVariant: 'composer-2.5-fast',
++            modelEffortOptions: [
++                { value: 'composer-2.5-fast', label: 'Fast' },
++                { value: 'composer-2.5-thinking', label: 'Thinking' },
++            ],
++            onModelEffortChange: vi.fn(),
++            availableModelOptions: [
++                { value: 'composer-2.5', label: 'Composer 2.5' },
++            ],
++        })
++        expect(screen.getByRole('button', { name: 'Fast' })).toBeTruthy()
+     })
+ 
+     it('hides value buttons on narrow viewports, keeping settings', () => {
+@@ -201,22 +282,55 @@ describe('HappyComposer generic model/effort value buttons', () => {
+         expect(screen.queryByText('Model')).toBeNull()
+     })
+ 
+-    it('opens the full sheet from the gear with Model before Permission', () => {
++    it('omits externally visible Model and Effort sections from the gear sheet', () => {
+         renderComposer('claude')
+         fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
+-        const model = screen.getByText('Model')
+-        const permission = screen.getByText('Permission Mode')
+-        expect(model.compareDocumentPosition(permission) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
++        expect(screen.queryByText('Model')).toBeNull()
++        expect(screen.queryByText('Effort')).toBeNull()
++        expect(screen.getByText('Permission Mode')).toBeTruthy()
++    })
++
++    it('keeps hidden Model and Effort controls available from the gear sheet', () => {
++        runtime.toolbarLayout = {
++            mode: 'left',
++            left: ['attachment', 'settings', 'expand'],
++            right: [],
++            hidden: ['model', 'effort', 'terminal', 'switch', 'voiceMic', 'scratchlist', 'schedule', 'abort'],
++        }
++        renderComposer('claude')
++        expect(screen.queryByRole('button', { name: 'Sonnet 4' })).toBeNull()
++        expect(screen.queryByRole('button', { name: 'High' })).toBeNull()
++        fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
++        expect(screen.getByText('Model')).toBeTruthy()
+         expect(screen.getByText('Effort')).toBeTruthy()
++        expect(screen.getByText('Permission Mode')).toBeTruthy()
++    })
++
++    it('hides the gear when all available configuration sections have external buttons', () => {
++        renderComposer('claude', { onPermissionModeChange: undefined })
++        expect(screen.queryByRole('button', { name: 'Settings' })).toBeNull()
+     })
+ 
+-    it('expands an anchored sheet to the full sheet when the gear is clicked', () => {
++    it('applies the same de-duplication to Pi without a Pi-specific settings trigger', () => {
++        renderComposer('pi', {
++            onPermissionModeChange: undefined,
++            piModels: [
++                { provider: 'gemini', modelId: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', reasoning: true },
++            ],
++            piSelectedModel: { provider: 'gemini', modelId: 'gemini-2.5-pro' },
++        })
++        expect(screen.getByRole('button', { name: 'Gemini 2.5 Pro' })).toBeTruthy()
++        expect(screen.getByRole('button', { name: 'High' })).toBeTruthy()
++        expect(screen.queryByRole('button', { name: 'Settings' })).toBeNull()
++    })
++
++    it('expands an anchored sheet to the full remaining settings when the gear is clicked', () => {
+         renderComposer('claude')
+         fireEvent.click(screen.getByRole('button', { name: 'Sonnet 4' }))
+         expect(screen.queryByText('Effort')).toBeNull()
+         fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
+-        expect(screen.getByText('Model')).toBeTruthy()
+-        expect(screen.getByText('Effort')).toBeTruthy()
++        expect(screen.queryByText('Model')).toBeNull()
++        expect(screen.queryByText('Effort')).toBeNull()
+         expect(screen.getByText('Permission Mode')).toBeTruthy()
+     })
+ 
+@@ -231,7 +345,36 @@ describe('HappyComposer generic model/effort value buttons', () => {
+         // Pi uses the same value buttons as every other flavor.
+         expect(screen.getByRole('button', { name: 'Gemini 2.5 Pro' })).toBeTruthy()
+         expect(screen.getByRole('button', { name: 'High' })).toBeTruthy()
+-        expect(screen.getByRole('button', { name: 'Settings' })).toBeTruthy()
++        expect(screen.queryByRole('button', { name: 'Settings' })).toBeNull()
++    })
++
++    it('disables the model shortcut when the Pi catalog loads after mount', () => {
++        const onModelChange = vi.fn()
++        const props = {
++            sessionId: 'composer-test',
++            disabled: false,
++            agentFlavor: 'pi',
++            model: 'gemini-2.5-pro',
++            effort: 'high',
++            permissionMode: 'default',
++            onModelChange,
++            onEffortChange: vi.fn(),
++            onPermissionModeChange: vi.fn(),
++            availableModelOptions: [{ value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' }],
++            piSelectedModel: { provider: 'gemini', modelId: 'gemini-2.5-pro' },
++            pendingSendIntentRef: runtime.pendingSendIntentRef as { current: ComposerSendIntent },
++        } satisfies Parameters<typeof HappyComposer>[0]
++        const view = (piModels: Parameters<typeof HappyComposer>[0]['piModels']) => (
++            <I18nProvider><HappyComposer {...props} piModels={piModels} /></I18nProvider>
++        )
++        const { rerender } = render(view(undefined))
++
++        rerender(view([
++            { provider: 'gemini', modelId: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', reasoning: true },
++        ]))
++        fireEvent.keyDown(window, { key: 'm', ctrlKey: true })
++
++        expect(onModelChange).not.toHaveBeenCalled()
+     })
+ 
+     it('opens the settings sheet with provider-grouped model rows for Pi', () => {
+@@ -274,6 +417,7 @@ describe('HappyComposer generic model/effort value buttons', () => {
+                 { provider: 'gemini', modelId: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', reasoning: true },
+             ],
+             piSelectedModel: { provider: 'gemini', modelId: 'gemini-2.5-pro' },
++            allowConfigChangesWhileThinking: true,
+         })
+         // Value buttons are collapsed on narrow; the gear is the only trigger and
+         // must stay clickable while a Pi turn is running (#1442).
+@@ -318,10 +462,20 @@ describe('HappyComposer generic model/effort value buttons', () => {
+         expect(screen.queryByText('Default')).toBeNull()
+     })
+ 
+-    it('clears Cursor variant drill-down when the sheet is closed through the value button', () => {
++    it.each(['model', 'settings'])('keeps Cursor drill-down reachable and resets it after closing from %s', (entry) => {
++        if (entry === 'settings') runtime.toolbarLayout = {
++            mode: 'left', left: ['attachment', 'effort', 'settings', 'expand'], right: [],
++            hidden: ['model', 'terminal', 'switch', 'voiceMic', 'scratchlist', 'schedule', 'abort'],
++        }
+         renderComposer('cursor', {
+             model: 'composer-2.5-fast',
+             selectedModelBase: 'composer-2.5',
++            selectedModelVariant: 'composer-2.5-fast',
++            modelEffortOptions: [
++                { value: 'composer-2.5-fast', label: 'Fast' },
++                { value: 'composer-2.5-mini', label: 'Composer 2.5 Mini' },
++            ],
++            onModelEffortChange: vi.fn(),
+             availableModelOptions: [
+                 { value: 'composer-2.5', label: 'Composer 2.5' },
+                 { value: 'composer-2.5-fast', label: 'Composer 2.5 Fast' },
+@@ -335,7 +489,7 @@ describe('HappyComposer generic model/effort value buttons', () => {
+                 : [],
+         })
+         // Open from the value button (label resolves to the selected base).
+-        const valueButton = screen.getByRole('button', { name: 'Composer 2.5' })
++        const valueButton = screen.getByRole('button', { name: entry === 'settings' ? 'Settings' : 'Composer 2.5' })
+         fireEvent.click(valueButton)
+         // Drill into the multi-variant base row: the Model section is replaced
+         // by the variant sub-list with a back control.
+@@ -344,12 +498,19 @@ describe('HappyComposer generic model/effort value buttons', () => {
+         fireEvent.click(baseRow)
+         expect(screen.queryByText('Model')).toBeNull()
+         expect(screen.getByText('← Models')).toBeTruthy()
++        expect(screen.getByRole('button', { name: 'Composer 2.5 Mini' })).toBeTruthy()
+         // Close and reopen through the value button: drill-down must reset to
+         // the base model list (same behavior as the gear toggle).
+         fireEvent.click(valueButton)
+         fireEvent.click(valueButton)
+         expect(screen.queryByText('← Models')).toBeNull()
+         expect(screen.getByText('Model')).toBeTruthy()
++        fireEvent.click(screen.getAllByRole('button', { name: 'Composer 2.5' })
++            .find((button) => button.className.includes('w-full'))!)
++        fireEvent.click(screen.getAllByRole('button', { name: 'Composer 2.5 Fast' })
++            .find((button) => button.hasAttribute('aria-label'))!)
++        expect(screen.queryByText('← Models')).toBeNull()
++        expect(screen.getByRole('button', { name: 'Composer 2.5 Mini' })).toBeTruthy()
+     })
+ 
+     it('exposes no effort action while the Pi catalog is unresolved mid-turn', () => {
+@@ -433,6 +594,19 @@ describe('HappyComposer generic model/effort value buttons', () => {
+         expect(screen.getByRole('button', { name: 'Default' })).toBeTruthy()
+     })
+ 
++    it.each(['auto', 'default', 'default[]'])('preserves Cursor Auto in the model button and selected row (%s)', (model) => {
++        renderComposer('cursor', {
++            model,
++            availableModelOptions: [{ value: 'auto', label: 'Auto' }],
++        })
++        const modelButton = screen.getByRole('button', { name: 'Auto' })
++        expect(modelButton).toBeTruthy()
++        expect(screen.queryByRole('button', { name: 'Default' })).toBeNull()
++        fireEvent.click(modelButton)
++        const selectedRow = screen.getAllByRole('button', { name: 'Auto' }).find(button => button.querySelector('span'))!
++        expect(selectedRow.querySelector('span')!.className).toContain('text-[var(--app-link)]')
++    })
++
+     it('toggles the settings sheet closed when the model value button is clicked again', () => {
+         renderComposer('claude')
+         const modelButton = screen.getAllByRole('button', { name: 'Sonnet 4' })[0]
+diff --git a/web/src/components/AssistantChat/HappyComposer.sendError.test.tsx b/web/src/components/AssistantChat/HappyComposer.sendError.test.tsx
+index 5f4560196..bc6bfc2b4 100644
+--- a/web/src/components/AssistantChat/HappyComposer.sendError.test.tsx
++++ b/web/src/components/AssistantChat/HappyComposer.sendError.test.tsx
+@@ -235,6 +235,7 @@ function ComposerHarness(props: {
+                         : current
+                 )}
+                 agentFlavor="pi"
++                allowConfigChangesWhileThinking
+                 thinking={props.piRunning}
+                 model="pi-model"
+                 piModels={[{ provider: 'pi', modelId: 'pi-model', name: 'Pi model' }]}
+diff --git a/web/src/components/AssistantChat/HappyComposer.tsx b/web/src/components/AssistantChat/HappyComposer.tsx
+index 72d4d513e..8bd0639fe 100644
+--- a/web/src/components/AssistantChat/HappyComposer.tsx
++++ b/web/src/components/AssistantChat/HappyComposer.tsx
+@@ -22,6 +22,7 @@ import {
+ } from 'react'
+ import { useNarrowViewport } from '@/hooks/useNarrowViewport'
+ import { shouldInvokeComposerDictateShortcut } from '@/lib/composerDictateShortcut'
++import { useComposerToolbarLayout } from '@/hooks/useComposerToolbarLayout'
+ import { isRichComposerMentionsEnabled, resolveComposerPlaceholderKey } from '@/lib/composerSegments'
+ import { dictationDirectSendEligible, sendVoiceMessage } from '@/lib/dictationSend'
+ import type { SessionMentionResolveResult } from '@/components/AssistantChat/RichComposerInput'
+@@ -40,8 +41,7 @@ import { applySuggestion } from '@/utils/applySuggestion'
+ import { DEFAULT_AUTOCOMPLETE_PREFIXES } from '@/lib/autocomplete'
+ import { usePlatform } from '@/hooks/usePlatform'
+ import { usePWAInstall } from '@/hooks/usePWAInstall'
+-import { supportsEffort, supportsModelChange, PI_THINKING_LEVEL_LABELS } from '@hapi/protocol'
+-import type { PiThinkingLevel } from '@hapi/protocol'
++import { supportsEffort, supportsModelChange } from '@hapi/protocol'
+ import { markSkillUsed } from '@/lib/recent-skills'
+ import { useComposerDraft } from '@/hooks/useComposerDraft'
+ import type { AttachmentDraftInput } from '@/lib/composer-attachment-drafts'
+@@ -198,6 +198,16 @@ export function useRichComposerBridge(
+ 
+ const defaultSuggestionHandler = async (): Promise<Suggestion[]> => []
+ 
++type ComposerModelValue = string | null | { provider: string; modelId: string }
++type ComposerModelOption = { value: ComposerModelValue; label: string }
++type ComposerModelGroup = { key: string; label?: string; options: ComposerModelOption[] }
++
++function composerModelValueKey(value: ComposerModelValue): string {
++    if (value === null) return 'default'
++    if (typeof value === 'string') return value
++    return `${value.provider}:${value.modelId}`
++}
++
+ /** True when composer text/attachment ids match a pre-park snapshot. */
+ export function composerParkSnapshotUnchanged(
+     snapshot: { text: string; attachments: readonly { id: string }[] },
+@@ -343,6 +353,7 @@ export function HappyComposer(props: {
+     /** Model for the context-window heuristic; see StatusBar.contextModel. */
+     contextModel?: string | null
+     controlledByUser?: boolean
++    allowConfigChangesWhileThinking?: boolean
+     concurrentClients?: boolean
+     agentFlavor?: string | null
+     availableModelOptions?: Array<{ value: string | null; label: string }>
+@@ -465,6 +476,7 @@ export function HappyComposer(props: {
+         contextWindow,
+         contextModel,
+         controlledByUser = false,
++        allowConfigChangesWhileThinking = false,
+         concurrentClients = false,
+         agentFlavor,
+         availableModelOptions,
+@@ -1119,10 +1131,28 @@ export function HappyComposer(props: {
+             : [],
+         [agentFlavor, modelReasoningEffort, availableModelReasoningEffortOptions]
+     )
+-    // Pi: group models by provider for hierarchical display
+-    const piModelGroups = useMemo(
+-        () => piModels && piModels.length > 0 ? groupModelsByProvider(piModels) : null,
+-        [piModels]
++    const modelPickerGroups = useMemo<ComposerModelGroup[]>(() => {
++        if (piModels !== undefined) {
++            return groupModelsByProvider(piModels).map((group) => ({
++                key: group.provider,
++                label: group.label,
++                options: group.models.map((piModel) => ({
++                    value: { provider: piModel.provider, modelId: piModel.modelId },
++                    label: piModel.name ?? piModel.modelId,
++                })),
++            }))
++        }
++        return [{
++            key: 'models',
++            options: modelOptions.map((option) => ({
++                value: option.value,
++                label: option.label,
++            })),
++        }]
++    }, [piModels, modelOptions])
++    const modelPickerOptions = useMemo(
++        () => modelPickerGroups.flatMap((group) => group.options),
++        [modelPickerGroups]
+     )
+     // Pi: find the currently selected model's thinkingLevelMap for effort filtering.
+     // Prefer provider-qualified match (metadata.piSelectedModel) when available —
+@@ -1148,19 +1178,35 @@ export function HappyComposer(props: {
+             onEffortChange(getHighestThinkingLevel(selectedPiModel.thinkingLevelMap))
+         }
+     }, [selectedPiModel, effort, onEffortChange])
+-    const claudeEffortOptions = useMemo(
+-        () => agentFlavor === 'pi'
+-            ? getPiThinkingLevelOptions(effort, selectedPiModel?.thinkingLevelMap)
+-            : agentFlavor === 'grok' && availableEffortOptions && availableEffortOptions.length > 0
+-                ? [
+-                    { value: null, label: 'Default' },
+-                    ...availableEffortOptions.map((option) => ({
+-                        value: option.value,
+-                        label: option.name ?? option.value
+-                    }))
+-                ]
+-            : getClaudeComposerEffortOptions(effort, availableEffortOptions?.map((option) => option.value)),
+-        [agentFlavor, effort, selectedPiModel, availableEffortOptions]
++    const effortOptions = useMemo(
++        () => agentFlavor === 'agy'
++            ? [
++                { value: null, label: 'Auto' },
++                { value: 'low', label: 'Low' },
++                { value: 'medium', label: 'Medium' },
++                { value: 'high', label: 'High' },
++            ]
++            : agentFlavor === 'pi'
++                ? getPiThinkingLevelOptions(effort, selectedPiModel?.thinkingLevelMap)
++                : agentFlavor !== 'claude' && availableEffortOptions && availableEffortOptions.length > 0
++                    ? [
++                        ...((agentFlavor === 'grok'
++                            || agentFlavor === 'copilot'
++                            || agentFlavor === 'kimi')
++                            && !availableEffortOptions.some((option) => {
++                                const value = option.value.toLowerCase()
++                                const name = option.name?.toLowerCase() ?? ''
++                                return value === 'default' || value === 'auto' || name === 'default' || name === 'auto'
++                            })
++                            ? [{ value: null, label: t('newSession.model.default') }]
++                            : []),
++                        ...availableEffortOptions.map((option) => ({
++                            value: option.value,
++                            label: option.name ?? option.value
++                        }))
++                    ]
++                    : getClaudeComposerEffortOptions(effort, availableEffortOptions?.map((option) => option.value)),
++        [agentFlavor, effort, selectedPiModel, availableEffortOptions, t]
+     )
+     const permissionModes = useMemo(
+         () => permissionModeOptions.map((option) => option.mode),
+@@ -1479,12 +1525,10 @@ export function HappyComposer(props: {
+ 
+     useEffect(() => {
+         const handleGlobalKeyDown = (e: globalThis.KeyboardEvent) => {
+-            // Pi needs { provider, modelId } to disambiguate duplicate model IDs,
+-            // but this generic cycler only emits a bare modelId (or null), which
+-            // would lose the provider and can pick the wrong cached match or clear
+-            // the model. Pi model changes go through the settings sheet's
+-            // provider-qualified picker (piModelGroups) only.
+-            if (agentFlavor === 'pi') return
++            // Structured model catalogs need provider-qualified values; the
++            // keyboard cycler only emits plain model ids, so leave those
++            // selections to the shared picker.
++            if (piModels !== undefined) return
+             if (e.key === 'm' && (e.metaKey || e.ctrlKey) && onModelChange && supportsModelChange(agentFlavor)) {
+                 e.preventDefault()
+                 onModelChange(getNextModelForFlavor(agentFlavor, model, availableModelOptions))
+@@ -1494,7 +1538,7 @@ export function HappyComposer(props: {
+ 
+         window.addEventListener('keydown', handleGlobalKeyDown)
+         return () => window.removeEventListener('keydown', handleGlobalKeyDown)
+-    }, [model, onModelChange, haptic, agentFlavor, availableModelOptions])
++    }, [model, onModelChange, haptic, agentFlavor, availableModelOptions, piModels])
+ 
+     const handleChange = useCallback((e: ReactChangeEvent<HTMLTextAreaElement>) => {
+         const selection = {
+@@ -1546,6 +1590,10 @@ export function HappyComposer(props: {
+     const handleSettingsToggle = useCallback((section: 'model' | 'effort' | null = null) => {
+         haptic('light')
+         if (showSettings && section !== settingsSection) {
++            if (section === 'effort') {
++                setCursorDrillDownBase(null)
++                setCursorDrillDownDefaultVariant(null)
++            }
+             // Open with a different anchor: switch sections, keep the sheet up.
+             setSettingsSection(section)
+             return
+@@ -1687,6 +1735,10 @@ export function HappyComposer(props: {
+         haptic('light')
+     }, [onServiceTierChange, controlsDisabled, haptic, dismissSettings])
+ 
++    const handleEffortOptionChange = useCallback((nextEffort: string | null) => {
++        handleEffortChange(piModels !== undefined && effort === nextEffort ? null : nextEffort)
++    }, [handleEffortChange, piModels, effort])
++
+     // 'standard' (not null) is the explicit Fast-off choice so it persists
+     // distinctly from an untouched/account-default session.
+     const fastModeOptions: Array<{ value: string; label: string }> = useMemo(() => [
+@@ -1694,16 +1746,21 @@ export function HappyComposer(props: {
+         { value: 'fast', label: t('misc.fastModeFast') }
+     ], [t])
+ 
++    // Generic model/effort value buttons. The current value label doubles as
++    // the button caption; clicking opens the settings sheet. Hidden on narrow
++    // viewports where only the settings button remains.
++    const isNarrowViewport = useNarrowViewport()
++    const { layout: composerToolbarLayout } = useComposerToolbarLayout()
++
+     const showCollaborationSettings = Boolean(onCollaborationModeChange && collaborationModeOptions.length > 0)
+     const showCopilotAgentModeSettings = Boolean(onCopilotAgentModeChange && copilotAgentModeOptions.length > 0)
+     const showPermissionSettings = Boolean(onPermissionModeChange && permissionModeOptions.length > 0)
+-    const showModelSettings = agentFlavor === 'pi'
+-        // Pi models only come from the dynamic piModels catalog; never fall
+-        // back to the generic synthesized modelOptions rows (they would post a
+-        // bare model id the Pi runner cannot resolve to a provider).
+-        ? Boolean(onModelChange && piModelGroups)
+-        : Boolean(onModelChange && supportsModelChange(agentFlavor) && modelOptions.length > 0)
++    const showModelSettings = Boolean(
++        onModelChange
++        && supportsModelChange(agentFlavor)
++        && modelPickerOptions.length > 0
+         && !cursorVariantDrillDownActive
++    )
+     const showModelEffortSettings = cursorVariantDrillDownActive
+         ? Boolean((onModelEffortChange ?? onModelChange) && visibleModelEffortOptions && visibleModelEffortOptions.length > 0)
+         : Boolean(
+@@ -1715,20 +1772,34 @@ export function HappyComposer(props: {
+     // For Pi: hide effort while the selected model is unresolved (catalog
+     // still loading/failed) or explicitly has reasoning: false — the generic
+     // fallback levels would mutate a set_thinking_level the model may reject.
+-    const piEffortUnavailable = agentFlavor === 'pi'
++    const catalogEffortUnavailable = piModels !== undefined
+         && (!selectedPiModel || selectedPiModel.reasoning === false)
+-    const showEffortSettings = Boolean(onEffortChange && supportsEffort(agentFlavor) && !piEffortUnavailable)
++    const requiresDiscoveredEffortOptions = agentFlavor === 'grok' || agentFlavor === 'copilot' || agentFlavor === 'kimi'
++    const showEffortSettings = Boolean(
++        onEffortChange
++        && supportsEffort(agentFlavor)
++        && !catalogEffortUnavailable
++        && (!requiresDiscoveredEffortOptions || (availableEffortOptions && availableEffortOptions.length > 0))
++    )
++    const modelToolbarVisible = !isNarrowViewport
++        && showModelSettings
++        && (composerToolbarLayout.left.includes('model') || composerToolbarLayout.right.includes('model'))
++    const effortToolbarVisible = !isNarrowViewport
++        && (showModelEffortSettings || showModelReasoningEffortSettings || showEffortSettings)
++        && (composerToolbarLayout.left.includes('effort') || composerToolbarLayout.right.includes('effort'))
++    const showModelSettingsInSettings = showModelSettings && !modelToolbarVisible
++    const showModelEffortSettingsInSettings = showModelEffortSettings && !effortToolbarVisible
++    const showModelReasoningEffortSettingsInSettings = showModelReasoningEffortSettings && !effortToolbarVisible
++    const showEffortSettingsInSettings = showEffortSettings && !effortToolbarVisible
+     const showFastModeSettings = Boolean(onServiceTierChange)
+-    const showModelAreaSettings = showModelSettings || showModelEffortSettings || showModelReasoningEffortSettings || showEffortSettings
+-    const showOtherSettings = showFastModeSettings || showCollaborationSettings || showCopilotAgentModeSettings
+     const showSettingsButton = Boolean(
+         showCollaborationSettings
+         || showCopilotAgentModeSettings
+         || showPermissionSettings
+-        || showModelSettings
+-        || showModelEffortSettings
+-        || showModelReasoningEffortSettings
+-        || showEffortSettings
++        || showModelSettingsInSettings
++        || showModelEffortSettingsInSettings
++        || showModelReasoningEffortSettingsInSettings
++        || showEffortSettingsInSettings
+         || showFastModeSettings
+     )
+     const showAbortButton = true
+@@ -1773,50 +1844,75 @@ export function HappyComposer(props: {
+         }
+     }, [props.dictateHotkeyRef, invokeDictateHotkey])
+ 
+-    // Generic model/effort value buttons. The current value label doubles as
+-    // the button caption; clicking opens the settings sheet. Hidden on narrow
+-    // viewports where only the settings button remains.
+-    const isNarrowViewport = useNarrowViewport()
+-    // Pi turns run for minutes with thread.isDisabled set the whole time, so
+-    // Pi keeps its model/effort controls live mid-turn (#1442) — the generic
+-    // disable rule (controlsDisabled) would lock them for the entire turn.
+-    const modelEffortControlsDisabled = agentFlavor === 'pi' ? configurationControlsDisabled : controlsDisabled
++    const modelEffortControlsDisabled = allowConfigChangesWhileThinking
++        ? configurationControlsDisabled
++        : controlsDisabled
++    const rawSelectedModel = selectedModelBase !== undefined ? selectedModelBase : model
++    const normalizedSelectedModel = agentFlavor === 'cursor'
++        ? (!rawSelectedModel || rawSelectedModel === 'auto' || rawSelectedModel === 'default' || rawSelectedModel === 'default[]' ? 'auto' : rawSelectedModel)
++        : (!rawSelectedModel || rawSelectedModel === 'auto' || rawSelectedModel === 'default' ? null : rawSelectedModel)
+     const modelValueLabel = useMemo(() => {
+-        if (isNarrowViewport) return undefined
+-        if (!onModelChange || !supportsModelChange(agentFlavor)) return undefined
+-        // Pi models come from the dynamic piModels catalog; show the
+-        // provider-qualified selection name. No button until the catalog
+-        // resolves: a bare session model id has no provider and the sheet
+-        // would have no Model section to open anyway.
+-        if (agentFlavor === 'pi') {
+-            if (!selectedPiModel) return undefined
+-            return selectedPiModel.name ?? selectedPiModel.modelId
+-        }
+-        if (modelOptions.length === 0) return undefined
+-        const rawKey = selectedModelBase !== undefined ? selectedModelBase : model
+-        const normalizedKey = agentFlavor === 'cursor'
+-            ? (!rawKey || rawKey === 'auto' || rawKey === 'default' || rawKey === 'default[]' ? 'auto' : rawKey)
+-            : (!rawKey || rawKey === 'auto' || rawKey === 'default' ? null : rawKey)
+-        const option = modelOptions.find((candidate) => candidate.value === normalizedKey)
+-        return option?.label ?? rawKey ?? undefined
+-    }, [isNarrowViewport, onModelChange, agentFlavor, selectedPiModel, model, modelOptions, selectedModelBase])
++        if (isNarrowViewport || !onModelChange || !supportsModelChange(agentFlavor)) return undefined
++        if (modelPickerOptions.length === 0) return undefined
++        const option = modelPickerOptions.find((candidate) => {
++            if (candidate.value !== null && typeof candidate.value === 'object') {
++                return piSelectedModel
++                    ? composerModelValueKey(candidate.value) === composerModelValueKey(piSelectedModel)
++                    : candidate.value.modelId === model
++            }
++            return candidate.value === normalizedSelectedModel
++        })
++        return option?.label ?? (normalizedSelectedModel === null ? t('newSession.model.default') : rawSelectedModel ?? undefined)
++    }, [
++        isNarrowViewport,
++        onModelChange,
++        supportsModelChange,
++        agentFlavor,
++        selectedModelBase,
++        model,
++        modelPickerOptions,
++        normalizedSelectedModel,
++        rawSelectedModel,
++        piSelectedModel,
++        t,
++    ])
+     const effortValueLabel = useMemo(() => {
+         if (isNarrowViewport) return undefined
+-        if (!onEffortChange || !supportsEffort(agentFlavor)) return undefined
+-        // Pi: without a resolved catalog entry there is no capability map to
+-        // derive levels from; hide the button until the selected model is known.
+-        if (agentFlavor === 'pi') {
+-            if (!selectedPiModel || selectedPiModel.reasoning === false) return undefined
+-            const effectiveLevel = effort && isThinkingLevelSupported(effort, selectedPiModel?.thinkingLevelMap)
+-                ? effort
+-                : getHighestThinkingLevel(selectedPiModel?.thinkingLevelMap)
+-            return effectiveLevel
+-                ? (PI_THINKING_LEVEL_LABELS[effectiveLevel as PiThinkingLevel] ?? effectiveLevel)
+-                : undefined
++        if (showModelEffortSettings) {
++            const selectedValue = resolveVisibleModelEffortSelectedValue({
++                options: visibleModelEffortOptions,
++                selectedModelVariant,
++                cursorDrillDownDefaultVariant,
++                model,
++            })
++            return visibleModelEffortOptions?.find((option) => option.value === selectedValue)?.label
++                ?? selectedValue
++                ?? undefined
+         }
+-        const option = claudeEffortOptions.find((candidate) => candidate.value === effort)
+-        return option?.label ?? (effort ? effort : undefined)
+-    }, [isNarrowViewport, onEffortChange, agentFlavor, selectedPiModel, effort, claudeEffortOptions])
++        if (showModelReasoningEffortSettings) {
++            const option = codexReasoningEffortOptions.find((candidate) => candidate.value === modelReasoningEffort)
++            return option?.label ?? modelReasoningEffort ?? undefined
++        }
++        if (showEffortSettings) {
++            const option = effortOptions.find((candidate) => candidate.value === effort)
++            return option?.label ?? (effort == null ? t('newSession.model.default') : effort)
++        }
++        return undefined
++    }, [
++        isNarrowViewport,
++        showModelEffortSettings,
++        visibleModelEffortOptions,
++        selectedModelVariant,
++        cursorDrillDownDefaultVariant,
++        model,
++        showModelReasoningEffortSettings,
++        codexReasoningEffortOptions,
++        modelReasoningEffort,
++        showEffortSettings,
++        effortOptions,
++        effort,
++        t,
++    ])
+ 
+     // Wrapper for DOM onClick consumers: never leak the MouseEvent into the
+     // `section` parameter (the gear must always open the full sheet).
+@@ -1845,10 +1941,20 @@ export function HappyComposer(props: {
+         const sheetModelAreaOn = settingsSection !== 'effort'
+         const sheetEffortAreaOn = settingsSection !== 'model'
+         const sheetOthersOn = settingsSection === null
+-        const sheetModelSettings = showModelSettings && sheetModelAreaOn
+-        const sheetModelEffortSettings = showModelEffortSettings && sheetModelAreaOn
+-        const sheetModelReasoningEffortSettings = showModelReasoningEffortSettings && sheetEffortAreaOn
+-        const sheetEffortSettings = showEffortSettings && sheetEffortAreaOn
++        const sheetModelSettings = showModelSettings && (
++            settingsSection === 'model' || (settingsSection === null && showModelSettingsInSettings)
++        ) && sheetModelAreaOn
++        const sheetModelEffortSettings = showModelEffortSettings && (
++            (cursorVariantDrillDownActive && settingsSection !== 'effort')
++            || (!cursorVariantDrillDownActive && settingsSection === 'effort')
++            || (settingsSection === null && showModelEffortSettingsInSettings)
++        ) && (cursorVariantDrillDownActive ? sheetModelAreaOn : sheetEffortAreaOn)
++        const sheetModelReasoningEffortSettings = showModelReasoningEffortSettings && (
++            settingsSection === 'effort' || (settingsSection === null && showModelReasoningEffortSettingsInSettings)
++        ) && sheetEffortAreaOn
++        const sheetEffortSettings = showEffortSettings && (
++            settingsSection === 'effort' || (settingsSection === null && showEffortSettingsInSettings)
++        ) && sheetEffortAreaOn
+         const sheetPermissionSettings = showPermissionSettings && sheetOthersOn
+         const sheetFastModeSettings = showFastModeSettings && sheetOthersOn
+         const sheetCollaborationSettings = showCollaborationSettings && sheetOthersOn
+@@ -1864,20 +1970,22 @@ export function HappyComposer(props: {
+                                 <div className="px-3 pb-1 text-xs font-semibold text-[var(--app-hint)]">
+                                     {t('misc.model')}
+                                 </div>
+-                                {agentFlavor === 'pi'
+-                                    ? piModelGroups?.map((group) => (
+-                                        <div key={group.provider}>
++                                {modelPickerGroups.map((group) => (
++                                    <div key={group.key}>
++                                        {group.label ? (
+                                             <div className="px-3 pt-2 pb-0.5 text-xs font-medium text-[var(--app-hint)]">
+                                                 {group.label}
+                                             </div>
+-                                            {group.models.map((piModel) => {
+-                                                const piRowSelected = piSelectedModel
+-                                                    ? piSelectedModel.provider === piModel.provider
+-                                                        && piSelectedModel.modelId === piModel.modelId
+-                                                    : model === piModel.modelId
+-                                                return (
++                                        ) : null}
++                                        {group.options.map((option) => {
++                                            const isSelected = option.value !== null && typeof option.value === 'object'
++                                                ? piSelectedModel
++                                                    ? composerModelValueKey(option.value) === composerModelValueKey(piSelectedModel)
++                                                    : option.value.modelId === model
++                                                : option.value === normalizedSelectedModel
++                                            return (
+                                                 <button
+-                                                    key={`${piModel.provider}:${piModel.modelId}`}
++                                                    key={composerModelValueKey(option.value)}
+                                                     type="button"
+                                                     disabled={modelEffortControlsDisabled}
+                                                     className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
+@@ -1885,68 +1993,38 @@ export function HappyComposer(props: {
+                                                             ? 'cursor-not-allowed opacity-50'
+                                                             : 'cursor-pointer hover:bg-[var(--app-secondary-bg)]'
+                                                     }`}
+-                                                    onClick={() => handleModelChange({ provider: piModel.provider, modelId: piModel.modelId })}
++                                                    onClick={() => {
++                                                        if (typeof option.value === 'string' || option.value === null) {
++                                                            if (resolveModelVariantsForBase) {
++                                                                handleCursorModelRowClick(option.value)
++                                                            } else {
++                                                                handleModelChange(option.value)
++                                                            }
++                                                        } else {
++                                                            handleModelChange(option.value)
++                                                        }
++                                                    }}
+                                                     onMouseDown={(e) => e.preventDefault()}
+                                                 >
+                                                     <div
+                                                         className={`flex h-4 w-4 items-center justify-center rounded-full border-2 ${
+-                                                            piRowSelected
++                                                            isSelected
+                                                                 ? 'border-[var(--app-link)]'
+                                                                 : 'border-[var(--app-hint)]'
+-                                                    }`}
++                                                        }`}
+                                                     >
+-                                                        {piRowSelected && (
++                                                        {isSelected && (
+                                                             <div className="h-2 w-2 rounded-full bg-[var(--app-link)]" />
+                                                         )}
+                                                     </div>
+-                                                    <span className={piRowSelected ? 'text-[var(--app-link)]' : ''}>
+-                                                        {piModel.name ?? piModel.modelId}
++                                                    <span className={isSelected ? 'text-[var(--app-link)]' : ''}>
++                                                        {option.label}
+                                                     </span>
+                                                 </button>
+-                                                )
+-                                            })}
+-                                        </div>
+-                                    ))
+-                                    : modelOptions.map((option) => {
+-                                        const isSelected = selectedModelBase !== undefined
+-                                            ? selectedModelBase === option.value
+-                                            : model === option.value
+-                                        return (
+-                                        <button
+-                                            key={option.value ?? 'auto'}
+-                                            type="button"
+-                                            disabled={modelEffortControlsDisabled}
+-                                            className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
+-                                                modelEffortControlsDisabled
+-                                                    ? 'cursor-not-allowed opacity-50'
+-                                                    : 'cursor-pointer hover:bg-[var(--app-secondary-bg)]'
+-                                            }`}
+-                                            onClick={() => {
+-                                                if (resolveModelVariantsForBase) {
+-                                                    handleCursorModelRowClick(option.value)
+-                                                } else {
+-                                                    handleModelChange(option.value)
+-                                                }
+-                                            }}
+-                                            onMouseDown={(e) => e.preventDefault()}
+-                                        >
+-                                            <div
+-                                                className={`flex h-4 w-4 items-center justify-center rounded-full border-2 ${
+-                                                    isSelected
+-                                                        ? 'border-[var(--app-link)]'
+-                                                        : 'border-[var(--app-hint)]'
+-                                                }`}
+-                                            >
+-                                                {isSelected && (
+-                                                    <div className="h-2 w-2 rounded-full bg-[var(--app-link)]" />
+-                                                )}
+-                                            </div>
+-                                            <span className={isSelected ? 'text-[var(--app-link)]' : ''}>
+-                                                {option.label}
+-                                            </span>
+-                                        </button>
+-                                        )
+-                                    })}
++                                            )
++                                        })}
++                                    </div>
++                                ))}
+                             </div>
+                         ) : null}
+ 
+@@ -2023,7 +2101,7 @@ export function HappyComposer(props: {
+                                 <div className="px-3 pb-1 text-xs font-semibold text-[var(--app-hint)]">
+                                     {t('misc.effort')}
+                                 </div>
+-                                {claudeEffortOptions.map((option) => (
++                                {effortOptions.map((option) => (
+                                     <button
+                                         key={option.value ?? 'auto'}
+                                         type="button"
+@@ -2033,9 +2111,7 @@ export function HappyComposer(props: {
+                                                 ? 'cursor-not-allowed opacity-50'
+                                                 : 'cursor-pointer hover:bg-[var(--app-secondary-bg)]'
+                                         }`}
+-                                        onClick={() => handleEffortChange(
+-                                            agentFlavor === 'pi' && effort === option.value ? null : option.value
+-                                        )}
++                                        onClick={() => handleEffortOptionChange(option.value)}
+                                         onMouseDown={(e) => e.preventDefault()}
+                                     >
+                                         <div
+@@ -2249,23 +2325,30 @@ export function HappyComposer(props: {
+         showCopilotAgentModeSettings,
+         showPermissionSettings,
+         showModelSettings,
++        showModelSettingsInSettings,
+         showModelEffortSettings,
++        showModelEffortSettingsInSettings,
+         visibleModelEffortOptions,
+         cursorVariantDrillDownActive,
+         cursorDrillDownBase,
+         cursorDrillDownDefaultVariant,
+         modelEffortOptions,
+-        piModelGroups,
++        modelPickerGroups,
++        modelPickerOptions,
++        normalizedSelectedModel,
++        rawSelectedModel,
+         selectedModelBase,
+         selectedModelVariant,
+         showModelReasoningEffortSettings,
++        showModelReasoningEffortSettingsInSettings,
+         showEffortSettings,
++        showEffortSettingsInSettings,
+         modelEffortControlsDisabled,
+         showFastModeSettings,
+         agentFlavor,
+         modelOptions,
+         codexReasoningEffortOptions,
+-        claudeEffortOptions,
++        effortOptions,
+         fastModeOptions,
+         suggestions,
+         selectedIndex,
+@@ -2288,6 +2371,7 @@ export function HappyComposer(props: {
+         handleModelEffortChange,
+         handleModelReasoningEffortChange,
+         handleEffortChange,
++        handleEffortOptionChange,
+         handleServiceTierChange,
+         clearCursorDrillDown,
+         resolveModelVariantsForBase,
+diff --git a/web/src/components/NewSession/EffortField.test.tsx b/web/src/components/NewSession/EffortField.test.tsx
+index 3aa270d45..925f664e0 100644
+--- a/web/src/components/NewSession/EffortField.test.tsx
++++ b/web/src/components/NewSession/EffortField.test.tsx
+@@ -118,10 +118,27 @@ describe('EffortField', () => {
+         expect(values).not.toContain('max')
+     })
+ 
+-    it('renders nothing for agents without an effort field', () => {
++    it('renders Antigravity low/medium/high effort', () => {
+         const { container } = render(
+             <EffortField {...baseProps} agent="agy" />
+         )
++        const select = container.querySelector('select') as HTMLSelectElement
++        expect(Array.from(select.options).map((option) => option.value)).toEqual([
++            'auto', 'low', 'medium', 'high'
++        ])
++    })
++
++    it('renders nothing for agents without a create-time effort field', () => {
++        const { container } = render(
++            <EffortField {...baseProps} agent="gemini" />
++        )
++        expect(container.querySelector('select')).toBeNull()
++    })
++
++    it('does not duplicate Cursor variants as a create-time effort field', () => {
++        const { container } = render(
++            <EffortField {...baseProps} agent="cursor" />
++        )
+         expect(container.querySelector('select')).toBeNull()
+     })
+ 
+diff --git a/web/src/components/NewSession/EffortField.tsx b/web/src/components/NewSession/EffortField.tsx
+index b5d674eb2..64ed54cb6 100644
+--- a/web/src/components/NewSession/EffortField.tsx
++++ b/web/src/components/NewSession/EffortField.tsx
+@@ -33,23 +33,32 @@ export type EffortFieldProps = {
+  *
+  * One component serves every flavor with an `effort` field:
+  * - Claude: the selected model's launch-effort levels, or every level when unknown.
++ * - Antigravity: static low/medium/high launch-effort levels.
+  * - Grok: model-dependent launch-effort levels.
+  * - Pi: model-dependent thinking levels (filtered by the selected model's
+  *   thinkingLevelMap; hidden when the model cannot reason).
+  * - Codex / OpenCode: model-dependent reasoning-effort levels.
++ * - ACP Copilot / Kimi effort is session-discovered and appears after launch.
+  */
+ export function EffortField(props: EffortFieldProps) {
+     const { t } = useTranslation()
+     const descriptor = getAgentConfigDescriptor(props.agent)
+     const field = descriptor.fields.find((candidate) => candidate.id === 'effort')
+-    if (!field) {
++    if (!field || field.availability === 'session') {
+         return null
+     }
+ 
+     const isReasoningEffort = props.agent === 'codex' || props.agent === 'opencode'
+ 
+     let options: Array<{ value: string; label: string }>
+-    if (props.agent === 'grok') {
++    if (props.agent === 'agy') {
++        options = [
++            { value: 'auto', label: t('newSession.model.default') },
++            { value: 'low', label: 'Low' },
++            { value: 'medium', label: 'Medium' },
++            { value: 'high', label: 'High' },
++        ]
++    } else if (props.agent === 'grok') {
+         options = props.grokOptions ?? GROK_EFFORT_OPTIONS
+     } else if (props.agent === 'pi') {
+         if (props.piSelectedModel?.reasoning === false) {
+diff --git a/web/src/components/NewSession/index.tsx b/web/src/components/NewSession/index.tsx
+index 15b7154e4..0263e1738 100644
+--- a/web/src/components/NewSession/index.tsx
++++ b/web/src/components/NewSession/index.tsx
+@@ -1607,7 +1607,7 @@ export function NewSession(props: {
+                     : agent === 'cursor'
+                         ? (model === 'auto' || !model ? 'auto' : model)
+                         : (model !== 'auto' ? model : undefined)
+-            const resolvedEffort = (agent === 'claude' || agent === 'grok' || agent === 'pi') && effort !== 'auto'
++            const resolvedEffort = (agent === 'agy' || agent === 'claude' || agent === 'grok' || agent === 'pi') && effort !== 'auto'
+                 ? effort
+                 : undefined
+             const resolvedModelReasoningEffort = (agent === 'codex' || agent === 'opencode') && modelReasoningEffort !== 'default'
+diff --git a/web/src/components/SessionChat.tsx b/web/src/components/SessionChat.tsx
+index 60f4923e7..97a4ef607 100644
+--- a/web/src/components/SessionChat.tsx
++++ b/web/src/components/SessionChat.tsx
+@@ -122,6 +122,7 @@ import { buildKimiSessionModelOptions } from '@/components/NewSession/grokModels
+ import { useGrokReasoningEffortOptions } from '@/hooks/queries/useGrokReasoningEffortOptions'
+ import { usePiModels } from '@/hooks/queries/usePiModels'
+ import { useOpencodeReasoningEffortOptions } from '@/hooks/queries/useOpencodeReasoningEffortOptions'
++import { useSessionReasoningEffortOptions } from '@/hooks/queries/useSessionReasoningEffortOptions'
+ import { queryKeys } from '@/lib/query-keys'
+ import { useVoiceOptional } from '@/lib/voice-context'
+ import { AgentTerminalView } from '@/components/AgentTerminal/AgentTerminalView'
+@@ -1088,6 +1089,12 @@ function SessionChatInner(props: SessionChatProps) {
+         sessionId: props.session.id,
+         enabled: agentFlavor === 'grok' && props.session.active && !controlledByUser
+     })
++    const sessionEffortState = useSessionReasoningEffortOptions({
++        api: props.api,
++        sessionId: props.session.id,
++        model: props.session.model,
++        enabled: (agentFlavor === 'copilot' || agentFlavor === 'kimi') && props.session.active && !controlledByUser
++    })
+     const grokModelOptions = useMemo(() => (
+         agentFlavor === 'grok'
+             ? [
+@@ -2223,7 +2230,9 @@ function SessionChatInner(props: SessionChatProps) {
+                         availableEffortOptions={
+                             agentFlavor === 'grok' && grokEffortState.options.length > 0
+                                 ? grokEffortState.options
+-                                : claudeEffortOptions
++                                : (agentFlavor === 'copilot' || agentFlavor === 'kimi') && sessionEffortState.options.length > 0
++                                    ? sessionEffortState.options
++                                    : claudeEffortOptions
+                         }
+                         active={props.session.active}
+                         allowSendWhenInactive
+@@ -2240,6 +2249,7 @@ function SessionChatInner(props: SessionChatProps) {
+                         contextWindow={reduced.latestUsage?.contextWindow ?? piContextWindow}
+                         contextModel={reduced.latestUsage?.model ?? props.session.model}
+                         controlledByUser={controlledByUser}
++                        allowConfigChangesWhileThinking={agentFlavor === 'pi'}
+                         onCollaborationModeChange={
+                             codexCollaborationModeSupported && props.session.active && !controlledByUser
+                                 ? handleCollaborationModeChange
+@@ -2325,7 +2335,11 @@ function SessionChatInner(props: SessionChatProps) {
+                                 ? (props.session.active && !controlledByUser && grokEffortState.options.length > 0
+                                     ? handleEffortChange
+                                     : undefined)
+-                                : handleEffortChange
++                                : agentFlavor === 'copilot' || agentFlavor === 'kimi'
++                                    ? (props.session.active && !controlledByUser && sessionEffortState.options.length > 0
++                                        ? handleEffortChange
++                                        : undefined)
++                                    : handleEffortChange
+                         }
+                         serviceTier={effectiveCodexServiceTier}
+                         onServiceTierChange={
+diff --git a/web/src/hooks/queries/useSessionReasoningEffortOptions.test.ts b/web/src/hooks/queries/useSessionReasoningEffortOptions.test.ts
+new file mode 100644
+index 000000000..44055cda5
+--- /dev/null
++++ b/web/src/hooks/queries/useSessionReasoningEffortOptions.test.ts
+@@ -0,0 +1,86 @@
++import { describe, expect, it, vi } from 'vitest'
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
++import { act, renderHook, waitFor } from '@testing-library/react'
++import { createElement, type ReactNode } from 'react'
++import {
++    getSessionReasoningEffortRefetchInterval,
++    selectSessionReasoningEffortResponse,
++    shouldRetrySessionReasoningEffortQuery,
++    useSessionReasoningEffortOptions
++} from './useSessionReasoningEffortOptions'
++
++describe('useSessionReasoningEffortOptions retry policy', () => {
++    it.each([false, true])('hides cached A options until A to B to A is revalidated, requestFails=%s', async (requestFails) => {
++        const queryClient = new QueryClient({ defaultOptions: { queries: { retryDelay: 0 } } })
++        const responseA = { success: true, model: 'A', options: [{ value: 'high', name: 'High' }], currentValue: 'high' }
++        const responseB = { success: true, model: 'B', options: [{ value: 'low', name: 'Low' }], currentValue: 'low' }
++        let resolveDiscovery!: (response: typeof responseB) => void
++        let rejectDiscovery!: (error: Error) => void
++        const getSessionReasoningEffortOptions = vi.fn()
++            .mockResolvedValueOnce(responseA)
++            .mockResolvedValueOnce(responseB)
++            .mockImplementationOnce(() => new Promise((resolve, reject) => { resolveDiscovery = resolve; rejectDiscovery = reject }))
++            .mockRejectedValue(new Error('offline'))
++        const wrapper = ({ children }: { children: ReactNode }) => createElement(QueryClientProvider, { client: queryClient }, children)
++        const { result, rerender, unmount } = renderHook(({ model }) => useSessionReasoningEffortOptions({
++            api: { getSessionReasoningEffortOptions } as never, sessionId: 'session', model, enabled: true
++        }), { wrapper, initialProps: { model: 'A' } })
++        try {
++            await waitFor(() => expect(result.current.options).toEqual(responseA.options))
++            rerender({ model: 'B' })
++            await waitFor(() => expect(result.current.options).toEqual(responseB.options))
++            rerender({ model: 'A' })
++            expect(result.current.options).toEqual([])
++            expect(result.current.currentValue).toBeNull()
++            await waitFor(() => expect(getSessionReasoningEffortOptions).toHaveBeenCalledTimes(3))
++            await act(async () => requestFails ? rejectDiscovery(new Error('offline')) : resolveDiscovery(responseB))
++            await waitFor(() => expect(result.current.error).toBe(requestFails ? 'offline' : 'Session model is still switching'))
++            expect(result.current.options).toEqual([])
++        } finally {
++            unmount()
++            queryClient.clear()
++        }
++    })
++    it('retries transient failures up to three times', () => {
++        expect(shouldRetrySessionReasoningEffortQuery(0)).toBe(true)
++        expect(shouldRetrySessionReasoningEffortQuery(2)).toBe(true)
++        expect(shouldRetrySessionReasoningEffortQuery(3)).toBe(false)
++    })
++
++    it('polls until the ACP handler returns effort options', () => {
++        expect(getSessionReasoningEffortRefetchInterval(true, undefined, 0)).toBe(1000)
++        expect(getSessionReasoningEffortRefetchInterval(true, { success: false, error: 'not ready' }, 2)).toBe(4000)
++        expect(getSessionReasoningEffortRefetchInterval(true, {
++            success: true,
++            options: [{ value: 'low', name: 'Low' }]
++        }, 1)).toBe(false)
++    })
++
++    it('keeps polling until the ACP handler returns a successful response', () => {
++        expect(getSessionReasoningEffortRefetchInterval(false, undefined, 0)).toBe(false)
++        expect(getSessionReasoningEffortRefetchInterval(true, undefined, 10)).toBe(8000)
++        expect(getSessionReasoningEffortRefetchInterval(true, {
++            success: false,
++            error: 'not ready'
++        }, 20)).toBe(8000)
++        expect(getSessionReasoningEffortRefetchInterval(true, {
++            success: true,
++            model: 'gpt-5.6',
++            options: []
++        }, 20)).toBe(false)
++    })
++
++    it('rejects effort options discovered for a different applied model', () => {
++        const response = {
++            success: true,
++            model: 'gpt-5.4',
++            options: [{ value: 'high', name: 'High' }]
++        }
++
++        expect(selectSessionReasoningEffortResponse(response, 'gpt-5.6')).toEqual({
++            success: false,
++            error: 'Session model is still switching'
++        })
++        expect(selectSessionReasoningEffortResponse(response, 'gpt-5.4')).toBe(response)
++    })
++})
+diff --git a/web/src/hooks/queries/useSessionReasoningEffortOptions.ts b/web/src/hooks/queries/useSessionReasoningEffortOptions.ts
+new file mode 100644
+index 000000000..9587eea94
+--- /dev/null
++++ b/web/src/hooks/queries/useSessionReasoningEffortOptions.ts
+@@ -0,0 +1,73 @@
++import { useQuery } from '@tanstack/react-query'
++import type { ApiClient } from '@/api/client'
++import type { SessionReasoningEffortOption, SessionReasoningEffortResponse } from '@/types/api'
++import { queryKeys } from '@/lib/query-keys'
++
++export function shouldRetrySessionReasoningEffortQuery(failureCount: number): boolean {
++    return failureCount < 3
++}
++
++export function getSessionReasoningEffortRefetchInterval(
++    enabled: boolean,
++    data: SessionReasoningEffortResponse | undefined,
++    pollCount: number
++): number | false {
++    if (!enabled || data?.success === true) {
++        return false
++    }
++    return 1000 * 2 ** Math.min(pollCount, 3)
++}
++
++export function selectSessionReasoningEffortResponse(
++    response: SessionReasoningEffortResponse,
++    model?: string | null
++): SessionReasoningEffortResponse {
++    if (response.success && response.model !== (model ?? null)) {
++        return {
++            success: false,
++            error: 'Session model is still switching'
++        }
++    }
++    return response
++}
++
++export function useSessionReasoningEffortOptions(args: {
++    api: ApiClient | null
++    sessionId?: string | null
++    model?: string | null
++    enabled?: boolean
++}): {
++    options: SessionReasoningEffortOption[]
++    currentValue: string | null
++    isLoading: boolean
++    error: string | null
++} {
++    const enabled = Boolean(args.enabled && args.api && args.sessionId)
++    const query = useQuery({
++        queryKey: args.sessionId
++            ? queryKeys.sessionReasoningEffortOptions(args.sessionId, args.model)
++            : ['session-reasoning-effort-options', 'unknown'] as const,
++        queryFn: async () => {
++            if (!args.api || !args.sessionId) throw new Error('Session unavailable')
++            const response = await args.api.getSessionReasoningEffortOptions(args.sessionId)
++            return selectSessionReasoningEffortResponse(response, args.model)
++        },
++        enabled,
++        staleTime: 0,
++        retry: (failureCount) => shouldRetrySessionReasoningEffortQuery(failureCount),
++        refetchInterval: (query) => getSessionReasoningEffortRefetchInterval(
++            enabled,
++            query.state.status === 'error' ? undefined : query.state.data as SessionReasoningEffortResponse | undefined,
++            query.state.dataUpdateCount + query.state.errorUpdateCount
++        ),
++    })
++
++    return {
++        options: query.isFetching || query.isError ? [] : (query.data?.options ?? []),
++        currentValue: query.isFetching || query.isError ? null : (query.data?.currentValue ?? null),
++        isLoading: query.isLoading,
++        error: query.data?.success === false
++            ? (query.data.error ?? 'Failed to load session effort options')
++            : query.error instanceof Error ? query.error.message : null,
++    }
++}
+diff --git a/web/src/hooks/useComposerToolbarLayout.test.ts b/web/src/hooks/useComposerToolbarLayout.test.ts
+index 200af6431..0c47f9a0b 100644
+--- a/web/src/hooks/useComposerToolbarLayout.test.ts
++++ b/web/src/hooks/useComposerToolbarLayout.test.ts
+@@ -45,6 +45,20 @@ describe('normalizeComposerToolbarLayout', () => {
+         expect([...result.left, ...result.right, ...result.hidden]).toHaveLength(DEFAULT_COMPOSER_TOOLBAR_LAYOUT.left.length)
+     })
+ 
++    it('drops legacy Pi-specific toolbar items in favor of generic controls', () => {
++        const result = normalizeComposerToolbarLayout({
++            mode: 'left',
++            left: ['piModel', 'settings', 'piThinking'],
++            right: [],
++            hidden: [],
++        })
++
++        expect(result.left).not.toContain('piModel')
++        expect(result.left).not.toContain('piThinking')
++        expect([...result.left, ...result.right, ...result.hidden]).toContain('model')
++        expect([...result.left, ...result.right, ...result.hidden]).toContain('effort')
++    })
++
+     it('preserves hidden tools and keeps newly introduced tools visible', () => {
+         const result = normalizeComposerToolbarLayout({
+             mode: 'left',
+diff --git a/web/src/lib/query-keys.ts b/web/src/lib/query-keys.ts
+index c32b653c1..24271e969 100644
+--- a/web/src/lib/query-keys.ts
++++ b/web/src/lib/query-keys.ts
+@@ -35,6 +35,7 @@ export const queryKeys = {
+     machineKimiModelsForCwd: (machineId: string, cwd: string) => ['machine-kimi-models', machineId, cwd] as const,
+     sessionKimiModels: (sessionId: string) => ['session-kimi-models', sessionId] as const,
+     sessionGrokReasoningEffortOptions: (sessionId: string) => ['session-grok-reasoning-effort-options', sessionId] as const,
++    sessionReasoningEffortOptions: (sessionId: string, model?: string | null) => ['session-reasoning-effort-options', sessionId, model ?? null] as const,
+     machineAgyModels: (machineId: string) => ['machine-agy-models', machineId] as const,
+     machinePiModels: (machineId: string) => ['machine-pi-models', machineId] as const,
+     machineClaudeModels: (machineId: string) => ['machine-claude-models', machineId] as const,
+diff --git a/web/src/types/api.ts b/web/src/types/api.ts
+index e03e8937f..971305319 100644
+--- a/web/src/types/api.ts
++++ b/web/src/types/api.ts
+@@ -44,6 +44,8 @@ export type {
+     MessagesResponse,
+     OpencodeModelsResponse,
+     OpencodeModelSummary,
++    SessionReasoningEffortOption,
++    SessionReasoningEffortResponse,
+     OpencodeModelVariantsResponse,
+     PathExistsResponse,
+     PiModelSummary,

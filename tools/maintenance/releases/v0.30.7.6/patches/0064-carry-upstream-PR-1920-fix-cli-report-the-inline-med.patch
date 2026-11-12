@@ -1,0 +1,306 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Fri, 23 Oct 2026 18:17:55 +0000
+Subject: [PATCH 64/95] carry(upstream): PR #1920 fix(cli): report the
+ inline-media shell fallback as not applicable in packaged installs
+
+---
+ cli/src/ui/doctorInlineMedia.test.ts | 136 ++++++++++++++++++++++++++-
+ cli/src/ui/doctorInlineMedia.ts      |  64 +++++++++----
+ 2 files changed, 180 insertions(+), 20 deletions(-)
+
+diff --git a/cli/src/ui/doctorInlineMedia.test.ts b/cli/src/ui/doctorInlineMedia.test.ts
+index 421265f8a..9d02d4026 100644
+--- a/cli/src/ui/doctorInlineMedia.test.ts
++++ b/cli/src/ui/doctorInlineMedia.test.ts
+@@ -1,13 +1,58 @@
+-import { describe, expect, it } from 'vitest'
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++import { join } from 'node:path'
++import { tmpdir } from 'node:os'
++
++const {
++    isBunCompiledMock,
++    projectPathMock,
++} = vi.hoisted(() => ({
++    isBunCompiledMock: vi.fn(() => false),
++    // A directory that is not a repo checkout: no scripts/tooling helper, no bundled MCP SDK.
++    projectPathMock: vi.fn(() => join(tmpdir(), 'hapi-doctor-inline-media-test', 'cli')),
++}));
++
++vi.mock('@/projectPath', async () => {
++    const actual = await vi.importActual<typeof import('@/projectPath')>('@/projectPath');
++    return {
++        ...actual,
++        isBunCompiled: isBunCompiledMock,
++        projectPath: projectPathMock,
++    };
++});
++
++// `@/configuration` is deliberately left real: it is constructed at import time and other
++// modules in this graph (logger, Cursor overlay) depend on it. `fetch` is stubbed instead.
++
++vi.mock('@/persistence', () => ({
++    readSettings: vi.fn(async () => ({ cliApiToken: 'test-token' })),
++}));
++
++vi.mock('@/api/hubExtraHeaders', () => ({
++    buildHubRequestHeaders: () => ({}),
++}));
++
+ import {
+     formatInlineMediaCommand,
+     inlineMediaHelperScriptPath,
++    runDoctorInlineMedia,
+     shellSingleQuote,
+ } from './doctorInlineMedia'
+ 
++function stripAnsi(value: string): string {
++    // eslint-disable-next-line no-control-regex
++    return value.replace(/\u001B\[[0-9;]*m/g, '')
++}
++
+ describe('doctorInlineMedia', () => {
++    afterEach(() => {
++        isBunCompiledMock.mockReturnValue(false)
++    })
++
+     it('formatInlineMediaCommand uses repo scripts path', () => {
+         const script = inlineMediaHelperScriptPath()
++        if (script === null) {
++            throw new Error('expected a repo checkout path when not running a compiled binary')
++        }
+         expect(formatInlineMediaCommand(script, '341fe421')).toContain(
+             "bun scripts/tooling/hapi-display-image.mjs '341fe421'"
+         )
+@@ -19,8 +64,9 @@ describe('doctorInlineMedia', () => {
+             'abc12345',
+             '/tmp/my pics/shot.png',
+         )
+-        // scriptPath is cli/src/ui/... → repo root is three levels up (cli)
+-        expect(cmd).toContain("cd '/tmp/my repo/cli'")
++        // scriptPath is cli/src/ui/... → repo root is three levels up (cli).
++        // Separators are platform-specific, so assert on the shape instead of a POSIX literal.
++        expect(cmd).toMatch(/^cd '.+my repo[\\/]cli' && bun scripts\/tooling\/hapi-display-image\.mjs /)
+         expect(cmd).toContain("'abc12345'")
+         expect(cmd).toContain("'/tmp/my pics/shot.png'")
+     })
+@@ -29,4 +75,88 @@ describe('doctorInlineMedia', () => {
+         expect(shellSingleQuote("it's")).toBe(`'it'"'"'s'`)
+         expect(shellSingleQuote('$(echo hi)')).toBe("'$(echo hi)'")
+     })
++
++    it('has no helper script path in a Bun-compiled install', () => {
++        isBunCompiledMock.mockReturnValue(true)
++        // Compiled installs resolve projectPath() inside Bun's virtual filesystem, so any path
++        // derived from it would be fabricated (e.g. B:\scripts\tooling\... on Windows).
++        expect(inlineMediaHelperScriptPath()).toBeNull()
++    })
++})
++
++describe('runDoctorInlineMedia output', () => {
++    const originalSessionId = process.env.HAPI_SESSION_ID
++    const originalCliToken = process.env.CLI_API_TOKEN
++    let logSpy: ReturnType<typeof vi.spyOn>
++    let output: string[]
++
++    function jsonResponse(body: unknown): Response {
++        return new Response(JSON.stringify(body), {
++            status: 200,
++            headers: { 'Content-Type': 'application/json' },
++        })
++    }
++
++    beforeEach(() => {
++        output = []
++        logSpy = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
++            output.push(args.map((value) => String(value)).join(' '))
++        })
++        process.env.HAPI_SESSION_ID = '89ed118d-1111-2222-3333-444455556666'
++        delete process.env.CLI_API_TOKEN
++        // Hub reachable with no active sessions, so the doctor prints its full report.
++        vi.stubGlobal('fetch', vi.fn(async (input: unknown) => {
++            const url = String(input)
++            if (url.includes('/api/auth')) {
++                return jsonResponse({ token: 'test-jwt' })
++            }
++            if (url.includes('/api/sessions')) {
++                return jsonResponse({ sessions: [] })
++            }
++            return new Response(`unexpected request: ${url}`, { status: 404 })
++        }))
++    })
++
++    afterEach(() => {
++        logSpy.mockRestore()
++        vi.unstubAllGlobals()
++        isBunCompiledMock.mockReturnValue(false)
++        if (originalSessionId === undefined) {
++            delete process.env.HAPI_SESSION_ID
++        } else {
++            process.env.HAPI_SESSION_ID = originalSessionId
++        }
++        if (originalCliToken === undefined) {
++            delete process.env.CLI_API_TOKEN
++        } else {
++            process.env.CLI_API_TOKEN = originalCliToken
++        }
++    })
++
++    it('reports the repo shell fallback as not applicable in a compiled install instead of a fabricated path', async () => {
++        isBunCompiledMock.mockReturnValue(true)
++
++        const code = await runDoctorInlineMedia()
++        const text = stripAnsi(output.join('\n'))
++
++        expect(text).toContain('Helper script (repo shell fallback): not applicable (packaged install — use the MCP tools)')
++        expect(text).toContain('@modelcontextprotocol/sdk (repo shell fallback): not applicable (packaged install)')
++        // Nothing may present a derived (virtual filesystem) path as a usable location.
++        expect(text).not.toContain('missing:')
++        expect(text).not.toContain('~BUN')
++        expect(text).not.toMatch(/[A-Za-z]:\\scripts/)
++        expect(text).toContain('2. Shell fallback unavailable (packaged install / no repo checkout) — use MCP tools only')
++        expect(code).toBe(0)
++    })
++
++    it('still reports a missing helper script when a checkout exists but is incomplete', async () => {
++        const code = await runDoctorInlineMedia()
++        const text = stripAnsi(output.join('\n'))
++
++        expect(text).toContain('Helper script (repo shell fallback): missing:')
++        expect(text).toContain('(optional outside source checkout)')
++        expect(text).toContain('@modelcontextprotocol/sdk (repo shell fallback): not found — optional outside source checkout')
++        expect(text).toContain('2. Shell fallback unavailable (packaged install / no repo checkout) — use MCP tools only')
++        expect(code).toBe(0)
++    })
+ })
+diff --git a/cli/src/ui/doctorInlineMedia.ts b/cli/src/ui/doctorInlineMedia.ts
+index 5f3cb82a0..44a2cb0e4 100644
+--- a/cli/src/ui/doctorInlineMedia.ts
++++ b/cli/src/ui/doctorInlineMedia.ts
+@@ -8,7 +8,7 @@ import { join, resolve } from 'node:path'
+ import { configuration } from '@/configuration'
+ import { buildHubRequestHeaders } from '@/api/hubExtraHeaders'
+ import { readSettings } from '@/persistence'
+-import { projectPath } from '@/projectPath'
++import { isBunCompiled, projectPath } from '@/projectPath'
+ import { cursorHapiMcpServerId } from '@/cursor/utils/cursorMcpOverlay'
+ 
+ export type InlineMediaDoctorCheck = {
+@@ -27,18 +27,36 @@ export type InlineMediaSessionBridge = {
+     name: string | null
+ }
+ 
+-function repoRootFromCli(): string {
++/**
++ * Repo root used to locate the shell-fallback helper script.
++ *
++ * A Bun-compiled (packaged) install has no repo checkout: `projectPath()` resolves inside
++ * Bun's virtual filesystem (`B:/~BUN/root` on Windows, `/$bunfs/root` elsewhere) and
++ * `resolve()` clamps at that virtual drive root, so deriving any path from it yields
++ * something like `B:\scripts\tooling\...`, which exists on no real volume. Report the
++ * absence of a checkout instead of inventing an element of one.
++ */
++function repoRootFromCli(): string | null {
++    if (isBunCompiled()) {
++        return null
++    }
+     return resolve(projectPath(), '..')
+ }
+ 
+-export function inlineMediaHelperScriptPath(): string {
+-    return join(repoRootFromCli(), 'scripts/tooling/hapi-display-image.mjs')
++/** Absolute path to the shell-fallback helper script, or null when this install has no repo checkout. */
++export function inlineMediaHelperScriptPath(): string | null {
++    const repoRoot = repoRootFromCli()
++    return repoRoot === null ? null : join(repoRoot, 'scripts/tooling/hapi-display-image.mjs')
+ }
+ 
+ function mcpSdkResolvable(): boolean {
++    const repoRoot = repoRootFromCli()
++    if (repoRoot === null) {
++        return false
++    }
+     const candidates = [
+         join(projectPath(), 'node_modules/@modelcontextprotocol/sdk/package.json'),
+-        join(repoRootFromCli(), 'node_modules/@modelcontextprotocol/sdk/package.json'),
++        join(repoRoot, 'node_modules/@modelcontextprotocol/sdk/package.json'),
+     ]
+     return candidates.some((p) => existsSync(p))
+ }
+@@ -133,19 +151,30 @@ export async function runDoctorInlineMedia(): Promise<number> {
+     console.log(chalk.bold.cyan('\n🖼️  hapi inline media doctor\n'))
+ 
+     const checks: InlineMediaDoctorCheck[] = []
+-    const scriptPath = inlineMediaHelperScriptPath()
+-    const scriptExists = existsSync(scriptPath)
++    const helperScriptPath = inlineMediaHelperScriptPath()
++    const helperScriptExists = helperScriptPath !== null && existsSync(helperScriptPath)
++
++    let helperScriptDetail: string
++    if (helperScriptPath === null) {
++        helperScriptDetail = 'not applicable (packaged install — use the MCP tools)'
++    } else if (helperScriptExists) {
++        helperScriptDetail = helperScriptPath
++    } else {
++        helperScriptDetail = `missing: ${helperScriptPath} (optional outside source checkout)`
++    }
+     checks.push({
+-        ok: scriptExists,
++        ok: helperScriptExists,
+         label: 'Helper script (repo shell fallback)',
+-        detail: scriptExists ? scriptPath : `missing: ${scriptPath} (optional outside source checkout)`,
++        detail: helperScriptDetail,
+     })
+ 
+     const sdkOk = mcpSdkResolvable()
+     checks.push({
+         ok: sdkOk,
+         label: '@modelcontextprotocol/sdk (repo shell fallback)',
+-        detail: sdkOk ? 'resolvable from cli or repo root' : 'not found — optional outside source checkout',
++        detail: helperScriptPath === null
++            ? 'not applicable (packaged install)'
++            : (sdkOk ? 'resolvable from cli or repo root' : 'not found — optional outside source checkout'),
+     })
+ 
+     const envSessionId = process.env.HAPI_SESSION_ID
+@@ -192,7 +221,8 @@ export async function runDoctorInlineMedia(): Promise<number> {
+ 
+     const withBridge = bridges.filter((b) => b.hapiMcpUrl)
+     const listOmitsMcp = bridges.some((b) => b.hapiMcpUrl && !b.listShowsMcpUrl)
+-    const shellFallbackAvailable = scriptExists && sdkOk
++    // The repo shell fallback needs an actual checkout: helper script present and its MCP SDK resolvable.
++    const shellFallbackScriptPath = helperScriptExists && sdkOk ? helperScriptPath : null
+ 
+     console.log(chalk.bold('\nActive sessions'))
+     if (bridges.length === 0) {
+@@ -207,8 +237,8 @@ export async function runDoctorInlineMedia(): Promise<number> {
+             )
+             if (b.hapiMcpUrl) {
+                 console.log(chalk.gray(`    mcp: ${b.hapiMcpUrl}`))
+-                if (shellFallbackAvailable) {
+-                    console.log(chalk.gray(`    ${formatInlineMediaCommand(scriptPath, b.prefix)}`))
++                if (shellFallbackScriptPath) {
++                    console.log(chalk.gray(`    ${formatInlineMediaCommand(shellFallbackScriptPath, b.prefix)}`))
+                 }
+             }
+         }
+@@ -233,14 +263,14 @@ export async function runDoctorInlineMedia(): Promise<number> {
+ 
+     console.log(chalk.bold('\nAgent inline path'))
+     console.log(chalk.gray('  1. MCP tool display_image / display_video / display_media in the running session (ACP flavors via hapi bridge)'))
+-    if (shellFallbackAvailable) {
++    if (shellFallbackScriptPath) {
+         console.log(chalk.gray('  2. Shell fallback (HAPI session id prefix, not cursorSessionId):'))
+         if (withBridge.length > 0) {
+-            console.log(chalk.green(`    ${formatInlineMediaCommand(scriptPath, withBridge[0].prefix)}`))
++            console.log(chalk.green(`    ${formatInlineMediaCommand(shellFallbackScriptPath, withBridge[0].prefix)}`))
+         } else if (envSessionId) {
+-            console.log(chalk.green(`    ${formatInlineMediaCommand(scriptPath, envSessionId.slice(0, 8))}`))
++            console.log(chalk.green(`    ${formatInlineMediaCommand(shellFallbackScriptPath, envSessionId.slice(0, 8))}`))
+         } else {
+-            console.log(chalk.gray(`    ${formatInlineMediaCommand(scriptPath, '<hapi-session-prefix>')}`))
++            console.log(chalk.gray(`    ${formatInlineMediaCommand(shellFallbackScriptPath, '<hapi-session-prefix>')}`))
+         }
+     } else {
+         console.log(chalk.gray('  2. Shell fallback unavailable (packaged install / no repo checkout) — use MCP tools only'))

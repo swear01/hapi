@@ -1,0 +1,303 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Thu, 22 Oct 2026 05:05:34 +0000
+Subject: [PATCH 47/95] carry(upstream): PR #2088 fix(claude): seed local-mode
+ context window from the configured model (#1858)
+
+---
+ cli/src/claude/claudeLocalLauncher.test.ts    | 46 +++++++++++++++++++
+ cli/src/claude/claudeLocalLauncher.ts         | 21 +++++++++
+ cli/src/claude/runClaude.ts                   |  6 +++
+ cli/src/claude/session.ts                     |  2 +
+ cli/src/claude/utils/claudeSettings.test.ts   | 42 ++++++++++++++++-
+ cli/src/claude/utils/claudeSettings.ts        | 40 +++++++++++++++-
+ .../common/hooks/generateHookSettings.test.ts |  1 +
+ .../common/hooks/generateHookSettings.ts      |  7 ++-
+ 8 files changed, 159 insertions(+), 6 deletions(-)
+
+diff --git a/cli/src/claude/claudeLocalLauncher.test.ts b/cli/src/claude/claudeLocalLauncher.test.ts
+index 3f5b08b83..c8b40606d 100644
+--- a/cli/src/claude/claudeLocalLauncher.test.ts
++++ b/cli/src/claude/claudeLocalLauncher.test.ts
+@@ -205,3 +205,49 @@ describe('claudeLocalLauncher message filtering', () => {
+         expect(sentMessages).toHaveLength(0)
+     })
+ })
++
++describe('claudeLocalLauncher context window seed (#1858)', () => {
++    afterEach(() => {
++        harness.launches = []
++        harness.scannerOnMessage = null
++    })
++
++    function assistant(model: string, usage: Record<string, unknown> = { input_tokens: 1, output_tokens: 1 }) {
++        return { type: 'assistant', uuid: model, message: { role: 'assistant', model, content: [], usage } }
++    }
++
++    it('stamps 1M on main-model messages when launched with a [1m] alias, not on subagent models', async () => {
++        const { session, sentMessages } = createSessionStub()
++        session.getModel = () => 'opus[1m]'
++        await claudeLocalLauncher(session as never)
++
++        harness.scannerOnMessage!(assistant('claude-opus-5'))
++        harness.scannerOnMessage!(assistant('claude-haiku-4-5-20251001'))
++
++        expect(sentMessages[0]).toMatchObject({ message: { usage: { context_window: 1_000_000 } } })
++        expect((sentMessages[1].message as { usage: Record<string, unknown> }).usage.context_window).toBeUndefined()
++    })
++
++    it('stamps nothing when the launch model is not a [1m] variant', async () => {
++        const { session, sentMessages } = createSessionStub()
++        session.getModel = () => 'opus'
++        await claudeLocalLauncher(session as never)
++
++        harness.scannerOnMessage!(assistant('claude-opus-5'))
++
++        expect((sentMessages[0].message as { usage: Record<string, unknown> }).usage.context_window).toBeUndefined()
++    })
++
++    it('follows an in-session model switch (PostModelSwitch to_model) and keeps explicit windows', async () => {
++        const { session, sentMessages } = createSessionStub()
++        session.getModel = () => 'opus'
++        await claudeLocalLauncher(session as never)
++
++        ;(session as { localContextModel?: string | null }).localContextModel = 'claude-sonnet-5-5[1m]'
++        harness.scannerOnMessage!(assistant('claude-sonnet-5-5'))
++        harness.scannerOnMessage!(assistant('claude-sonnet-5-5', { input_tokens: 1, output_tokens: 1, context_window: 500_000 }))
++
++        expect(sentMessages[0]).toMatchObject({ message: { usage: { context_window: 1_000_000 } } })
++        expect(sentMessages[1]).toMatchObject({ message: { usage: { context_window: 500_000 } } })
++    })
++})
+diff --git a/cli/src/claude/claudeLocalLauncher.ts b/cli/src/claude/claudeLocalLauncher.ts
+index 7d199065d..9a6cbc5cd 100644
+--- a/cli/src/claude/claudeLocalLauncher.ts
++++ b/cli/src/claude/claudeLocalLauncher.ts
+@@ -4,6 +4,20 @@ import { createSessionScanner } from "./utils/sessionScanner";
+ import { isClaudeChatVisibleMessage } from "./utils/chatVisibility";
+ import { BaseLocalLauncher } from "@/modules/common/launcher/BaseLocalLauncher";
+ import { applySessionTitleFallback } from './utils/sessionTitleFallback';
++import { resolveClaudeLaunchModel } from './utils/claudeSettings';
++import type { RawJSONLines } from './types';
++
++// Local transcripts carry bare model ids and no context_window, so the web
++// guesses 200k. When the TUI runs a "[1m]" model, stamp 1M on messages from
++// that model only (subagents differ). Aliases ("opus[1m]") match "claude-opus-*".
++function stampContextWindow(message: RawJSONLines, contextModel: string | null): void {
++    if (message.type !== 'assistant' || !message.message?.usage || !contextModel || !/\[1m\]$/i.test(contextModel)) return;
++    const base = contextModel.slice(0, -'[1m]'.length);
++    const model = message.message.model;
++    if (model === base || (!base.includes('-') && model?.startsWith(`claude-${base}-`))) {
++        message.message.usage.context_window ??= 1_000_000;
++    }
++}
+ 
+ export async function claudeLocalLauncher(session: Session): Promise<'switch' | 'exit'> {
+ 
+@@ -35,6 +49,7 @@ export async function claudeLocalLauncher(session: Session): Promise<'switch' |
+             if (!isClaudeChatVisibleMessage(message)) {
+                 return
+             }
++            stampContextWindow(message, session.localContextModel)
+             session.client.sendClaudeSessionMessage(message)
+         }
+     });
+@@ -55,6 +70,12 @@ export async function claudeLocalLauncher(session: Session): Promise<'switch' |
+         launch: async (abortSignal) => {
+             session.localPermissionBridge.start(session.sessionId);
+             abortSignal.addEventListener('abort', session.localPermissionBridge.stop, { once: true });
++            session.localContextModel = resolveClaudeLaunchModel({
++                model: session.getModel(),
++                cwd: session.path,
++                env: session.claudeEnvVars,
++                args: session.claudeArgs
++            });
+             try {
+                 await claudeLocal({
+                     path: session.path,
+diff --git a/cli/src/claude/runClaude.ts b/cli/src/claude/runClaude.ts
+index 105bb857c..b6a5bfe5f 100644
+--- a/cli/src/claude/runClaude.ts
++++ b/cli/src/claude/runClaude.ts
+@@ -180,6 +180,12 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
+                 }
+             }
+ 
++            // Follow /model switches inside the TUI ("[1m]" kept) for the local
++            // context window; only the local settings file registers this hook.
++            if (currentSession && data.hook_event_name === 'PostModelSwitch' && typeof data.to_model === 'string') {
++                currentSession.localContextModel = data.to_model;
++            }
++
+             // Inherit the mode the user picked inside the interactive TUI
+             // (shift+tab) so a later local→remote switch keeps it. Only the
+             // local settings file registers the hooks that carry
+diff --git a/cli/src/claude/session.ts b/cli/src/claude/session.ts
+index f0cc938bd..e8178d7b2 100644
+--- a/cli/src/claude/session.ts
++++ b/cli/src/claude/session.ts
+@@ -25,6 +25,8 @@ export class Session extends AgentSessionBase<EnhancedMode> {
+     readonly startedBy: 'runner' | 'terminal';
+     readonly startingMode: 'local' | 'remote';
+     localLaunchFailure: LocalLaunchFailure | null = null;
++    /** Model the local TUI runs, "[1m]" suffix intact: launch seed, then PostModelSwitch. */
++    localContextModel: string | null = null;
+     private nativeSkillNames = new Set<string>();
+ 
+     constructor(opts: {
+diff --git a/cli/src/claude/utils/claudeSettings.test.ts b/cli/src/claude/utils/claudeSettings.test.ts
+index 423edbb73..57d001e4c 100644
+--- a/cli/src/claude/utils/claudeSettings.test.ts
++++ b/cli/src/claude/utils/claudeSettings.test.ts
+@@ -8,7 +8,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+ import { existsSync, writeFileSync, unlinkSync, mkdirSync, rmSync } from 'node:fs';
+ import { join } from 'node:path';
+ import { tmpdir } from 'node:os';
+-import { readClaudeSettings, shouldIncludeCoAuthoredBy } from './claudeSettings';
++import { readClaudeSettings, resolveClaudeLaunchModel, shouldIncludeCoAuthoredBy } from './claudeSettings';
+ 
+ describe('Claude Settings', () => {
+   let testClaudeDir: string;
+@@ -92,4 +92,42 @@ describe('Claude Settings', () => {
+       expect(result).toBe(true);
+     });
+   });
+-});
+\ No newline at end of file
++
++  describe('resolveClaudeLaunchModel', () => {
++    function writeProjectSettings(name: string, model: string) {
++      mkdirSync(join(testClaudeDir, 'project', '.claude'), { recursive: true });
++      writeFileSync(join(testClaudeDir, 'project', '.claude', name), JSON.stringify({ model }));
++    }
++
++    it('follows Claude Code precedence with the [1m] suffix intact', () => {
++      const cwd = join(testClaudeDir, 'project');
++      const env = { ANTHROPIC_MODEL: '' };
++      writeFileSync(join(testClaudeDir, 'settings.json'), JSON.stringify({ model: 'claude-opus-5[1m]' }));
++      expect(resolveClaudeLaunchModel({ cwd, env })).toBe('claude-opus-5[1m]');
++
++      writeProjectSettings('settings.json', 'sonnet');
++      expect(resolveClaudeLaunchModel({ cwd, env })).toBe('sonnet');
++
++      writeProjectSettings('settings.local.json', 'sonnet[1m]');
++      expect(resolveClaudeLaunchModel({ cwd, env })).toBe('sonnet[1m]');
++
++      expect(resolveClaudeLaunchModel({ cwd, env: { ANTHROPIC_MODEL: 'minimax-m3[1m]' } })).toBe('minimax-m3[1m]');
++      expect(resolveClaudeLaunchModel({ cwd, model: 'opus[1m]', env: { ANTHROPIC_MODEL: 'minimax-m3[1m]' } })).toBe('opus[1m]');
++    });
++
++    it('honors the user --model and --setting-sources args', () => {
++      const cwd = join(testClaudeDir, 'project');
++      const env = { ANTHROPIC_MODEL: '' };
++      writeFileSync(join(testClaudeDir, 'settings.json'), JSON.stringify({ model: 'opus' }));
++      writeProjectSettings('settings.json', 'opus[1m]');
++      expect(resolveClaudeLaunchModel({ cwd, env, args: ['--setting-sources', 'user'] })).toBe('opus');
++      expect(resolveClaudeLaunchModel({ cwd, env, args: ['--setting-sources=project'] })).toBe('opus[1m]');
++      expect(resolveClaudeLaunchModel({ cwd, env, args: ['--setting-sources', 'local'] })).toBe(null);
++      expect(resolveClaudeLaunchModel({ cwd, env, args: ['--model', 'sonnet[1m]'] })).toBe('sonnet[1m]');
++    });
++
++    it('returns null when nothing is configured', () => {
++      expect(resolveClaudeLaunchModel({ cwd: join(testClaudeDir, 'missing'), env: { ANTHROPIC_MODEL: '' } })).toBe(null);
++    });
++  });
++});
+diff --git a/cli/src/claude/utils/claudeSettings.ts b/cli/src/claude/utils/claudeSettings.ts
+index 356c17b59..610b49a11 100644
+--- a/cli/src/claude/utils/claudeSettings.ts
++++ b/cli/src/claude/utils/claudeSettings.ts
+@@ -18,11 +18,47 @@ export interface ClaudeSettings {
+ /**
+  * Get the path to Claude's settings.json file
+  */
+-function getClaudeSettingsPath(): string {
+-  const claudeConfigDir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude');
++function getClaudeSettingsPath(env: NodeJS.ProcessEnv = process.env): string {
++  const claudeConfigDir = env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude');
+   return join(claudeConfigDir, 'settings.json');
+ }
+ 
++function readSettingsModel(path: string): string | undefined {
++  try {
++    const model = JSON.parse(readFileSync(path, 'utf-8'))?.model;
++    return typeof model === 'string' ? model.trim() || undefined : undefined;
++  } catch {
++    return undefined;
++  }
++}
++
++function readArg(args: string[], name: string): string | undefined {
++  for (let i = 0; i < args.length; i++) {
++    if (args[i] === name && i + 1 < args.length && !args[i + 1].startsWith('-')) return args[i + 1];
++    if (args[i].startsWith(`${name}=`)) return args[i].slice(name.length + 1);
++  }
++  return undefined;
++}
++
++/**
++ * The model Claude Code starts with, with any "[1m]" suffix intact, using its
++ * launch precedence: --model, ANTHROPIC_MODEL, project local settings, project
++ * settings, user settings (limited by --setting-sources). `env` is the extra
++ * env HAPI passes to the process; `args` are the user's extra Claude args.
++ */
++export function resolveClaudeLaunchModel(opts: { model?: string | null; cwd: string; env?: Record<string, string>; args?: string[] }): string | null {
++  const env = { ...process.env, ...opts.env };
++  const args = opts.args ?? [];
++  const sources = readArg(args, '--setting-sources')?.split(',').map((s) => s.trim()) ?? ['user', 'project', 'local'];
++  return opts.model?.trim()
++    || readArg(args, '--model')?.trim()
++    || env.ANTHROPIC_MODEL?.trim()
++    || (sources.includes('local') ? readSettingsModel(join(opts.cwd, '.claude', 'settings.local.json')) : undefined)
++    || (sources.includes('project') ? readSettingsModel(join(opts.cwd, '.claude', 'settings.json')) : undefined)
++    || (sources.includes('user') ? readSettingsModel(getClaudeSettingsPath(env)) : undefined)
++    || null;
++}
++
+ /**
+  * Read Claude's settings.json file from the default location
+  * 
+diff --git a/cli/src/modules/common/hooks/generateHookSettings.test.ts b/cli/src/modules/common/hooks/generateHookSettings.test.ts
+index a421e86f6..ec25c0622 100644
+--- a/cli/src/modules/common/hooks/generateHookSettings.test.ts
++++ b/cli/src/modules/common/hooks/generateHookSettings.test.ts
+@@ -13,6 +13,7 @@ describe('buildHookSettings', () => {
+         expect(settings.hooks.UserPromptSubmit?.[0].hooks[0].command).toBe('forward-cmd')
+         expect(settings.hooks.PreToolUse?.[0].matcher).toBe('*')
+         expect(settings.hooks.PreToolUse?.[0].hooks[0].command).toBe('forward-cmd')
++        expect(settings.hooks.PostModelSwitch?.[0].hooks[0].command).toBe('forward-cmd')
+     })
+ })
+ 
+diff --git a/cli/src/modules/common/hooks/generateHookSettings.ts b/cli/src/modules/common/hooks/generateHookSettings.ts
+index c02e569d4..b51d1ea39 100644
+--- a/cli/src/modules/common/hooks/generateHookSettings.ts
++++ b/cli/src/modules/common/hooks/generateHookSettings.ts
+@@ -25,6 +25,7 @@ type HookSettings = {
+         UserPromptSubmit?: HookCommandConfig[];
+         PreToolUse?: HookCommandConfig[];
+         PermissionRequest?: HookCommandConfig[];
++        PostModelSwitch?: HookCommandConfig[];
+         PostToolUse?: HookCommandConfig[];
+         PostToolUseFailure?: HookCommandConfig[];
+         SessionEnd?: HookCommandConfig[];
+@@ -38,8 +39,9 @@ export type HookSettingsOptions = {
+     /**
+      * Also forward UserPromptSubmit and PreToolUse hooks. Unlike SessionStart,
+      * their payloads carry `permission_mode`, letting HAPI track the mode the
+-     * user picks inside the interactive TUI (shift+tab). Keep this off for the
+-     * remote SDK process: these hooks block Claude while the forwarder runs,
++     * user picks inside the interactive TUI (shift+tab). PostModelSwitch
++     * tracks /model switches for the local context window. Keep this off for
++     * the remote SDK process: these hooks block Claude while the forwarder runs,
+      * and remote permission state is owned by the hub/RPC path anyway.
+      */
+     trackPermissionMode?: boolean;
+@@ -67,6 +69,7 @@ export function buildHookSettings(
+     if (trackPermissionMode || includeLocalPermissions) {
+         hooks.UserPromptSubmit = [commandHook];
+         hooks.PreToolUse = [{ matcher: '*', ...commandHook }];
++        hooks.PostModelSwitch = [commandHook];
+     }
+ 
+     if (includeLocalPermissions) {

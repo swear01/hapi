@@ -1,0 +1,218 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Fri, 23 Oct 2026 18:17:56 +0000
+Subject: [PATCH 61/94] carry(upstream): PR #1903 fix(web): synthesize
+ answerable card for pending permissions dropped by the tracer
+
+---
+ web/src/chat/reducer.test.ts | 95 ++++++++++++++++++++++++++++++++++++
+ web/src/chat/reducer.ts      | 40 ++++++++++-----
+ web/src/chat/reducerTools.ts | 15 ------
+ 3 files changed, 123 insertions(+), 27 deletions(-)
+
+diff --git a/web/src/chat/reducer.test.ts b/web/src/chat/reducer.test.ts
+index 449eb95df..e15e35e09 100644
+--- a/web/src/chat/reducer.test.ts
++++ b/web/src/chat/reducer.test.ts
+@@ -441,6 +441,101 @@ describe('reduceChatBlocks', () => {
+         expect(block?.kind === 'tool-call' ? block.tool.permission?.status : null).toBe('pending')
+     })
+ 
++    it('synthesizes a card for a pending permission whose sidechain tool_use was dropped by the tracer', () => {
++        // Regression (hapi#1073): background subagents arrive with no
++        // parentToolUseId and no prompt-holding sidechain root, so the tracer
++        // cannot attribute the chain to its parent Task and drops it as
++        // orphans. The raw transcript still contains the tool_use id, which
++        // used to suppress the orphan fallback — leaving the request pending
++        // in agentState with no answerable card anywhere.
++        const messages: NormalizedMessage[] = [
++            userMessage('u1', 'hello', 1_700_000_000_000),
++            {
++                id: 'agent-tool', localId: null, createdAt: 1_700_000_000_100, role: 'agent', isSidechain: false,
++                content: [{
++                    type: 'tool-call', id: 'toolu-task-1', name: 'Agent',
++                    input: { prompt: 'research a topic', subagent_type: 'general-purpose' },
++                    description: null, uuid: 'root-uuid-1', parentUUID: null
++                }]
++            },
++            {
++                id: 'sidechain-call', localId: null, createdAt: 1_700_000_000_200, role: 'agent', isSidechain: true,
++                parentToolUseId: null,
++                content: [{
++                    type: 'tool-call', id: 'toolu-sub-1', name: 'WebFetch',
++                    input: { url: 'https://example.com', prompt: 'summarize' },
++                    description: null, uuid: 'side-uuid-2', parentUUID: 'side-uuid-1'
++                }]
++            }
++        ]
++        const agentState = {
++            requests: {
++                'toolu-sub-1': {
++                    tool: 'WebFetch',
++                    arguments: { url: 'https://example.com', prompt: 'summarize' },
++                    createdAt: 1_700_000_000_200
++                }
++            },
++            completedRequests: {}
++        } as unknown as AgentState
++
++        const reduced = reduceChatBlocks(messages, agentState)
++        const block = reduced.blocks.find(b => b.kind === 'tool-call' && b.id === 'toolu-sub-1')
++        expect(block).toBeDefined()
++        expect(block?.kind === 'tool-call' ? block.tool.permission?.status : null).toBe('pending')
++    })
++
++    it('does not duplicate a pending permission card when its sidechain tool_use renders nested', () => {
++        const messages: NormalizedMessage[] = [
++            {
++                id: 'agent-tool', localId: null, createdAt: 1_700_000_000_100, role: 'agent', isSidechain: false,
++                content: [{
++                    type: 'tool-call', id: 'toolu-task-1', name: 'Agent',
++                    input: { prompt: 'inspect the code', subagent_type: 'general-purpose' },
++                    description: null, uuid: 'root-uuid-1', parentUUID: null
++                }]
++            },
++            {
++                id: 'sidechain-call', localId: null, createdAt: 1_700_000_000_200, role: 'agent', isSidechain: true,
++                parentToolUseId: 'toolu-task-1',
++                content: [{
++                    type: 'tool-call', id: 'toolu-sub-2', name: 'WebFetch',
++                    input: { url: 'https://example.com', prompt: 'summarize' },
++                    description: null, uuid: 'side-uuid-1', parentUUID: null
++                }]
++            }
++        ]
++        const agentState = {
++            requests: {
++                'toolu-sub-2': {
++                    tool: 'WebFetch',
++                    arguments: { url: 'https://example.com', prompt: 'summarize' },
++                    createdAt: 1_700_000_000_200
++                }
++            },
++            completedRequests: {}
++        } as unknown as AgentState
++
++        const reduced = reduceChatBlocks(messages, agentState)
++
++        const countBlocksWithId = (list: typeof reduced.blocks, id: string): number =>
++            list.reduce((count, block) => {
++                const self = block.kind === 'tool-call' && block.id === id ? 1 : 0
++                const nested = block.kind === 'tool-call' ? countBlocksWithId(block.children, id) : 0
++                return count + self + nested
++            }, 0)
++        expect(countBlocksWithId(reduced.blocks, 'toolu-sub-2')).toBe(1)
++
++        // The single card must be nested under the Agent card, not a root-level orphan.
++        const agentCard = reduced.blocks.find(b => b.kind === 'tool-call' && b.id === 'toolu-task-1')
++        expect(
++            agentCard?.kind === 'tool-call'
++                ? agentCard.children.some(c => c.kind === 'tool-call' && c.id === 'toolu-sub-2')
++                : false
++        ).toBe(true)
++        expect(reduced.blocks.some(b => b.kind === 'tool-call' && b.id === 'toolu-sub-2')).toBe(false)
++    })
++
+     it('attaches a result summary to the first block in the preceding contiguous assistant group', () => {
+         const summary = {
+             usage: { input_tokens: 100, output_tokens: 20 },
+diff --git a/web/src/chat/reducer.ts b/web/src/chat/reducer.ts
+index b01c0c178..0a34bb50f 100644
+--- a/web/src/chat/reducer.ts
++++ b/web/src/chat/reducer.ts
+@@ -3,7 +3,7 @@ import type { AgentEvent, ChatBlock, NormalizedMessage, UsageData } from '@/chat
+ import type { ThreadGoal } from '@/types/api'
+ import { traceMessages, type TracedMessage } from '@/chat/tracer'
+ import { dedupeAgentEvents, foldApiErrorEvents } from '@/chat/reducerEvents'
+-import { collectTitleChanges, collectToolIdsFromMessages, ensureToolBlock, getPermissions } from '@/chat/reducerTools'
++import { collectTitleChanges, ensureToolBlock, getPermissions } from '@/chat/reducerTools'
+ import { reduceTimeline } from '@/chat/reducerTimeline'
+ import { isRedundantGoalStatusMessageText } from '@hapi/protocol/messages'
+ 
+@@ -113,7 +113,6 @@ export function reduceChatBlocks(
+     options: ReduceChatBlocksOptions = {}
+ ): { blocks: ChatBlock[]; hasReadyEvent: boolean; latestUsage: LatestUsage | null; latestGoal: ThreadGoal | null } {
+     const permissionsById = getPermissions(agentState)
+-    const toolIdsInMessages = collectToolIdsFromMessages(normalized)
+     const titleChangesByToolUseId = collectTitleChanges(normalized)
+ 
+     const traced = traceMessages(normalized)
+@@ -136,25 +135,42 @@ export function reduceChatBlocks(
+     const rootResult = reduceTimeline(root, reducerContext)
+     let hasReadyEvent = rootResult.hasReadyEvent
+ 
+-    // Synthesize a tool card only for a *pending* permission that has no tool
+-    // call/result in the transcript — so the user can still answer it when its
+-    // tool_use message hasn't loaded. A resolved request (approved/denied/
+-    // canceled) is history: agentState keeps it in completedRequests, but
+-    // synthesizing it here appends a card to the end of the timeline (there is
+-    // no chronological re-sort), pinning a stale "answered" card above the
+-    // composer forever. Resolved requests render only via their own message,
+-    // when it is in the window.
++    // Synthesize a tool card only for a *pending* permission that is not
++    // rendered anywhere in the final block tree — so the user can still
++    // answer it when its tool_use message hasn't loaded. A resolved request
++    // (approved/denied/canceled) is history: agentState keeps it in
++    // completedRequests, but synthesizing it here appends a card to the end
++    // of the timeline (there is no chronological re-sort), pinning a stale
++    // "answered" card above the composer forever. Resolved requests render
++    // only via their own message, when it is in the window.
+     // Also skip if the permission is older than the oldest message in the
+     // current view, to avoid mixing old tool cards with newer messages when
+     // paginating.
++    //
++    // The check must walk the *rendered* tree (including blocks nested under
++    // Task/Agent cards), not raw transcript ids: the tracer drops sidechain
++    // messages it cannot attribute to a parent Task (no parentToolUseId and
++    // no prompt-holding sidechain root — e.g. background subagents), so a
++    // raw-id check suppresses this fallback for a card that was never
++    // rendered, leaving the pending permission answerable nowhere
++    // (hapi#1073).
++    const renderedToolBlockIds = new Set<string>()
++    const collectRenderedToolBlockIds = (list: ChatBlock[]): void => {
++        for (const block of list) {
++            if (block.kind !== 'tool-call') continue
++            renderedToolBlockIds.add(block.id)
++            collectRenderedToolBlockIds(block.children)
++        }
++    }
++    collectRenderedToolBlockIds(rootResult.blocks)
++
+     const oldestMessageTime = normalized.length > 0
+         ? Math.min(...normalized.map(m => m.createdAt))
+         : null
+ 
+     for (const [id, entry] of permissionsById) {
+         if (entry.permission.status !== 'pending') continue
+-        if (toolIdsInMessages.has(id)) continue
+-        if (rootResult.toolBlocksById.has(id)) continue
++        if (renderedToolBlockIds.has(id)) continue
+ 
+         const createdAt = entry.permission.createdAt ?? Date.now()
+ 
+diff --git a/web/src/chat/reducerTools.ts b/web/src/chat/reducerTools.ts
+index 911fe7cd2..d5866d79d 100644
+--- a/web/src/chat/reducerTools.ts
++++ b/web/src/chat/reducerTools.ts
+@@ -179,21 +179,6 @@ export function ensureToolBlock(
+     return block
+ }
+ 
+-export function collectToolIdsFromMessages(messages: NormalizedMessage[]): Set<string> {
+-    const ids = new Set<string>()
+-    for (const msg of messages) {
+-        if (msg.role !== 'agent') continue
+-        for (const content of msg.content) {
+-            if (content.type === 'tool-call') {
+-                ids.add(content.id)
+-            } else if (content.type === 'tool-result') {
+-                ids.add(content.tool_use_id)
+-            }
+-        }
+-    }
+-    return ids
+-}
+-
+ export function isChangeTitleToolName(name: string): boolean {
+     return name === 'mcp__hapi__change_title' || name === 'hapi__change_title'
+ }

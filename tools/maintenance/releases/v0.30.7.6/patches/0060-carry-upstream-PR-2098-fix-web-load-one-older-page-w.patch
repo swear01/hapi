@@ -1,0 +1,287 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Thu, 22 Oct 2026 12:02:56 +0000
+Subject: [PATCH 60/95] carry(upstream): PR #2098 fix(web): load one older page
+ when the cold tail is tool-only
+
+---
+ web/src/lib/message-window-store.test.ts | 148 +++++++++++++++++++++++
+ web/src/lib/message-window-store.ts      |  69 ++++++++++-
+ 2 files changed, 215 insertions(+), 2 deletions(-)
+
+diff --git a/web/src/lib/message-window-store.test.ts b/web/src/lib/message-window-store.test.ts
+index beb272eca..97120bac6 100644
+--- a/web/src/lib/message-window-store.test.ts
++++ b/web/src/lib/message-window-store.test.ts
+@@ -255,7 +255,155 @@ afterEach(() => {
+     vi.restoreAllMocks()
+ })
+ 
++function makeToolMessages(count: number, firstSeq: number): DecryptedMessage[] {
++    return Array.from({ length: count }, (_, index) => {
++        const seq = firstSeq + index
++        const callId = `call-${Math.floor(index / 2)}`
++        return {
++            id: `tool-${seq}`,
++            seq,
++            localId: null,
++            content: {
++                role: 'agent',
++                content: {
++                    type: 'codex',
++                    data: index % 2 === 0
++                        ? { type: 'tool-call', callId, name: 'Read', input: { file_path: `/f${index}` } }
++                        : { type: 'tool-call-result', callId, output: 'ok' }
++                }
++            },
++            createdAt: seq * 1_000,
++            invokedAt: seq * 1_000
++        } as DecryptedMessage
++    })
++}
++
+ describe('message tail synchronization', () => {
++    it('fetches one older context page before first paint when the cold page is tool-only', async () => {
++        const id = sessionId('cold-tool-only-context')
++        const tools = makeToolMessages(INITIAL_PAGE_SIZE, 10)
++        const context = makeAgentMessage({ id: 'context', seq: 9, at: 9_000 })
++        const older = deferred<MessagesResponse>()
++        const getMessages = vi.fn()
++            .mockResolvedValueOnce(latestResponse(tools, {
++                epoch: 1,
++                hasMore: true,
++                nextBeforeAt: 10_000,
++                nextBeforeSeq: 10
++            }))
++            .mockReturnValueOnce(older.promise)
++
++        const syncing = syncTailMessages(createApi(getMessages), id)
++        await vi.waitFor(() => expect(getMessages).toHaveBeenCalledTimes(2))
++        expect(getMessages.mock.calls[1]?.[1]).toEqual({ beforeAt: 10_000, beforeSeq: 10, limit: 200 })
++        expect(getMessageWindowState(id)).toMatchObject({ isSyncingTail: true, messages: [] })
++
++        older.resolve(beforeResponse([context], {
++            epoch: 1,
++            hasMore: true,
++            nextBeforeAt: 9_000,
++            nextBeforeSeq: 9
++        }))
++        await syncing
++
++        const state = getMessageWindowState(id)
++        expect(state.isSyncingTail).toBe(false)
++        expect(state.hasMore).toBe(true)
++        expect(state.messages.map((message) => message.id)).toEqual([
++            'context',
++            ...tools.map((message) => message.id)
++        ])
++    })
++
++    it('releases a tool-only cold page when the context page exceeds the wait budget', async () => {
++        vi.useFakeTimers()
++        try {
++            const id = sessionId('cold-tool-only-timeout')
++            const tools = makeToolMessages(INITIAL_PAGE_SIZE, 10)
++            const getMessages = vi.fn()
++                .mockResolvedValueOnce(latestResponse(tools, {
++                    epoch: 1,
++                    hasMore: true,
++                    nextBeforeAt: 10_000,
++                    nextBeforeSeq: 10
++                }))
++                .mockReturnValueOnce(new Promise(() => {}))
++
++            const syncing = syncTailMessages(createApi(getMessages), id)
++            await vi.advanceTimersByTimeAsync(500)
++            await syncing
++
++            const state = getMessageWindowState(id)
++            expect(state.isSyncingTail).toBe(false)
++            expect(state.messages).toHaveLength(INITIAL_PAGE_SIZE)
++        } finally {
++            vi.useRealTimers()
++        }
++    })
++
++    it('ignores queued prompts when classifying a tool-only cold page', async () => {
++        const id = sessionId('cold-tool-only-queued')
++        const tools = makeToolMessages(INITIAL_PAGE_SIZE, 10)
++        const queued = makeUserMessage({ id: 'queued', localId: 'queued', createdAt: 99_000, invokedAt: null })
++        const getMessages = vi.fn()
++            .mockResolvedValueOnce(latestResponse([...tools, queued], {
++                epoch: 1,
++                hasMore: true,
++                nextBeforeAt: 10_000,
++                nextBeforeSeq: 10
++            }))
++            .mockResolvedValueOnce(beforeResponse([], { epoch: 1, nextBeforeAt: null, nextBeforeSeq: null }))
++
++        await syncTailMessages(createApi(getMessages), id)
++
++        expect(getMessages).toHaveBeenCalledTimes(2)
++        expect(getMessageWindowState(id).messages.map((message) => message.id)).toContain('queued')
++    })
++
++    it('does not fetch context on cached re-entry with a tool-only latest page', async () => {
++        const id = sessionId('reentry-tool-only')
++        sessionStorage.setItem(`hapi:message-window:v2:${id}`, JSON.stringify({
++            messages: [makeAgentMessage({ id: 'cached', seq: 5, at: 5_000 })],
++            hasMore: true,
++            oldestPositionAt: 5_000,
++            oldestPositionSeq: 5,
++            newestPositionAt: 5_000,
++            newestPositionSeq: 5,
++            epoch: 1
++        }))
++        activateMessageWindow(id)
++        const getMessages = vi.fn().mockResolvedValueOnce(latestResponse(makeToolMessages(INITIAL_PAGE_SIZE, 10), {
++            epoch: 1,
++            hasMore: true,
++            nextBeforeAt: 10_000,
++            nextBeforeSeq: 10
++        }))
++
++        await syncTailMessages(createApi(getMessages), id)
++
++        expect(getMessages).toHaveBeenCalledTimes(1)
++        expect(getMessages).toHaveBeenCalledWith(id, { limit: 20 })
++    })
++
++    it('does not fetch context when the cold page has conversation text', async () => {
++        const id = sessionId('cold-text-no-context')
++        const messages = [
++            makeAgentMessage({ id: 'text', seq: 9, at: 9_000 }),
++            ...makeToolMessages(INITIAL_PAGE_SIZE - 1, 10)
++        ]
++        const getMessages = vi.fn().mockResolvedValueOnce(latestResponse(messages, {
++            epoch: 1,
++            hasMore: true,
++            nextBeforeAt: 9_000,
++            nextBeforeSeq: 9
++        }))
++
++        await syncTailMessages(createApi(getMessages), id)
++
++        expect(getMessages).toHaveBeenCalledTimes(1)
++        expect(getMessageWindowState(id).messages).toHaveLength(INITIAL_PAGE_SIZE)
++    })
++
+     it('uses a small cold latest page while keeping older loads at full page size', async () => {
+         const id = sessionId('cold-initial-page')
+         const latestMessages = Array.from({ length: INITIAL_PAGE_SIZE }, (_, index) =>
+diff --git a/web/src/lib/message-window-store.ts b/web/src/lib/message-window-store.ts
+index 3c677d40d..b4a667d10 100644
+--- a/web/src/lib/message-window-store.ts
++++ b/web/src/lib/message-window-store.ts
+@@ -1,6 +1,9 @@
+ import { getReasoningStreamId } from '@hapi/protocol/messages'
+ import type { ApiClient } from '@/api/client'
+ import { normalizeDecryptedMessage } from '@/chat/normalize'
++import { reduceChatBlocks } from '@/chat/reducer'
++import { buildVisibleChatBlocks, isEligibleForToolGrouping } from '@/chat/toolGroups'
++import type { NormalizedMessage } from '@/chat/types'
+ import type { DecryptedMessage, MessageStatus, MessagesResponse } from '@/types/api'
+ import { isQueuedForInvocation, mergeMessages } from '@/lib/messages'
+ 
+@@ -45,6 +48,8 @@ const AGENT_RUN_WINDOW_SIZE = 800
+ const OLDER_LOAD_WINDOW_SIZE = 800
+ const PAGE_SIZE = 200
+ const CACHED_REENTRY_PAGE_SIZE = 20
++// ponytail: fixed budget suggested in #2045, not field-measured; tune from load timings.
++const INITIAL_CONTEXT_WAIT_MS = 500
+ 
+ type MessagePosition = {
+     at: number
+@@ -682,6 +687,51 @@ function finishTailSync(sessionId: string, generation: number, warning: string |
+     })
+ }
+ 
++function isToolOnlyPage(messages: DecryptedMessage[]): boolean {
++    const normalized: NormalizedMessage[] = []
++    for (const message of messages) {
++        // Queued prompts render above the composer, not in the thread.
++        if (!shouldRetainWindowMessage(message) || isQueuedForInvocation(message)) continue
++        const next = normalizeDecryptedMessage(message)
++        if (next) normalized.push(next)
++    }
++    const { blocks } = reduceChatBlocks(normalized, null)
++    return buildVisibleChatBlocks(blocks, { hasMoreMessages: true }).every((block) => (
++        block.kind === 'tool-group'
++        || (block.kind === 'tool-call' && isEligibleForToolGrouping(block))
++    ))
++}
++
++// A cold tail page made only of tool activity renders as one collapsed card.
++// Fetch one older page before first paint so the preceding conversation is
++// visible; a timeout, failure, or epoch change falls back to the tail page.
++async function fetchInitialContextPage(
++    api: ApiClient,
++    sessionId: string,
++    latest: MessagesResponse
++): Promise<MessagesResponse | null> {
++    const before = pagePosition(latest.page.nextBeforeAt, latest.page.nextBeforeSeq)
++    if (!latest.page.hasMore || !before || !isToolOnlyPage(latest.messages)) {
++        return null
++    }
++    let timer: ReturnType<typeof setTimeout> | undefined
++    try {
++        const context = await Promise.race([
++            api.getMessages(sessionId, {
++                beforeAt: before.at,
++                beforeSeq: before.seq,
++                limit: PAGE_SIZE
++            }).catch(() => null),
++            new Promise<null>((resolve) => {
++                timer = setTimeout(() => resolve(null), INITIAL_CONTEXT_WAIT_MS)
++            })
++        ])
++        return context && context.page.epoch === latest.page.epoch ? context : null
++    } finally {
++        clearTimeout(timer)
++    }
++}
++
+ async function runTailSync(api: ApiClient, sessionId: string): Promise<void> {
+     const generation = beginTailSync(sessionId)
+     try {
+@@ -699,15 +749,22 @@ async function runTailSync(api: ApiClient, sessionId: string): Promise<void> {
+             // messages for first paint. Structural resets and cursor-backed
+             // non-activation synchronization use the full page so their
+             // authoritative replacement remains unchanged.
++            const isColdWindow = !initial.requiresLatestReset
++                && !preferLatestOnActivation
++                && initialCursor === null
+             const latestPageSize = initial.requiresLatestReset
+                 ? PAGE_SIZE
+                 : preferLatestOnActivation
+                     ? CACHED_REENTRY_PAGE_SIZE
+-                    : initialCursor === null
++                    : isColdWindow
+                         ? INITIAL_PAGE_SIZE
+                         : PAGE_SIZE
+             const response = await api.getMessages(sessionId, { limit: latestPageSize })
+             if (!isCurrentTailSync(sessionId, generation)) return
++            const context = isColdWindow
++                ? await fetchInitialContextPage(api, sessionId, response)
++                : null
++            if (!isCurrentTailSync(sessionId, generation)) return
+             updateState(sessionId, (previous) => {
+                 if (previous.syncGeneration !== generation) return previous
+                 const next = applyLatestResponse(previous, response, {
+@@ -716,7 +773,15 @@ async function runTailSync(api: ApiClient, sessionId: string): Promise<void> {
+                         || response.page.reset,
+                     requestBaseline
+                 })
+-                return buildState(next, { preferLatestOnActivation: false })
++                if (!context) {
++                    return buildState(next, { preferLatestOnActivation: false })
++                }
++                return buildState(mergeIntoWindow(next, context.messages, { mode: 'prepend' }), {
++                    preferLatestOnActivation: false,
++                    hasMore: context.page.hasMore,
++                    oldestPositionAt: context.page.nextBeforeAt,
++                    oldestPositionSeq: context.page.nextBeforeSeq
++                })
+             })
+             finishTailSync(sessionId, generation, null)
+             return

@@ -1,0 +1,159 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sun, 25 Oct 2026 18:03:01 +0000
+Subject: [PATCH 85/94] carry(upstream): PR #2159 fix(claude): pass the session
+ permission mode to the local TUI
+
+Upstream-PR: https://github.com/tiann/hapi/pull/2159
+Upstream-Head: 94a8d18e60e483d5f959f0a26aaac87e4c5d72e4
+---
+ cli/src/claude/claudeLocal.test.ts         | 33 ++++++++++++++++++++++
+ cli/src/claude/claudeLocal.ts              |  6 ++++
+ cli/src/claude/claudeLocalLauncher.test.ts |  1 +
+ cli/src/claude/claudeLocalLauncher.ts      |  1 +
+ cli/src/commands/claude.test.ts            | 12 ++++++++
+ cli/src/commands/claude.ts                 | 12 ++++----
+ 6 files changed, 59 insertions(+), 6 deletions(-)
+
+diff --git a/cli/src/claude/claudeLocal.test.ts b/cli/src/claude/claudeLocal.test.ts
+index b0342cb7f..4f6b087cf 100644
+--- a/cli/src/claude/claudeLocal.test.ts
++++ b/cli/src/claude/claudeLocal.test.ts
+@@ -148,3 +148,36 @@ describe('claudeLocal peer-tools child env (#2056)', () => {
+         expect(env.HAPI_DISABLE_PEER_TOOLS).toBe('1')
+     })
+ })
++
++describe('claudeLocal permission mode arguments', () => {
++    beforeEach(() => {
++        harness.spawn.mockClear()
++    })
++
++    it.each(['acceptEdits', 'bypassPermissions', 'plan', 'auto'] as const)('launches the TUI with --permission-mode %s', async (permissionMode) => {
++        await claudeLocal({
++            abort: new AbortController().signal,
++            sessionId: null,
++            path: '/workspace',
++            hookSettingsPath: '/tmp/hooks.json',
++            permissionMode
++        })
++
++        const args = getSpawnArgs()
++        expect(args.slice(args.indexOf('--permission-mode'), args.indexOf('--permission-mode') + 2)).toEqual([
++            '--permission-mode', permissionMode
++        ])
++    })
++
++    it('leaves the default mode to Claude settings', async () => {
++        await claudeLocal({
++            abort: new AbortController().signal,
++            sessionId: null,
++            path: '/workspace',
++            hookSettingsPath: '/tmp/hooks.json',
++            permissionMode: 'default'
++        })
++
++        expect(getSpawnArgs()).not.toContain('--permission-mode')
++    })
++})
+diff --git a/cli/src/claude/claudeLocal.ts b/cli/src/claude/claudeLocal.ts
+index c51552e03..9c8bb0641 100644
+--- a/cli/src/claude/claudeLocal.ts
++++ b/cli/src/claude/claudeLocal.ts
+@@ -9,6 +9,7 @@ import { spawnWithTerminalGuard } from "@/utils/spawnWithTerminalGuard";
+ import { getHapiBlobsDir } from "@/constants/uploadPaths";
+ import { getDefaultClaudeCodePath } from "./sdk/utils";
+ import type { SessionModel } from "@/api/types";
++import type { PermissionMode } from "./loop";
+ 
+ function withoutTrackedModelArgs(args: string[]): string[] {
+     const filtered: string[] = [];
+@@ -39,6 +40,7 @@ export async function claudeLocal(opts: {
+     peerToolsDisabled?: boolean
+     claudeArgs?: string[]
+     model?: SessionModel
++    permissionMode?: PermissionMode
+     allowedTools?: string[]
+     hookSettingsPath: string
+ }) {
+@@ -91,6 +93,10 @@ export async function claudeLocal(opts: {
+     if (opts.model) {
+         args.push('--model', opts.model);
+     }
++    // Omit default so Claude's own settings.json defaultMode still applies.
++    if (opts.permissionMode && opts.permissionMode !== 'default') {
++        args.push('--permission-mode', opts.permissionMode);
++    }
+ 
+     // Add hook settings for session tracking
+     args.push('--settings', opts.hookSettingsPath);
+diff --git a/cli/src/claude/claudeLocalLauncher.test.ts b/cli/src/claude/claudeLocalLauncher.test.ts
+index c844ef91f..6864f557b 100644
+--- a/cli/src/claude/claudeLocalLauncher.test.ts
++++ b/cli/src/claude/claudeLocalLauncher.test.ts
+@@ -47,6 +47,7 @@ function createSessionStub() {
+             claudeEnvVars: {},
+             claudeArgs: [],
+             getModel: () => 'claude-opus-4-1',
++            getPermissionMode: () => 'default',
+             mcpServers: [],
+             allowedTools: [],
+             hookSettingsPath: null,
+diff --git a/cli/src/claude/claudeLocalLauncher.ts b/cli/src/claude/claudeLocalLauncher.ts
+index d1f2f8438..d432524fa 100644
+--- a/cli/src/claude/claudeLocalLauncher.ts
++++ b/cli/src/claude/claudeLocalLauncher.ts
+@@ -85,6 +85,7 @@ export async function claudeLocalLauncher(session: Session): Promise<'switch' |
+                     peerToolsDisabled: session.peerToolsDisabled,
+                     claudeArgs: session.claudeArgs,
+                     model: session.getModel(),
++                    permissionMode: session.getPermissionMode(),
+                     mcpServers: session.mcpServers,
+                     allowedTools: session.allowedTools,
+                     hookSettingsPath: session.localHookSettingsPath,
+diff --git a/cli/src/commands/claude.test.ts b/cli/src/commands/claude.test.ts
+index 715a25dec..0edab516a 100644
+--- a/cli/src/commands/claude.test.ts
++++ b/cli/src/commands/claude.test.ts
+@@ -61,6 +61,18 @@ describe('claudeCommand arguments', () => {
+         expect(runClaudeMock).toHaveBeenCalledWith({ model: 'claude-opus-4-1' })
+     })
+ 
++    it.each(['--yolo', '--dangerously-skip-permissions'])('tracks %s as session permission mode without forwarding it', async (arg) => {
++        await claudeCommand.run(createCommandContext([arg]))
++
++        expect(runClaudeMock).toHaveBeenCalledWith({ permissionMode: 'bypassPermissions' })
++    })
++
++    it('keeps an explicit --permission-mode over a later --dangerously-skip-permissions', async () => {
++        await claudeCommand.run(createCommandContext(['--permission-mode', 'default', '--dangerously-skip-permissions']))
++
++        expect(runClaudeMock).toHaveBeenCalledWith({ permissionMode: 'default' })
++    })
++
+     it.each(['--help', '-h', '--version', '-v', 'claude'])('forwards %s without special handling', async (arg) => {
+         const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+         try {
+diff --git a/cli/src/commands/claude.ts b/cli/src/commands/claude.ts
+index b56c80164..a32fab4f9 100644
+--- a/cli/src/commands/claude.ts
++++ b/cli/src/commands/claude.ts
+@@ -38,12 +38,12 @@ export const claudeCommand: CommandDefinition = {
+                 }
+                 options.permissionMode = mode as StartOptions['permissionMode']
+                 hasExplicitPermissionMode = true
+-            } else if (arg === '--yolo' && !hasExplicitPermissionMode) {
+-                options.permissionMode = 'bypassPermissions'
+-                unknownArgs.push('--dangerously-skip-permissions')
+-            } else if (arg === '--dangerously-skip-permissions' && !hasExplicitPermissionMode) {
+-                options.permissionMode = 'bypassPermissions'
+-                unknownArgs.push(arg)
++            } else if (arg === '--yolo' || arg === '--dangerously-skip-permissions') {
++                // Not forwarded: Claude lets this flag override --permission-mode,
++                // so a later switch away from Yolo could never reach the TUI.
++                if (!hasExplicitPermissionMode) {
++                    options.permissionMode = 'bypassPermissions'
++                }
+             } else if (arg === '--model') {
+                 const model = args[++i]
+                 if (!model) {

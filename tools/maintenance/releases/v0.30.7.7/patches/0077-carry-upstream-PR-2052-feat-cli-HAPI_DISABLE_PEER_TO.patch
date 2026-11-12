@@ -1,0 +1,729 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Fri, 23 Oct 2026 19:09:40 +0000
+Subject: [PATCH 77/94] =?UTF-8?q?carry(upstream):=20PR=20#2052=20feat(cli)?=
+ =?UTF-8?q?:=20HAPI=5FDISABLE=5FPEER=5FTOOLS=20=E2=80=94=20hide=20peer-ses?=
+ =?UTF-8?q?sion=20tools=20from=20wrapped=20agents?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ cli/src/claude/utils/startHappyServer.test.ts |  53 ++++
+ cli/src/claude/utils/startHappyServer.ts      | 291 +++++++++---------
+ cli/src/codex/happyMcpStdioBridge.test.ts     |  49 +++
+ cli/src/codex/happyMcpStdioBridge.ts          |   8 +
+ cli/src/codex/utils/buildHapiMcpBridge.ts     |  10 +-
+ cli/src/modules/common/peerTools.test.ts      |  34 ++
+ cli/src/modules/common/peerTools.ts           |  18 ++
+ cli/src/modules/pingPeer/pingPeer.test.ts     |  33 +-
+ cli/src/modules/pingPeer/pingPeer.ts          |  19 ++
+ docs/guide/how-it-works.md                    |   2 +-
+ docs/guide/installation.md                    |   4 +
+ 11 files changed, 376 insertions(+), 145 deletions(-)
+ create mode 100644 cli/src/modules/common/peerTools.test.ts
+ create mode 100644 cli/src/modules/common/peerTools.ts
+
+diff --git a/cli/src/claude/utils/startHappyServer.test.ts b/cli/src/claude/utils/startHappyServer.test.ts
+index 3fcfc646e..3013ebad4 100644
+--- a/cli/src/claude/utils/startHappyServer.test.ts
++++ b/cli/src/claude/utils/startHappyServer.test.ts
+@@ -404,3 +404,56 @@ describe('toClaudeAllowedHapiMcpTools', () => {
+         expect(toClaudeAllowedHapiMcpTools(['display_media'])).not.toContain('mcp__hapi__display_media')
+     })
+ })
++
++describe('startHappyServer peer tools kill switch', () => {
++    const originalFlag = process.env.HAPI_DISABLE_PEER_TOOLS
++    let client: Client | null
++    let stopServer: (() => void) | null
++
++    afterEach(async () => {
++        await client?.close()
++        stopServer?.()
++        if (originalFlag === undefined) {
++            delete process.env.HAPI_DISABLE_PEER_TOOLS
++        } else {
++            process.env.HAPI_DISABLE_PEER_TOOLS = originalFlag
++        }
++    })
++
++    async function startServer(): Promise<{ url: string; toolNames: string[] }> {
++        const sessionClient = {
++            updateMetadata: vi.fn(),
++            sendAgentMessage: vi.fn(),
++            sendClaudeSessionMessage: vi.fn()
++        } as unknown as ApiSessionClient
++        const server = await startHappyServer(sessionClient, {})
++        stopServer = server.stop
++        client = new Client(
++            { name: 'hapi-peer-tools-test', version: '1.0.0' },
++            { capabilities: {} }
++        )
++        await client.connect(new StreamableHTTPClientTransport(new URL(server.url)))
++        return { url: server.url, toolNames: server.toolNames }
++    }
++
++    it('registers peer tools by default', async () => {
++        delete process.env.HAPI_DISABLE_PEER_TOOLS
++        const { toolNames } = await startServer()
++        expect(toolNames).toEqual(expect.arrayContaining(['ping_peer', 'inspect_peer', 'spawn_peer']))
++        const tools = await client!.listTools()
++        const names = tools.tools.map((tool) => tool.name)
++        expect(names).toEqual(expect.arrayContaining(['ping_peer', 'inspect_peer', 'spawn_peer']))
++    })
++
++    it('omits peer tools from registration and toolNames when HAPI_DISABLE_PEER_TOOLS is set', async () => {
++        process.env.HAPI_DISABLE_PEER_TOOLS = '1'
++        const { toolNames } = await startServer()
++        expect(toolNames).toEqual(['change_title', 'display_image', 'display_video', 'display_media'])
++        const tools = await client!.listTools()
++        const names = tools.tools.map((tool) => tool.name)
++        expect(names).not.toContain('ping_peer')
++        expect(names).not.toContain('inspect_peer')
++        expect(names).not.toContain('spawn_peer')
++        expect(names).toEqual(expect.arrayContaining(['display_image', 'display_video', 'display_media']))
++    })
++})
+diff --git a/cli/src/claude/utils/startHappyServer.ts b/cli/src/claude/utils/startHappyServer.ts
+index 7340ed0da..b1e384718 100644
+--- a/cli/src/claude/utils/startHappyServer.ts
++++ b/cli/src/claude/utils/startHappyServer.ts
+@@ -21,6 +21,7 @@ import {
+ import type { InlineMediaSource } from "@/modules/common/inlineMediaSource";
+ import { resolveSkill } from "@/modules/common/skills";
+ import { SESSION_NAME_MAX_LENGTH } from '@hapi/protocol'
++import { isPeerToolsDisabled, PEER_TOOL_NAMES } from "@/modules/common/peerTools";
+ import {
+     INSPECT_PEER_TOOL_DESCRIPTION,
+     PING_PEER_TOOL_DESCRIPTION,
+@@ -143,6 +144,10 @@ function createHapiMcpServer(
+ 
+     const maxInlineMediaBytes = 25 * 1024 * 1024;
+ 
++    // HAPI_DISABLE_PEER_TOOLS=1: peer tools are neither registered nor
++    // advertised, so wrapped agents cannot browse or message other sessions.
++    const peerToolsDisabled = isPeerToolsDisabled();
++
+     const inspectPeerInputSchema: z.ZodTypeAny = z.object({
+         sessionId: z.string().uuid().describe(SESSION_ID_PARAM_DESCRIPTION),
+         messageLimit: z.number().int().min(1).max(100).optional().describe(
+@@ -314,148 +319,150 @@ function createHapiMcpServer(
+         }
+     });
+ 
+-    mcp.registerTool<any, any>('ping_peer', {
+-        description: PING_PEER_TOOL_DESCRIPTION,
+-        title: 'Ping Peer Session',
+-        inputSchema: pingPeerInputSchema,
+-    }, async (args: { sessionId: string; message: string; remitId?: string }) => {
+-        logger.debug('[hapiMCP] ping_peer:', args.sessionId);
+-        try {
+-            const result = await pingPeer({
+-                sessionId: args.sessionId,
+-                message: args.message,
+-                remitId: args.remitId,
+-            });
+-            return {
+-                content: [
+-                    {
+-                        type: 'text' as const,
+-                        text: `Delivered to ${result.sessionId} remit=${result.remitId}${result.resumed ? ' (resumed)' : ''} (${result.name})`,
+-                    },
+-                ],
+-                isError: false,
+-            };
+-        } catch (error) {
+-            const message = error instanceof PingPeerError
+-                ? error.message
+-                : error instanceof Error
++    if (!peerToolsDisabled) {
++        mcp.registerTool<any, any>('ping_peer', {
++            description: PING_PEER_TOOL_DESCRIPTION,
++            title: 'Ping Peer Session',
++            inputSchema: pingPeerInputSchema,
++        }, async (args: { sessionId: string; message: string; remitId?: string }) => {
++            logger.debug('[hapiMCP] ping_peer:', args.sessionId);
++            try {
++                const result = await pingPeer({
++                    sessionId: args.sessionId,
++                    message: args.message,
++                    remitId: args.remitId,
++                });
++                return {
++                    content: [
++                        {
++                            type: 'text' as const,
++                            text: `Delivered to ${result.sessionId} remit=${result.remitId}${result.resumed ? ' (resumed)' : ''} (${result.name})`,
++                        },
++                    ],
++                    isError: false,
++                };
++            } catch (error) {
++                const message = error instanceof PingPeerError
+                     ? error.message
+-                    : String(error);
+-            logger.debug('[hapiMCP] ping_peer failed:', message);
+-            return {
+-                content: [
+-                    {
+-                        type: 'text' as const,
+-                        text: error instanceof PingPeerError
+-                            && error.remitId
+-                            && error.code !== 'remit_conflict'
+-                            ? `Failed to ping peer: ${message}; retry ping_peer with remitId=${error.remitId}`
+-                            : `Failed to ping peer: ${message}`,
+-                    },
+-                ],
+-                isError: true,
+-            };
+-        }
+-    });
++                    : error instanceof Error
++                        ? error.message
++                        : String(error);
++                logger.debug('[hapiMCP] ping_peer failed:', message);
++                return {
++                    content: [
++                        {
++                            type: 'text' as const,
++                            text: error instanceof PingPeerError
++                                && error.remitId
++                                && error.code !== 'remit_conflict'
++                                ? `Failed to ping peer: ${message}; retry ping_peer with remitId=${error.remitId}`
++                                : `Failed to ping peer: ${message}`,
++                        },
++                    ],
++                    isError: true,
++                };
++            }
++        });
+ 
+-    mcp.registerTool<any, any>('spawn_peer', {
+-        description: SPAWN_PEER_TOOL_DESCRIPTION,
+-        title: 'Spawn Peer Session',
+-        inputSchema: spawnPeerInputSchema,
+-    }, async (args: {
+-        directory: string
+-        message: string
+-        name?: string
+-        machineId?: string
+-        agent?: string
+-        model?: string
+-        effort?: string
+-        sessionType?: 'simple' | 'worktree'
+-        permissionMode?: string
+-        remitId?: string
+-    }) => {
+-        logger.debug('[hapiMCP] spawn_peer:', args.directory);
+-        try {
+-            const result = await spawnPeer({
+-                directory: args.directory,
+-                message: args.message,
+-                name: args.name,
+-                machineId: args.machineId,
+-                agent: args.agent as Parameters<typeof spawnPeer>[0]['agent'],
+-                model: args.model,
+-                effort: args.effort,
+-                sessionType: args.sessionType,
+-                permissionMode: args.permissionMode as Parameters<typeof spawnPeer>[0]['permissionMode'],
+-                remitId: args.remitId,
+-            });
+-            return {
+-                content: [
+-                    {
+-                        type: 'text' as const,
+-                        text: `Spawned ${result.sessionId} remit=${result.remitId} (${result.name})`,
+-                    },
+-                ],
+-                isError: false,
+-            };
+-        } catch (error) {
+-            const message = error instanceof SpawnPeerError
+-                ? error.message
+-                : error instanceof Error
++        mcp.registerTool<any, any>('spawn_peer', {
++            description: SPAWN_PEER_TOOL_DESCRIPTION,
++            title: 'Spawn Peer Session',
++            inputSchema: spawnPeerInputSchema,
++        }, async (args: {
++            directory: string
++            message: string
++            name?: string
++            machineId?: string
++            agent?: string
++            model?: string
++            effort?: string
++            sessionType?: 'simple' | 'worktree'
++            permissionMode?: string
++            remitId?: string
++        }) => {
++            logger.debug('[hapiMCP] spawn_peer:', args.directory);
++            try {
++                const result = await spawnPeer({
++                    directory: args.directory,
++                    message: args.message,
++                    name: args.name,
++                    machineId: args.machineId,
++                    agent: args.agent as Parameters<typeof spawnPeer>[0]['agent'],
++                    model: args.model,
++                    effort: args.effort,
++                    sessionType: args.sessionType,
++                    permissionMode: args.permissionMode as Parameters<typeof spawnPeer>[0]['permissionMode'],
++                    remitId: args.remitId,
++                });
++                return {
++                    content: [
++                        {
++                            type: 'text' as const,
++                            text: `Spawned ${result.sessionId} remit=${result.remitId} (${result.name})`,
++                        },
++                    ],
++                    isError: false,
++                };
++            } catch (error) {
++                const message = error instanceof SpawnPeerError
+                     ? error.message
+-                    : String(error);
+-            logger.debug('[hapiMCP] spawn_peer failed:', message);
+-            return {
+-                content: [
+-                    {
+-                        type: 'text' as const,
+-                        text: error instanceof SpawnPeerError && error.remitId
+-                            ? `Failed to spawn peer: ${message}; retry spawn_peer with remitId=${error.remitId}`
+-                            : `Failed to spawn peer: ${message}`,
+-                    },
+-                ],
+-                isError: true,
+-            };
+-        }
+-    });
++                    : error instanceof Error
++                        ? error.message
++                        : String(error);
++                logger.debug('[hapiMCP] spawn_peer failed:', message);
++                return {
++                    content: [
++                        {
++                            type: 'text' as const,
++                            text: error instanceof SpawnPeerError && error.remitId
++                                ? `Failed to spawn peer: ${message}; retry spawn_peer with remitId=${error.remitId}`
++                                : `Failed to spawn peer: ${message}`,
++                        },
++                    ],
++                    isError: true,
++                };
++            }
++        });
+ 
+-    mcp.registerTool<any, any>('inspect_peer', {
+-        description: INSPECT_PEER_TOOL_DESCRIPTION,
+-        title: 'Inspect Peer Session',
+-        inputSchema: inspectPeerInputSchema,
+-    }, async (args: { sessionId: string; messageLimit?: number }) => {
+-        logger.debug('[hapiMCP] inspect_peer:', args.sessionId);
+-        try {
+-            const result = await inspectPeer({
+-                sessionId: args.sessionId,
+-                messageLimit: args.messageLimit,
+-            });
+-            return {
+-                content: [
+-                    {
+-                        type: 'text' as const,
+-                        text: formatInspectPeerReport(result),
+-                    },
+-                ],
+-                isError: false,
+-            };
+-        } catch (error) {
+-            const message = error instanceof PingPeerError
+-                ? error.message
+-                : error instanceof Error
++        mcp.registerTool<any, any>('inspect_peer', {
++            description: INSPECT_PEER_TOOL_DESCRIPTION,
++            title: 'Inspect Peer Session',
++            inputSchema: inspectPeerInputSchema,
++        }, async (args: { sessionId: string; messageLimit?: number }) => {
++            logger.debug('[hapiMCP] inspect_peer:', args.sessionId);
++            try {
++                const result = await inspectPeer({
++                    sessionId: args.sessionId,
++                    messageLimit: args.messageLimit,
++                });
++                return {
++                    content: [
++                        {
++                            type: 'text' as const,
++                            text: formatInspectPeerReport(result),
++                        },
++                    ],
++                    isError: false,
++                };
++            } catch (error) {
++                const message = error instanceof PingPeerError
+                     ? error.message
+-                    : String(error);
+-            logger.debug('[hapiMCP] inspect_peer failed:', message);
+-            return {
+-                content: [
+-                    {
+-                        type: 'text' as const,
+-                        text: `Failed to inspect peer: ${message}`,
+-                    },
+-                ],
+-                isError: true,
+-            };
+-        }
+-    });
++                    : error instanceof Error
++                        ? error.message
++                        : String(error);
++                logger.debug('[hapiMCP] inspect_peer failed:', message);
++                return {
++                    content: [
++                        {
++                            type: 'text' as const,
++                            text: `Failed to inspect peer: ${message}`,
++                        },
++                    ],
++                    isError: true,
++                };
++            }
++        });
++    }
+ 
+     if (skillLookup) {
+         mcp.registerTool<any, any>('skill_lookup', {
+@@ -576,9 +583,13 @@ export async function startHappyServer(client: ApiSessionClient, options: StartH
+         hapiMcpUrl: mcpUrl,
+     }));
+ 
+-    const toolNames = enableChangeTitle
+-        ? ['change_title', 'display_image', 'display_video', 'display_media', 'ping_peer', 'inspect_peer', 'spawn_peer']
+-        : ['display_image', 'display_video', 'display_media', 'ping_peer', 'inspect_peer', 'spawn_peer'];
++    const toolNames = [
++        ...(enableChangeTitle ? ['change_title'] : []),
++        'display_image',
++        'display_video',
++        'display_media',
++        ...(isPeerToolsDisabled() ? [] : PEER_TOOL_NAMES),
++    ];
+     if (options.skillLookup) {
+         toolNames.push('skill_lookup');
+     }
+diff --git a/cli/src/codex/happyMcpStdioBridge.test.ts b/cli/src/codex/happyMcpStdioBridge.test.ts
+index b79a40f73..ca4e8c273 100644
+--- a/cli/src/codex/happyMcpStdioBridge.test.ts
++++ b/cli/src/codex/happyMcpStdioBridge.test.ts
+@@ -200,4 +200,53 @@ describe('runHappyMcpStdioBridge tool forwarding', () => {
+         expect(harness.callTool).toHaveBeenCalledWith({ name: 'spawn_peer', arguments: spawnArgs })
+     })
+ 
++    it('hides peer tools under HAPI_DISABLE_PEER_TOOLS even when listed in --tools', async () => {
++        process.env.HAPI_DISABLE_PEER_TOOLS = '1'
++        try {
++            await runHappyMcpStdioBridge([
++                '--url',
++                'http://127.0.0.1:43006',
++                '--tools',
++                'change_title,ping_peer,inspect_peer,spawn_peer'
++            ])
++
++            expect([...harness.tools.keys()]).toEqual(['change_title'])
++        } finally {
++            delete process.env.HAPI_DISABLE_PEER_TOOLS
++        }
++    })
++
++    it('drops peer tools from the default tool list under HAPI_DISABLE_PEER_TOOLS', async () => {
++        // No --tools: the bridge seeds its default list, which includes the
++        // peer tools. Positive control first so the disabled run below proves
++        // filtering rather than an empty seed.
++        await runHappyMcpStdioBridge(['--url', 'http://127.0.0.1:43006'])
++
++        expect([...harness.tools.keys()]).toEqual([
++            'change_title',
++            'display_image',
++            'display_video',
++            'display_media',
++            'ping_peer',
++            'spawn_peer',
++            'inspect_peer'
++        ])
++
++        harness.tools.clear()
++        harness.configs.clear()
++
++        process.env.HAPI_DISABLE_PEER_TOOLS = '1'
++        try {
++            await runHappyMcpStdioBridge(['--url', 'http://127.0.0.1:43006'])
++
++            expect([...harness.tools.keys()]).toEqual([
++                'change_title',
++                'display_image',
++                'display_video',
++                'display_media'
++            ])
++        } finally {
++            delete process.env.HAPI_DISABLE_PEER_TOOLS
++        }
++    })
+ })
+diff --git a/cli/src/codex/happyMcpStdioBridge.ts b/cli/src/codex/happyMcpStdioBridge.ts
+index 269abcd96..fa9ebd408 100644
+--- a/cli/src/codex/happyMcpStdioBridge.ts
++++ b/cli/src/codex/happyMcpStdioBridge.ts
+@@ -29,6 +29,7 @@ import {
+ import { SESSION_NAME_MAX_LENGTH } from '@hapi/protocol';
+ import { CREATABLE_AGENT_FLAVORS } from '@hapi/protocol/modes';
+ import { PermissionModeSchema } from '@hapi/protocol/schemas';
++import { isPeerToolsDisabled, PEER_TOOL_NAMES } from '@/modules/common/peerTools';
+ 
+ const DEFAULT_TOOL_NAMES = ['change_title', 'display_image', 'display_video', 'display_media', 'ping_peer', 'inspect_peer', 'spawn_peer'];
+ 
+@@ -57,6 +58,13 @@ export async function runHappyMcpStdioBridge(argv: string[]): Promise<void> {
+   try {
+     // Resolve target HTTP MCP URL
+     const { url: urlFromArgs, toolNames } = parseArgs(argv);
++
++    // HAPI_DISABLE_PEER_TOOLS=1: drop peer tools even when explicitly listed,
++    // so a wrapped agent cannot re-enable them via a stale --tools value.
++    if (isPeerToolsDisabled()) {
++      for (const name of PEER_TOOL_NAMES) toolNames.delete(name);
++    }
++
+     const baseUrl = urlFromArgs || process.env.HAPI_HTTP_MCP_URL || '';
+ 
+     if (!baseUrl) {
+diff --git a/cli/src/codex/utils/buildHapiMcpBridge.ts b/cli/src/codex/utils/buildHapiMcpBridge.ts
+index d521148bf..cff9b4afa 100644
+--- a/cli/src/codex/utils/buildHapiMcpBridge.ts
++++ b/cli/src/codex/utils/buildHapiMcpBridge.ts
+@@ -9,6 +9,7 @@ import { startHappyServer } from '@/claude/utils/startHappyServer';
+ import { getHappyCliCommand } from '@/utils/spawnHappyCLI';
+ import type { ApiSessionClient } from '@/api/apiSession';
+ import { exportHapiSessionEnv } from '@/agent/hapiSessionEnv';
++import { isPeerToolsDisabled } from '@/modules/common/peerTools';
+ import type { CodexMcpServerConfig } from './codexMcpServers';
+ 
+ /**
+@@ -104,11 +105,14 @@ export async function buildHapiMcpBridge(
+         },
+         display_media: {
+             approval_mode: 'prompt'
+-        },
+-        spawn_peer: {
+-            approval_mode: 'prompt'
+         }
+     };
++    // Skipped under HAPI_DISABLE_PEER_TOOLS (tool is not registered then).
++    if (!isPeerToolsDisabled()) {
++        tools.spawn_peer = {
++            approval_mode: 'prompt'
++        };
++    }
+     if (options.enableChangeTitle !== false) {
+         tools.change_title = {
+             approval_mode: 'approve'
+diff --git a/cli/src/modules/common/peerTools.test.ts b/cli/src/modules/common/peerTools.test.ts
+new file mode 100644
+index 000000000..ed4fea379
+--- /dev/null
++++ b/cli/src/modules/common/peerTools.test.ts
+@@ -0,0 +1,34 @@
++import { afterEach, describe, expect, it } from 'vitest'
++import { isPeerToolsDisabled } from './peerTools'
++
++describe('isPeerToolsDisabled', () => {
++    const original = process.env.HAPI_DISABLE_PEER_TOOLS
++
++    afterEach(() => {
++        if (original === undefined) {
++            delete process.env.HAPI_DISABLE_PEER_TOOLS
++        } else {
++            process.env.HAPI_DISABLE_PEER_TOOLS = original
++        }
++    })
++
++    it('defaults to enabled (peer tools visible)', () => {
++        delete process.env.HAPI_DISABLE_PEER_TOOLS
++        expect(isPeerToolsDisabled()).toBe(false)
++    })
++
++    it.each(['1', 'true', 'TRUE', 'yes', 'Yes'])('disables peer tools for %s', (value) => {
++        process.env.HAPI_DISABLE_PEER_TOOLS = value
++        expect(isPeerToolsDisabled()).toBe(true)
++    })
++
++    it('stays enabled for unrelated values', () => {
++        process.env.HAPI_DISABLE_PEER_TOOLS = '0'
++        expect(isPeerToolsDisabled()).toBe(false)
++    })
++
++    it('reads from an explicit env object', () => {
++        expect(isPeerToolsDisabled({ HAPI_DISABLE_PEER_TOOLS: '1' } as NodeJS.ProcessEnv)).toBe(true)
++        expect(isPeerToolsDisabled({} as NodeJS.ProcessEnv)).toBe(false)
++    })
++})
+diff --git a/cli/src/modules/common/peerTools.ts b/cli/src/modules/common/peerTools.ts
+new file mode 100644
+index 000000000..c4052bb52
+--- /dev/null
++++ b/cli/src/modules/common/peerTools.ts
+@@ -0,0 +1,18 @@
++/**
++ * Kill switch for the peer-session MCP tools (`ping_peer` / `inspect_peer` /
++ * `spawn_peer`).
++ *
++ * Set `HAPI_DISABLE_PEER_TOOLS=1` in the runner environment to stop wrapped
++ * agents from reading or messaging other HAPI sessions: the tools are not
++ * registered on the session MCP server and not advertised via
++ * `--allowedTools` / `--tools`. The ping/inspect core refuses as defense in
++ * depth, so `hapi ping-peer` / `inspect-peer` from inside a wrapped agent
++ * shell fails loudly. Operators who keep the variable unset in their
++ * interactive shell keep full CLI access.
++ */
++
++export const PEER_TOOL_NAMES = ['ping_peer', 'inspect_peer', 'spawn_peer'] as const;
++
++export function isPeerToolsDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
++    return ['true', '1', 'yes'].includes((env.HAPI_DISABLE_PEER_TOOLS ?? '').toLowerCase());
++}
+diff --git a/cli/src/modules/pingPeer/pingPeer.test.ts b/cli/src/modules/pingPeer/pingPeer.test.ts
+index 6e6501aad..a51469988 100644
+--- a/cli/src/modules/pingPeer/pingPeer.test.ts
++++ b/cli/src/modules/pingPeer/pingPeer.test.ts
+@@ -1,4 +1,4 @@
+-import { describe, expect, it, vi } from 'vitest'
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+ import {
+     PingPeerError,
+     controlPeer,
+@@ -457,3 +457,34 @@ describe('peer lifecycle operations', () => {
+         expect(exitCodeForPingPeerError(new PingPeerError('timeout', 'x'))).toBe(4)
+     })
+ })
++
++
++describe('HAPI_DISABLE_PEER_TOOLS kill switch', () => {
++    const original = process.env.HAPI_DISABLE_PEER_TOOLS
++
++    beforeEach(() => {
++        process.env.HAPI_DISABLE_PEER_TOOLS = '1'
++    })
++
++    afterEach(() => {
++        if (original === undefined) {
++            delete process.env.HAPI_DISABLE_PEER_TOOLS
++        } else {
++            process.env.HAPI_DISABLE_PEER_TOOLS = original
++        }
++    })
++
++    it('pingPeer refuses before any network call', async () => {
++        await expect(pingPeer({ sessionId: '05d9f0f2-9273-4137-933c-07459a1146a2', message: 'hi' }))
++            .rejects.toMatchObject({ code: 'disabled' })
++    })
++
++    it('inspectPeer refuses before any network call', async () => {
++        await expect(inspectPeer({ sessionId: '05d9f0f2-9273-4137-933c-07459a1146a2' }))
++            .rejects.toMatchObject({ code: 'disabled' })
++    })
++
++    it('maps the disabled code to the usage exit code', () => {
++        expect(exitCodeForPingPeerError(new PingPeerError('disabled', 'disabled on this machine'))).toBe(2)
++    })
++})
+diff --git a/cli/src/modules/pingPeer/pingPeer.ts b/cli/src/modules/pingPeer/pingPeer.ts
+index b7b6bed78..41ea9f168 100644
+--- a/cli/src/modules/pingPeer/pingPeer.ts
++++ b/cli/src/modules/pingPeer/pingPeer.ts
+@@ -12,11 +12,13 @@ import { randomUUID } from 'node:crypto'
+ import { extractAssistantPlainText, getPermissionModesForFlavor, isObject } from '@hapi/protocol'
+ import { normalizeSessionIdPrefix } from '@hapi/protocol/sessionCitation'
+ import { configuration } from '@/configuration'
++import { isPeerToolsDisabled } from '@/modules/common/peerTools'
+ import { getAuthToken } from '@/api/auth'
+ import { buildHubRequestHeaders } from '@/api/hubExtraHeaders'
+ 
+ export type PingPeerErrorCode =
+     | 'bad_args'
++    | 'disabled'
+     | 'auth_failed'
+     | 'not_found'
+     | 'resume_failed'
+@@ -39,6 +41,20 @@ export class PingPeerError extends Error {
+     }
+ }
+ 
++/**
++ * Defense-in-depth gate for HAPI_DISABLE_PEER_TOOLS: the MCP server and CLI
++ * surface refuse earlier, but any other caller (stale --tools bridge, shell
++ * `hapi ping-peer` from a wrapped agent) lands here and fails loudly.
++ */
++function assertPeerToolsEnabled(): void {
++    if (isPeerToolsDisabled()) {
++        throw new PingPeerError(
++            'disabled',
++            'peer session tools are disabled on this machine (HAPI_DISABLE_PEER_TOOLS is set)'
++        )
++    }
++}
++
+ export type PingPeerSessionSummary = {
+     id: string
+     active: boolean
+@@ -337,6 +353,7 @@ export function resolvePeerSessionLabel(session: PingPeerSessionSummary): string
+ }
+ 
+ export async function pingPeer(options: PingPeerOptions): Promise<PingPeerResult> {
++    assertPeerToolsEnabled()
+     const sessionId = requireExactSessionId(options.sessionId)
+     const message = options.message ?? ''
+     if (!message) {
+@@ -413,6 +430,7 @@ export async function pingPeer(options: PingPeerOptions): Promise<PingPeerResult
+ export function exitCodeForPingPeerError(error: PingPeerError): number {
+     switch (error.code) {
+         case 'bad_args':
++        case 'disabled':
+         case 'auth_failed':
+         case 'not_found':
+         case 'remit_conflict':
+@@ -569,6 +587,7 @@ async function fetchSessionMessages(
+  * Read-only: never resumes inactive sessions (unlike `pingPeer`).
+  */
+ export async function inspectPeer(options: InspectPeerOptions): Promise<InspectPeerResult> {
++    assertPeerToolsEnabled()
+     const sessionId = requireExactSessionId(options.sessionId)
+     const messageLimit = clampInspectMessageLimit(options.messageLimit)
+ 
+diff --git a/docs/guide/how-it-works.md b/docs/guide/how-it-works.md
+index 7b9d4e524..bbe49ddd7 100644
+--- a/docs/guide/how-it-works.md
++++ b/docs/guide/how-it-works.md
+@@ -39,7 +39,7 @@ hapi wait-peer <session-id> --remit-id <remit-id> --json
+ 
+ The Hub owns namespace, freshness, and lifecycle invariants. `spawn-peer` always creates a new session and delivers its first message through one atomic Hub operation; failures trigger compensating stop/archive cleanup. Existing-session commands accept only exact UUIDs. HAPI ships the session-control skill and installs it on the runtime's execution host before session registration; no HAPI workflow prose is injected into launch prompts.
+ 
+-Use `hapi machines --json` to discover runner targets. MCP `inspect_peer`, `ping_peer`, and `spawn_peer` work within the session's hub and namespace, including from remote runner hosts. See [Installation → Split hub + remote runner](./installation.md#split-hub-remote-runner-session-control).
++Use `hapi machines --json` to discover runner targets. MCP `inspect_peer`, `ping_peer`, and `spawn_peer` work within the session's hub and namespace, including from remote runner hosts. See [Installation → Split hub + remote runner](./installation.md#split-hub-remote-runner-session-control). Runners that must keep agents out of other sessions can hide all three with `HAPI_DISABLE_PEER_TOOLS=1` - see [Installation → Disabling peer tools](./installation.md#disabling-peer-tools-on-a-runner).
+ 
+ ### HAPI Hub
+ 
+diff --git a/docs/guide/installation.md b/docs/guide/installation.md
+index 29dfdc257..db6f3512b 100644
+--- a/docs/guide/installation.md
++++ b/docs/guide/installation.md
+@@ -326,6 +326,10 @@ hapi runner start
+ 
+ Session CLI may export an **explicit** non-default `HAPI_API_URL` (from env or settings) into child env so shell helpers hit the same remote hub. It does **not** mirror `CLI_API_TOKEN` into wrapped agents (a fresh `hapi` re-reads `~/.hapi/settings.json`, and systemd/env tokens already inherit). Web terminal PTYs still strip hub secrets.
+ 
++##### Disabling peer tools on a runner
++
++Set `HAPI_DISABLE_PEER_TOOLS=1` (also `true`/`yes`) in the runner environment to stop wrapped agents from reading or messaging other HAPI sessions. The `inspect_peer` / `ping_peer` / `spawn_peer` MCP tools are then not registered and not passed to `--allowedTools` / `--tools`, and `hapi ping-peer` / `hapi inspect-peer` fail with a `disabled` error, including from an agent's shell. Scope the variable to the runner (systemd unit, launchd plist, or runner guard script); an interactive terminal without it keeps full CLI access.
++
+ Additional runner commands:
+ 
+ ```bash
