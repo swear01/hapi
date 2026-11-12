@@ -1,0 +1,1485 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Fri, 23 Oct 2026 19:27:12 +0000
+Subject: [PATCH 87/95] carry(upstream): PR #2075 feat(hub): generate fallback
+ titles after the first completed turn
+
+---
+ docs/guide/installation.md                    |  14 +-
+ hub/README.md                                 |  13 +
+ .../handlers/cli/sessionHandlers.test.ts      |  30 +-
+ .../socket/handlers/cli/sessionHandlers.ts    |   8 +-
+ hub/src/store/sessions.test.ts                |  27 ++
+ hub/src/store/sessions.ts                     |   8 +
+ .../automaticTitleSuggestion.edge.test.ts     | 223 ++++++++++++
+ ...tomaticTitleSuggestion.integration.test.ts | 322 ++++++++++++++++++
+ hub/src/sync/automaticTitleSuggestion.test.ts | 198 +++++++++++
+ hub/src/sync/automaticTitleSuggestion.ts      |  99 ++++++
+ hub/src/sync/sessionCache.ts                  | 106 ++++++
+ hub/src/sync/spawnSessionWithRemit.test.ts    |  11 +-
+ hub/src/sync/syncEngine.ts                    |  36 ++
+ hub/src/sync/titleSuggestion.ts               |  64 ++++
+ shared/src/schemas.metadata.test.ts           |  12 +
+ shared/src/schemas.ts                         |   5 +
+ 16 files changed, 1169 insertions(+), 7 deletions(-)
+ create mode 100644 hub/src/sync/automaticTitleSuggestion.edge.test.ts
+ create mode 100644 hub/src/sync/automaticTitleSuggestion.integration.test.ts
+ create mode 100644 hub/src/sync/automaticTitleSuggestion.test.ts
+ create mode 100644 hub/src/sync/automaticTitleSuggestion.ts
+
+diff --git a/docs/guide/installation.md b/docs/guide/installation.md
+index 6bfeed103..76844639b 100644
+--- a/docs/guide/installation.md
++++ b/docs/guide/installation.md
+@@ -216,10 +216,20 @@ On first run, HAPI:
+ 
+ The session rename dialog's **Generate** action is unavailable until all three
+ `HAPI_TITLE_PROVIDER_*` variables are configured on the Hub. The provider is
+-called only on demand; the existing manual rename flow does not require these
+-variables. Each request sends recent visible user/assistant conversation text
++used by the automatic fallback below and the manual **Generate** action. The
++existing manual rename flow does not require these variables. Each request
++sends recent visible user/assistant conversation text
+ (up to 200 stored messages and a bounded prompt) to that configured provider.
+ 
++When a provider is configured, the Hub also makes one best-effort automatic
++request after the first completed turn if the session has no manual name or
++existing summary. Automatic failures are ignored and do not affect the primary
++conversation. The manual **Generate** action remains available for retrying
++after an automatic failure. An attempt is remembered across Hub restarts, so
++later turns do not silently retry it. A manual or Agent title arriving during
++generation takes precedence. Without a configured provider, existing title
++behavior is unchanged.
++
+ <details>
+ <summary>settings.json example</summary>
+ 
+diff --git a/hub/README.md b/hub/README.md
+index fb7674dc8..480d81991 100644
+--- a/hub/README.md
++++ b/hub/README.md
+@@ -39,6 +39,19 @@ Dictation and voice-assistant provider keys can also be added from **Settings 
+ - `TRANSCRIPTION_BASE_URL` and `TRANSCRIPTION_MODEL` - OpenAI-compatible/local transcription endpoint and model.
+ - `TRANSCRIPTION_API_KEY` - Optional bearer token for the OpenAI-compatible endpoint.
+ 
++### Optional (automatic session titles)
++
++When the configured OpenAI-compatible title provider is available, the Hub
++performs one best-effort automatic title suggestion after the first completed
++turn when the session has no manual name or existing summary. Automatic
++failures are silent and never block the agent conversation. The manual
++**Generate** action remains available.
++
++Configure `HAPI_TITLE_PROVIDER_BASE_URL`, `HAPI_TITLE_PROVIDER_API_KEY`, and
++`HAPI_TITLE_PROVIDER_MODEL` on the Hub. The attempt is persisted across restarts;
++manual or Agent titles arriving during generation are preserved. No automatic
++request is made without a configured provider.
++
+ ### Optional
+ 
+ - `HAPI_LISTEN_HOST` - HTTP bind address (default: 127.0.0.1).
+diff --git a/hub/src/socket/handlers/cli/sessionHandlers.test.ts b/hub/src/socket/handlers/cli/sessionHandlers.test.ts
+index 2e3155c66..fe431e934 100644
+--- a/hub/src/socket/handlers/cli/sessionHandlers.test.ts
++++ b/hub/src/socket/handlers/cli/sessionHandlers.test.ts
+@@ -530,7 +530,7 @@ describe('cli session handlers', () => {
+         expect(uuids).toEqual(['msg-1', 'msg-2'])
+     })
+ 
+-    it.each(['supersededBySessionId', 'opencodeClearOperation', 'spawnRemitOperation'] as const)(
++    it.each(['supersededBySessionId', 'opencodeClearOperation', 'spawnRemitOperation', 'titleSuggestionAutoAttemptedAt', 'titleSuggestionTurn'] as const)(
+         'ignores a forged hub-owned %s addition from CLI metadata',
+         (field) => {
+             const store = new Store(':memory:')
+@@ -550,6 +550,8 @@ describe('cli session handlers', () => {
+                         ? 'foreign-session'
+                         : field === 'opencodeClearOperation'
+                             ? { replacementSessionId: 'foreign-session', state: 'reserved', updatedAt: Date.now() }
++                            : field === 'titleSuggestionTurn' ? { first: false, completed: true }
++                            : field !== 'spawnRemitOperation' ? 1234
+                             : {
+                                 remitId: '7ee03698-0fe7-4f76-b8a8-d84f4eddbf5c',
+                                 requestHash: 'a'.repeat(64),
+@@ -588,4 +590,30 @@ describe('cli session handlers', () => {
+             supersededBySessionId: 'owned-target', opencodeClearOperation: operation, lifecycleState: 'archived'
+         })
+     })
++
++    it('preserves the automatic title attempt marker across CLI metadata updates', () => {
++        const store = new Store(':memory:')
++        const session = store.sessions.getOrCreateSession('preserve-auto-title-marker', {
++            path: '/tmp/project',
++            titleSuggestionAutoAttemptedAt: 1234,
++            titleSuggestionTurn: { first: true, completed: false }
++        }, null, 'default')
++        const socket = new FakeSocket()
++        registerSessionHandlers(socket as unknown as CliSocketWithData, {
++            store,
++            resolveSessionAccess: () => ({ ok: true, value: session as StoredSession }),
++            emitAccessError: () => { throw new Error('unexpected access error') }
++        })
++
++        socket.trigger('update-metadata', {
++            sid: session.id,
++            expectedVersion: session.metadataVersion,
++            metadata: { path: '/tmp/project', titleSuggestionAutoAttemptedAt: 9999, titleSuggestionTurn: { first: false, completed: true } }
++        }, () => {})
++
++        expect(store.sessions.getSessionByNamespace(session.id, 'default')?.metadata).toMatchObject({
++            titleSuggestionAutoAttemptedAt: 1234,
++            titleSuggestionTurn: { first: true, completed: false }
++        })
++    })
+ })
+diff --git a/hub/src/socket/handlers/cli/sessionHandlers.ts b/hub/src/socket/handlers/cli/sessionHandlers.ts
+index 767490837..e107b243f 100644
+--- a/hub/src/socket/handlers/cli/sessionHandlers.ts
++++ b/hub/src/socket/handlers/cli/sessionHandlers.ts
+@@ -69,7 +69,13 @@ const updateStateSchema = z.object({
+     agentState: z.unknown().nullable()
+ })
+ 
+-const HUB_OWNED_METADATA_KEYS = ['supersededBySessionId', 'opencodeClearOperation', 'spawnRemitOperation'] as const
++const HUB_OWNED_METADATA_KEYS = [
++    'supersededBySessionId',
++    'opencodeClearOperation',
++    'spawnRemitOperation',
++    'titleSuggestionAutoAttemptedAt',
++    'titleSuggestionTurn'
++] as const
+ 
+ function preserveHubOwnedMetadata(incoming: unknown, current: unknown): unknown {
+     if (!incoming || typeof incoming !== 'object' || Array.isArray(incoming)) return incoming
+diff --git a/hub/src/store/sessions.test.ts b/hub/src/store/sessions.test.ts
+index d8286d4f7..86f066b89 100644
+--- a/hub/src/store/sessions.test.ts
++++ b/hub/src/store/sessions.test.ts
+@@ -507,6 +507,33 @@ describe('updateSessionMetadata: refuse un-archive (#1911 M1)', () => {
+ })
+ 
+ describe('updateSessionMetadata: protocol resume token preservation', () => {
++    it('preserves the automatic title attempt marker across sparse metadata updates', () => {
++        const store = makeStore()
++        const session = store.sessions.getOrCreateSession(
++            'auto-title-marker',
++            {
++                path: '/tmp/project',
++                host: 'example',
++                titleSuggestionAutoAttemptedAt: 1234,
++                titleSuggestionTurn: { first: true, completed: false }
++            },
++            null,
++            'default'
++        )
++
++        const result = store.sessions.updateSessionMetadata(
++            session.id,
++            { path: '/tmp/project', host: 'example', lifecycleState: 'archived' },
++            session.metadataVersion,
++            'default'
++        )
++
++        expect(result.result).toBe('success')
++        expect(getMetadata(store, session.id)?.titleSuggestionAutoAttemptedAt).toBe(1234)
++        expect(getMetadata(store, session.id)?.titleSuggestionTurn).toEqual({ first: true, completed: false })
++        store.close()
++    })
++
+     it('preserves cursorSessionId when archive payload omits it (Cursor crash-archive)', () => {
+         const store = makeStore()
+         const session = store.sessions.getOrCreateSession(
+diff --git a/hub/src/store/sessions.ts b/hub/src/store/sessions.ts
+index 7aacd5261..bec158189 100644
+--- a/hub/src/store/sessions.ts
++++ b/hub/src/store/sessions.ts
+@@ -69,6 +69,13 @@ const SIMPLE_RESUME_TOKENS = [
+     'piSessionId'
+ ] as const
+ 
++// Hub-owned metadata that must survive sparse CLI metadata replacements.
++// `null` remains the explicit-clear sentinel handled by carryForwardIfMissing.
++const HUB_OWNED_METADATA_FIELDS = [
++    'titleSuggestionAutoAttemptedAt',
++    'titleSuggestionTurn'
++] as const
++
+ function isPlainObject(value: unknown): value is Record<string, unknown> {
+     return typeof value === 'object' && value !== null && !Array.isArray(value)
+ }
+@@ -132,6 +139,7 @@ export function mergeSessionMetadata(prior: unknown, next: unknown): unknown {
+     merged = carryForwardIfMissing(prior, next, merged, PARSE_IDENTITY_FIELDS)
+     merged = carryForwardIfMissing(prior, next, merged, ROUTING_FIELDS)
+     merged = carryForwardIfMissing(prior, next, merged, SIMPLE_RESUME_TOKENS)
++    merged = carryForwardIfMissing(prior, next, merged, HUB_OWNED_METADATA_FIELDS)
+     merged = preserveCursorProtocolPair(prior, next, merged)
+     return merged ?? next
+ }
+diff --git a/hub/src/sync/automaticTitleSuggestion.edge.test.ts b/hub/src/sync/automaticTitleSuggestion.edge.test.ts
+new file mode 100644
+index 000000000..45e68da57
+--- /dev/null
++++ b/hub/src/sync/automaticTitleSuggestion.edge.test.ts
+@@ -0,0 +1,223 @@
++import { afterEach, describe, expect, it } from 'bun:test'
++import { Store } from '../store'
++import { SessionCache } from './sessionCache'
++import { AutomaticTitleSuggestionService } from './automaticTitleSuggestion'
++import { TitleSuggestionService } from './titleSuggestion'
++import type { EventPublisher } from './eventPublisher'
++
++const stores: Store[] = []
++afterEach(() => { for (const store of stores.splice(0)) store.close() })
++
++function setup(provider = { suggest: async (_prompt: string) => 'Fallback title' }) {
++    const store = new Store(':memory:')
++    stores.push(store)
++    const cache = new SessionCache(store, { emit() {} } as unknown as EventPublisher)
++    const session = cache.getOrCreateSession('edge-case', { path: '/project', host: 'test' }, null, 'tenant')
++    const service = new TitleSuggestionService(store, { provider })
++    const automatic = new AutomaticTitleSuggestionService(cache, service, () => 1000)
++    const add = (role: string, text: string, queued = false) => store.messages.addMessage(session.id,
++        { role, content: { type: 'text', text } }, queued ? 'queued-id' : undefined)
++    return { store, cache, session, service, automatic, add }
++}
++
++function deferred() {
++    let resolve!: (value: string) => void
++    const promise = new Promise<string>(r => { resolve = r })
++    return { promise, resolve }
++}
++
++describe('automatic title safety and first-turn eligibility', () => {
++    it('uses the observed first turn for steering when completion has no ready record', async () => {
++        const h = setup()
++        h.automatic.onTurnStarted(h.session.id)
++        h.add('user', 'Initial task'); h.add('assistant', 'Partial output')
++        h.add('user', 'Steering prompt'); h.add('assistant', 'Final output')
++        await h.automatic.onTurnCompleted(h.session.id)
++        expect(h.cache.getSession(h.session.id)?.metadata?.summary?.text).toBe('Fallback title')
++    })
++
++    it('does not treat an observed later turn without ready records as the first', async () => {
++        const h = setup()
++        h.add('user', 'Old task'); h.add('assistant', 'Old answer')
++        h.automatic.onTurnStarted(h.session.id)
++        h.add('user', 'Current task'); h.add('assistant', 'Current answer')
++        await h.automatic.onTurnCompleted(h.session.id)
++        expect(h.cache.getSession(h.session.id)?.metadata?.summary).toBeUndefined()
++        expect(h.cache.getSession(h.session.id)?.metadata?.titleSuggestionAutoAttemptedAt).toBeUndefined()
++    })
++
++    it('allows the first answered turn after an earlier empty completion', async () => {
++        const h = setup()
++        h.automatic.onTurnStarted(h.session.id)
++        h.add('user', 'Unanswered task')
++        await h.automatic.onTurnCompleted(h.session.id)
++        expect(h.cache.getSession(h.session.id)?.metadata?.titleSuggestionAutoAttemptedAt).toBeUndefined()
++        h.automatic.onTurnStarted(h.session.id)
++        h.add('user', 'Try again'); h.add('assistant', 'First answer')
++        await h.automatic.onTurnCompleted(h.session.id)
++        expect(h.cache.getSession(h.session.id)?.metadata?.summary?.text).toBe('Fallback title')
++    })
++
++    it('treats batched initial prompts as one completed turn', async () => {
++        const h = setup()
++        h.add('user', 'Explain deployment')
++        h.add('user', 'Include rollback')
++        h.add('assistant', 'Deployment and rollback explained')
++        await h.automatic.onTurnCompleted(h.session.id)
++        expect(h.cache.getSession(h.session.id)?.metadata?.summary?.text).toBe('Fallback title')
++    })
++
++    it('includes prompts steered after partial output before the first ready boundary', async () => {
++        const h = setup()
++        h.add('user', 'Explain deployment')
++        h.add('assistant', 'Checking the workflow')
++        h.add('user', 'Also include rollback')
++        h.add('assistant', 'Deployment and rollback explained')
++        h.store.messages.addMessage(h.session.id, { role: 'agent', content: { type: 'event', data: { type: 'ready' } } })
++        await h.automatic.onTurnCompleted(h.session.id)
++        expect(h.cache.getSession(h.session.id)?.metadata?.summary?.text).toBe('Fallback title')
++    })
++
++    it('does not count a second consumed prompt after an earlier ready as the first turn', () => {
++        const h = setup()
++        h.add('user', 'First task')
++        h.add('assistant', 'First answer')
++        h.store.messages.addMessage(h.session.id, { role: 'agent', content: { type: 'event', data: { type: 'ready' } } })
++        h.add('user', 'Second task')
++        h.add('assistant', 'Second answer')
++        h.store.messages.addMessage(h.session.id, { role: 'agent', content: { type: 'event', data: { type: 'ready' } } })
++        expect(h.service.hasCompletedFirstTurn(h.session.id)).toBe(false)
++    })
++
++    it('finds a previous ready boundary beyond the provider message window', () => {
++        const h = setup()
++        h.add('user', 'First task'); h.add('assistant', 'First answer')
++        h.store.messages.addMessage(h.session.id, { role: 'agent', content: { type: 'event', data: { type: 'ready' } } })
++        h.add('user', 'Second task')
++        for (let i = 0; i < 205; i++) h.store.messages.addMessage(h.session.id,
++            { role: 'agent', content: { type: 'codex', data: { type: 'tool-call', name: 'shell', input: {} } } })
++        h.add('assistant', 'Second answer')
++        h.store.messages.addMessage(h.session.id, { role: 'agent', content: { type: 'event', data: { type: 'ready' } } })
++        expect(h.service.hasCompletedFirstTurn(h.session.id)).toBe(false)
++    })
++
++    it('coalesces overlapping completion events into one provider request', async () => {
++        const pending = deferred()
++        let calls = 0
++        const h = setup({ suggest: async () => { calls++; return pending.promise } })
++        h.add('user', 'Explain deployment'); h.add('assistant', 'Deployment explained')
++        const first = h.automatic.onTurnCompleted(h.session.id)
++        await Promise.resolve()
++        await h.automatic.onTurnCompleted(h.session.id)
++        expect(calls).toBe(1)
++        pending.resolve('Deployment')
++        await first
++        await h.automatic.onTurnCompleted(h.session.id)
++        expect(calls).toBe(1)
++    })
++
++    it('preserves the attempt across service/cache recreation after provider failure', async () => {
++        let calls = 0
++        const provider = { suggest: async () => { calls++; throw new Error('offline') } }
++        const h = setup(provider)
++        h.add('user', 'Explain deployment'); h.add('assistant', 'Deployment explained')
++        await h.automatic.onTurnCompleted(h.session.id)
++        const cache = new SessionCache(h.store, { emit() {} } as unknown as EventPublisher)
++        cache.refreshSession(h.session.id)
++        const restarted = new AutomaticTitleSuggestionService(cache, new TitleSuggestionService(h.store, { provider }))
++        await restarted.onTurnCompleted(h.session.id)
++        expect(calls).toBe(1)
++    })
++
++    it('retains manual Generate after an automatic failure', async () => {
++        let calls = 0
++        const h = setup({ suggest: async () => { if (++calls === 1) throw new Error('offline'); return 'Manual retry' } })
++        h.add('user', 'Explain deployment'); h.add('assistant', 'Deployment explained')
++        await h.automatic.onTurnCompleted(h.session.id)
++        expect(await h.service.suggestTitle(h.session.id)).toBe('Manual retry')
++        expect(calls).toBe(2)
++    })
++
++    it('does not apply a provider result after the session is deleted', async () => {
++        const pending = deferred()
++        const h = setup({ suggest: async () => pending.promise })
++        h.add('user', 'Explain deployment'); h.add('assistant', 'Deployment explained')
++        const work = h.automatic.onTurnCompleted(h.session.id)
++        await Promise.resolve()
++        h.store.sessions.deleteSession(h.session.id, 'tenant')
++        pending.resolve('Deleted title')
++        await work
++        expect(h.store.sessions.getSession(h.session.id)).toBeNull()
++    })
++
++    it('does not write a pending result or begin more requests after stop', async () => {
++        const pending = deferred()
++        let calls = 0
++        const h = setup({ suggest: async () => { calls++; return pending.promise } })
++        h.add('user', 'Explain deployment'); h.add('assistant', 'Deployment explained')
++        const work = h.automatic.onTurnCompleted(h.session.id)
++        await Promise.resolve()
++        h.automatic.stop()
++        pending.resolve('Stopped title')
++        await work
++        await h.automatic.onTurnCompleted(h.session.id)
++        expect(h.cache.getSession(h.session.id)?.metadata?.summary).toBeUndefined()
++        expect(calls).toBe(1)
++    })
++
++    it('accepts whitespace-only existing title fields without changing session recency', async () => {
++        const h = setup()
++        await h.cache.renameSession(h.session.id, '   ')
++        await h.cache.updateSessionSummary(h.session.id, '  ')
++        const before = h.store.sessions.getSession(h.session.id)!.updatedAt
++        h.add('user', 'Explain deployment'); h.add('assistant', 'Deployment explained')
++        await h.automatic.onTurnCompleted(h.session.id)
++        expect(h.cache.getSession(h.session.id)?.metadata?.summary?.text).toBe('Fallback title')
++        expect(h.cache.getSession(h.session.id)?.metadata?.name).toBeUndefined()
++        expect(h.store.sessions.getSession(h.session.id)!.updatedAt).toBe(before)
++    })
++
++    it('ignores queued follow-up messages when identifying the completed first turn', async () => {
++        const h = setup()
++        h.add('user', 'First task'); h.add('assistant', 'First answer'); h.add('user', 'Queued follow-up', true)
++        expect(h.service.hasCompletedFirstTurn(h.session.id)).toBe(true)
++        await h.automatic.onTurnCompleted(h.session.id)
++        expect(h.cache.getSession(h.session.id)?.metadata?.summary?.text).toBe('Fallback title')
++    })
++
++    it('does not mistake assistant output preceding the first user message for its answer', () => {
++        const h = setup()
++        h.add('assistant', 'Welcome'); h.add('user', 'First task')
++        expect(h.service.hasCompletedFirstTurn(h.session.id)).toBe(false)
++    })
++
++    it('finds the first user turn beyond a full window of tool output', () => {
++        const h = setup()
++        h.add('user', 'Long first task')
++        for (let i = 0; i < 205; i++) h.store.messages.addMessage(h.session.id,
++            { role: 'agent', content: { type: 'codex', data: { type: 'tool-call', name: 'shell', input: {} } } })
++        h.add('assistant', 'Final answer')
++        expect(h.service.hasCompletedFirstTurn(h.session.id)).toBe(true)
++    })
++
++    it('does not mistake the most recent turn of a long history for its first turn', () => {
++        const h = setup()
++        h.add('user', 'Old task'); h.add('assistant', 'Old answer')
++        for (let i = 0; i < 205; i++) h.store.messages.addMessage(h.session.id,
++            { role: 'agent', content: { type: 'codex', data: { type: 'tool-call', name: 'shell', input: {} } } })
++        h.add('user', 'New task'); h.add('assistant', 'New answer')
++        expect(h.service.hasCompletedFirstTurn(h.session.id)).toBe(false)
++    })
++
++    it('does not count tool results or reasoning as a visible first answer', () => {
++        const h = setup()
++        h.add('user', 'First task')
++        h.store.messages.addMessage(h.session.id, { role: 'agent', content: {
++            type: 'codex', data: { type: 'tool-call-result', output: 'internal result' }
++        } })
++        h.store.messages.addMessage(h.session.id, { role: 'agent', content: {
++            type: 'codex', data: { type: 'reasoning', message: 'internal thought' }
++        } })
++        expect(h.service.hasCompletedFirstTurn(h.session.id)).toBe(false)
++    })
++})
+diff --git a/hub/src/sync/automaticTitleSuggestion.integration.test.ts b/hub/src/sync/automaticTitleSuggestion.integration.test.ts
+new file mode 100644
+index 000000000..431b82143
+--- /dev/null
++++ b/hub/src/sync/automaticTitleSuggestion.integration.test.ts
+@@ -0,0 +1,322 @@
++import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
++import { RpcRegistry } from '../socket/rpcRegistry'
++import { Store } from '../store'
++import { SyncEngine } from './syncEngine'
++
++const originalFetch = globalThis.fetch
++const titleProviderEnvironment = {
++    HAPI_TITLE_PROVIDER_BASE_URL: 'https://provider.example/v1',
++    HAPI_TITLE_PROVIDER_API_KEY: 'secret',
++    HAPI_TITLE_PROVIDER_MODEL: 'small-model'
++} as const
++
++const titleProviderEnvironmentKeys = Object.keys(titleProviderEnvironment) as Array<keyof typeof titleProviderEnvironment>
++let restoreTitleProviderEnvironment: (() => void) | undefined
++
++beforeEach(() => {
++    const previous = new Map<string, string | undefined>()
++    for (const key of titleProviderEnvironmentKeys) {
++        previous.set(key, process.env[key])
++        process.env[key] = titleProviderEnvironment[key]
++    }
++    restoreTitleProviderEnvironment = () => {
++        for (const key of titleProviderEnvironmentKeys) {
++            const value = previous.get(key)
++            if (value === undefined) {
++                delete process.env[key]
++            } else {
++                process.env[key] = value
++            }
++        }
++    }
++})
++
++afterEach(() => {
++    globalThis.fetch = originalFetch
++    restoreTitleProviderEnvironment?.()
++    restoreTitleProviderEnvironment = undefined
++})
++
++describe('automatic first-turn title generation', () => {
++    it.each([true, false])('retains a partially answered first turn across restart (thinking heartbeat: %s)', async (thinkingHeartbeat) => {
++        let calls = 0
++        globalThis.fetch = (async () => {
++            calls++
++            return Response.json({ choices: [{ message: { content: 'Restarted first turn' } }] })
++        }) as unknown as typeof fetch
++        const store = new Store(':memory:')
++        const createEngine = () => new SyncEngine(store,
++            { of: () => ({ to: () => ({ emit() {} }) }) } as never,
++            new RpcRegistry(), { broadcast() {} } as never)
++        let engine = createEngine()
++        try {
++            const session = engine.getOrCreateSession('partial-first-turn-restart',
++                { path: '/project', host: 'test' }, null, 'tenant')
++            const now = Date.now()
++            store.messages.addMessage(session.id, { role: 'user', content: { type: 'text', text: 'Explain deployment' } })
++            engine.handleSessionAlive({ sid: session.id, time: now, thinking: true })
++            store.messages.addMessage(session.id, { role: 'assistant', content: { type: 'text', text: 'Checking deployment' } })
++            engine.stop()
++            engine = createEngine()
++            if (thinkingHeartbeat) engine.handleSessionAlive({ sid: session.id, time: now + 1, thinking: true })
++            store.messages.addMessage(session.id, { role: 'user', content: { type: 'text', text: 'Include rollback' } })
++            store.messages.addMessage(session.id, { role: 'assistant', content: { type: 'text', text: 'Deployment and rollback explained' } })
++            if (thinkingHeartbeat) {
++                engine.handleSessionAlive({ sid: session.id, time: now + 2, thinking: false })
++            } else {
++                const ready = store.messages.addMessage(session.id,
++                    { role: 'agent', content: { type: 'event', data: { type: 'ready' } } })
++                engine.handleRealtimeEvent({ type: 'message-received', sessionId: session.id, message: ready })
++            }
++            for (let i = 0; i < 20 && !engine.getSession(session.id)?.metadata?.summary; i++) {
++                await new Promise(resolve => setTimeout(resolve, 0))
++            }
++            expect(calls).toBe(1)
++            expect(engine.getSession(session.id)?.metadata?.summary?.text).toBe('Restarted first turn')
++        } finally {
++            engine.stop()
++            store.close()
++        }
++    })
++
++    it.each(['batch', 'steer', 'heartbeat-steer'])('generates once for multiple prompts in the first %s turn', async (kind) => {
++        let calls = 0
++        globalThis.fetch = (async () => {
++            calls++
++            return Response.json({ choices: [{ message: { content: 'Deployment and rollback' } }] })
++        }) as unknown as typeof fetch
++        const store = new Store(':memory:')
++        const engine = new SyncEngine(store, { of: () => ({ to: () => ({ emit() {} }) }) } as never,
++            new RpcRegistry(), { broadcast() {} } as never)
++        try {
++            const session = engine.getOrCreateSession(`first-turn-${kind}`,
++                { path: '/project', host: 'test' }, null, 'tenant')
++            const now = Date.now()
++            store.messages.addMessage(session.id, { role: 'user', content: { type: 'text', text: 'Explain deployment' } }, 'initial')
++            engine.handleSessionAlive({ sid: session.id, time: now, thinking: true })
++            store.messages.markMessagesInvoked(session.id, ['initial'], now)
++            if (kind !== 'batch') {
++                store.messages.addMessage(session.id, { role: 'assistant', content: { type: 'text', text: 'Checking deployment' } })
++            }
++            store.messages.addMessage(session.id, { role: 'user', content: { type: 'text', text: 'Include rollback' } }, 'additional')
++            store.messages.markMessagesInvoked(session.id, ['additional'], now)
++            store.messages.addMessage(session.id, { role: 'assistant', content: { type: 'text', text: 'Deployment and rollback explained' } })
++            if (kind === 'steer') {
++                const ready = store.messages.addMessage(session.id,
++                    { role: 'agent', content: { type: 'event', data: { type: 'ready' } } })
++                engine.handleRealtimeEvent({ type: 'message-received', sessionId: session.id, message: ready })
++            }
++            engine.handleSessionAlive({ sid: session.id, time: now + 1, thinking: false })
++            for (let i = 0; i < 20 && !engine.getSession(session.id)?.metadata?.summary; i++) {
++                await new Promise(resolve => setTimeout(resolve, 0))
++            }
++            expect(calls).toBe(1)
++            expect(engine.getSession(session.id)?.metadata?.summary?.text).toBe('Deployment and rollback')
++        } finally {
++            engine.stop()
++            store.close()
++        }
++    })
++
++    it.each(['ready', 'idle-without-completion', 'thinking'])('handles the %s completion boundary', async (boundary) => {
++        let calls = 0
++        globalThis.fetch = (async () => {
++            calls++
++            return Response.json({ choices: [{ message: { content: 'Ready boundary title' } }] })
++        }) as unknown as typeof fetch
++        const store = new Store(':memory:')
++        const engine = new SyncEngine(store, { of: () => ({ to: () => ({ emit() {} }) }) } as never,
++            new RpcRegistry(), { broadcast() {} } as never)
++        try {
++            const session = engine.getOrCreateSession(`boundary-${boundary}`,
++                { path: '/project', host: 'test' }, null, 'tenant')
++            engine.handleSessionAlive({ sid: session.id, time: Date.now(), thinking: boundary === 'thinking' })
++            store.messages.addMessage(session.id, { role: 'user', content: { type: 'text', text: 'Explain deployment' } })
++            const assistant = store.messages.addMessage(session.id,
++                { role: 'assistant', content: { type: 'text', text: 'Here is the deployment process' } })
++            engine.handleRealtimeEvent({ type: 'message-received', sessionId: session.id, message: assistant })
++            await new Promise(resolve => setTimeout(resolve, 0))
++            expect(calls).toBe(0)
++            if (boundary === 'ready') {
++                const ready = store.messages.addMessage(session.id,
++                    { role: 'agent', content: { type: 'event', data: { type: 'ready' } } })
++                engine.handleRealtimeEvent({ type: 'message-received', sessionId: session.id, message: ready })
++                for (let i = 0; i < 20 && !engine.getSession(session.id)?.metadata?.summary; i++) {
++                    await new Promise(resolve => setTimeout(resolve, 0))
++                }
++                expect(calls).toBe(1)
++                expect(engine.getSession(session.id)?.metadata?.summary?.text).toBe('Ready boundary title')
++                expect(engine.getSession(session.id)?.namespace).toBe('tenant')
++            }
++        } finally {
++            engine.stop()
++            store.close()
++        }
++    })
++
++    it('runs after the thinking transition and persists the generated summary', async () => {
++        const requests: Request[] = []
++        globalThis.fetch = (async (input, init) => {
++            requests.push(new Request(String(input), init))
++            return new Response(JSON.stringify({
++                choices: [{ message: { content: 'Deployment workflow' } }]
++            }), { status: 200 })
++        }) as typeof fetch
++
++        const store = new Store(':memory:')
++        const engine = new SyncEngine(
++            store,
++            { of: () => ({ to: () => ({ emit: () => {} }) }) } as never,
++            new RpcRegistry(),
++            { broadcast() {} } as never
++        )
++
++        try {
++            const session = engine.getOrCreateSession(
++                'automatic-first-turn',
++                { path: '/workspace/project', host: 'localhost' },
++                null,
++                'default'
++            )
++
++            const now = Date.now()
++            engine.handleSessionAlive({ sid: session.id, time: now, thinking: false })
++            store.messages.addMessage(session.id, {
++                role: 'user',
++                content: { type: 'text', text: 'Explain the deployment workflow' }
++            })
++            engine.handleSessionAlive({ sid: session.id, time: now + 1, thinking: true })
++            store.messages.addMessage(session.id, {
++                role: 'assistant',
++                content: { type: 'text', text: 'The workflow has three steps.' }
++            })
++            engine.handleSessionAlive({ sid: session.id, time: now + 2, thinking: false })
++
++            for (let attempt = 0; attempt < 20; attempt += 1) {
++                if (engine.getSession(session.id)?.metadata?.summary?.text) break
++                await new Promise((resolve) => setTimeout(resolve, 0))
++            }
++
++            expect(requests).toHaveLength(1)
++            expect(requests[0]?.url).toBe('https://provider.example/v1/chat/completions')
++            expect(engine.getSession(session.id)?.metadata).toMatchObject({
++                summary: { text: 'Deployment workflow' },
++                titleSuggestionAutoAttemptedAt: expect.any(Number)
++            })
++        } finally {
++            engine.stop()
++            store.close()
++        }
++    })
++
++    it('runs on a completed session end when no false heartbeat was observed', async () => {
++        const requests: Request[] = []
++        globalThis.fetch = (async (input, init) => {
++            requests.push(new Request(String(input), init))
++            return new Response(JSON.stringify({
++                choices: [{ message: { content: 'Completed workflow' } }]
++            }), { status: 200 })
++        }) as typeof fetch
++
++        const store = new Store(':memory:')
++        const engine = new SyncEngine(
++            store,
++            { of: () => ({ to: () => ({ emit: () => {} }) }) } as never,
++            new RpcRegistry(),
++            { broadcast() {} } as never
++        )
++
++        try {
++            const session = engine.getOrCreateSession(
++                'automatic-session-end',
++                { path: '/workspace/project', host: 'localhost' },
++                null,
++                'default'
++            )
++            const now = Date.now()
++            engine.handleSessionAlive({ sid: session.id, time: now, thinking: true })
++            store.messages.addMessage(session.id, {
++                role: 'user',
++                content: { type: 'text', text: 'Summarize the completed workflow' }
++            })
++            store.messages.addMessage(session.id, {
++                role: 'assistant',
++                content: { type: 'text', text: 'The workflow completed successfully.' }
++            })
++            engine.handleSessionEnd({ sid: session.id, time: now + 1, reason: 'completed' })
++
++            for (let attempt = 0; attempt < 20; attempt += 1) {
++                if (engine.getSession(session.id)?.metadata?.summary?.text) break
++                await new Promise((resolve) => setTimeout(resolve, 0))
++            }
++
++            expect(requests).toHaveLength(1)
++            expect(engine.getSession(session.id)?.metadata?.summary?.text).toBe('Completed workflow')
++        } finally {
++            engine.stop()
++            store.close()
++        }
++    })
++
++    it('runs when the first assistant message arrives after the session is already idle', async () => {
++        const requests: Request[] = []
++        globalThis.fetch = (async (input, init) => {
++            requests.push(new Request(String(input), init))
++            return new Response(JSON.stringify({
++                choices: [{ message: { content: 'Idle session workflow' } }]
++            }), { status: 200 })
++        }) as typeof fetch
++
++        const store = new Store(':memory:')
++        const engine = new SyncEngine(
++            store,
++            { of: () => ({ to: () => ({ emit: () => {} }) }) } as never,
++            new RpcRegistry(),
++            { broadcast() {} } as never
++        )
++
++        try {
++            const session = engine.getOrCreateSession(
++                'automatic-message-arrival',
++                { path: '/workspace/project', host: 'localhost' },
++                null,
++                'default'
++            )
++            const now = Date.now()
++            engine.handleSessionAlive({ sid: session.id, time: now, thinking: false })
++            store.messages.addMessage(session.id, {
++                role: 'user',
++                content: { type: 'text', text: 'Summarize the idle workflow' }
++            })
++            engine.handleSessionAlive({ sid: session.id, time: now + 1, thinking: true })
++            engine.handleSessionAlive({ sid: session.id, time: now + 2, thinking: false })
++            const assistant = store.messages.addMessage(session.id, {
++                role: 'assistant',
++                content: { type: 'text', text: 'The workflow is complete.' }
++            })
++            engine.handleRealtimeEvent({
++                type: 'message-received',
++                sessionId: session.id,
++                message: {
++                    id: assistant.id,
++                    seq: assistant.seq,
++                    localId: assistant.localId,
++                    content: assistant.content,
++                    createdAt: assistant.createdAt,
++                    invokedAt: assistant.invokedAt
++                }
++            } as never)
++
++            for (let attempt = 0; attempt < 20; attempt += 1) {
++                if (engine.getSession(session.id)?.metadata?.summary?.text) break
++                await new Promise((resolve) => setTimeout(resolve, 0))
++            }
++
++            expect(requests).toHaveLength(1)
++            expect(engine.getSession(session.id)?.metadata?.summary?.text).toBe('Idle session workflow')
++        } finally {
++            engine.stop()
++            store.close()
++        }
++    })
++})
+diff --git a/hub/src/sync/automaticTitleSuggestion.test.ts b/hub/src/sync/automaticTitleSuggestion.test.ts
+new file mode 100644
+index 000000000..cba43062e
+--- /dev/null
++++ b/hub/src/sync/automaticTitleSuggestion.test.ts
+@@ -0,0 +1,198 @@
++import { afterEach, describe, expect, it } from 'bun:test'
++import { Store } from '../store'
++import type { EventPublisher } from './eventPublisher'
++import { SessionCache } from './sessionCache'
++import { AutomaticTitleSuggestionService } from './automaticTitleSuggestion'
++import { TitleSuggestionService } from './titleSuggestion'
++
++const stores: Store[] = []
++afterEach(() => { for (const store of stores.splice(0)) store.close() })
++function makeStore(): Store {
++    const store = new Store(':memory:')
++    stores.push(store)
++    return store
++}
++
++function createPublisher(): EventPublisher {
++    return { emit: () => {} } as unknown as EventPublisher
++}
++
++function setup(options?: { metadata?: Record<string, unknown>; provider?: { suggest(prompt: string): Promise<string> } }) {
++    const store = makeStore()
++    const cache = new SessionCache(store, createPublisher())
++    const session = cache.getOrCreateSession(
++        'automatic-title-test',
++        { path: '/workspace/project', host: 'localhost', ...options?.metadata },
++        null,
++        'default'
++    )
++    store.messages.addMessage(session.id, {
++        role: 'user',
++        content: { type: 'text', text: 'Explain the deployment process' }
++    })
++    store.messages.addMessage(session.id, {
++        role: 'assistant',
++        content: { type: 'text', text: 'The deployment process has three steps.' }
++    })
++    const titleService = new TitleSuggestionService(store, {
++        provider: options?.provider ?? { suggest: async () => 'Deployment process' }
++    })
++    const automatic = new AutomaticTitleSuggestionService(cache, titleService, () => 1234)
++    return { store, cache, session, titleService, automatic }
++}
++
++describe('AutomaticTitleSuggestionService', () => {
++    it('generates one summary for an untitled first-turn session', async () => {
++        const { cache, session, automatic } = setup()
++
++        await automatic.onTurnCompleted(session.id)
++
++        expect(cache.getSession(session.id)?.metadata).toMatchObject({
++            summary: { text: 'Deployment process' },
++            titleSuggestionAutoAttemptedAt: 1234
++        })
++    })
++
++    it('does not overwrite a manual name or existing summary', async () => {
++        const manual = setup({ metadata: { name: 'Manual title' } })
++        const summary = setup({ metadata: { summary: { text: 'Native title', updatedAt: 100 } } })
++
++        await manual.automatic.onTurnCompleted(manual.session.id)
++        await summary.automatic.onTurnCompleted(summary.session.id)
++
++        expect(manual.cache.getSession(manual.session.id)?.metadata?.name).toBe('Manual title')
++        expect(manual.cache.getSession(manual.session.id)?.metadata?.titleSuggestionAutoAttemptedAt).toBeUndefined()
++        expect(summary.cache.getSession(summary.session.id)?.metadata?.summary?.text).toBe('Native title')
++        expect(summary.cache.getSession(summary.session.id)?.metadata?.titleSuggestionAutoAttemptedAt).toBeUndefined()
++    })
++
++    it('records a failed attempt and does not retry automatically', async () => {
++        let calls = 0
++        const { cache, session, automatic } = setup({
++            provider: {
++                suggest: async () => {
++                    calls += 1
++                    throw new Error('provider failed')
++                }
++            }
++        })
++
++        await automatic.onTurnCompleted(session.id)
++        await automatic.onTurnCompleted(session.id)
++
++        expect(calls).toBe(1)
++        expect(cache.getSession(session.id)?.metadata?.titleSuggestionAutoAttemptedAt).toBe(1234)
++        expect(cache.getSession(session.id)?.metadata?.summary).toBeUndefined()
++    })
++
++    it('does not reserve an attempt when the provider is not configured', async () => {
++        const store = makeStore()
++        const cache = new SessionCache(store, createPublisher())
++        const session = cache.getOrCreateSession(
++            'automatic-title-unconfigured',
++            { path: '/workspace/project', host: 'localhost' },
++            null,
++            'default'
++        )
++        store.messages.addMessage(session.id, {
++            role: 'user',
++            content: { type: 'text', text: 'Title this session' }
++        })
++        store.messages.addMessage(session.id, {
++            role: 'assistant',
++            content: { type: 'text', text: 'This session is ready.' }
++        })
++        const automatic = new AutomaticTitleSuggestionService(
++            cache,
++            new TitleSuggestionService(store),
++            () => 1234
++        )
++
++        await automatic.onTurnCompleted(session.id)
++
++        expect(cache.getSession(session.id)?.metadata?.titleSuggestionAutoAttemptedAt).toBeUndefined()
++    })
++
++    it('does not auto-generate after the first user turn', async () => {
++        let calls = 0
++        const { store, session, automatic } = setup({
++            provider: { suggest: async () => { calls += 1; return 'Should not be used' } }
++        })
++        store.messages.addMessage(session.id, {
++            role: 'user',
++            content: { type: 'text', text: 'Now explain the rollback process' }
++        })
++
++        await automatic.onTurnCompleted(session.id)
++
++        expect(calls).toBe(0)
++        expect(store.sessions.getSession(session.id)?.metadata).not.toHaveProperty('titleSuggestionAutoAttemptedAt')
++    })
++
++    it('waits for an assistant response before reserving the fallback attempt', async () => {
++        let calls = 0
++        const store = makeStore()
++        const cache = new SessionCache(store, createPublisher())
++        const session = cache.getOrCreateSession(
++            'automatic-title-awaits-response',
++            { path: '/workspace/project', host: 'localhost' },
++            null,
++            'default'
++        )
++        store.messages.addMessage(session.id, {
++            role: 'user',
++            content: { type: 'text', text: 'Title this session' }
++        })
++        const automatic = new AutomaticTitleSuggestionService(
++            cache,
++            new TitleSuggestionService(store, {
++                provider: { suggest: async () => { calls += 1; return 'Unexpected title' } }
++            }),
++            () => 1234
++        )
++
++        await automatic.onTurnCompleted(session.id)
++
++        expect(calls).toBe(0)
++        expect(cache.getSession(session.id)?.metadata?.titleSuggestionAutoAttemptedAt).toBeUndefined()
++    })
++
++    it('does not overwrite a title that arrives while generation is in flight', async () => {
++        let resolveTitle!: (title: string) => void
++        const { cache, session, automatic } = setup({
++            provider: {
++                suggest: async () => await new Promise<string>((resolve) => {
++                    resolveTitle = resolve
++                })
++            }
++        })
++
++        const pending = automatic.onTurnCompleted(session.id)
++        await Promise.resolve()
++        await cache.updateSessionSummary(session.id, 'Native title')
++        resolveTitle('Late automatic title')
++        await pending
++
++        expect(cache.getSession(session.id)?.metadata?.summary?.text).toBe('Native title')
++    })
++
++    it('does not overwrite a manual name that arrives while generation is in flight', async () => {
++        let resolveTitle!: (title: string) => void
++        const { cache, session, automatic } = setup({
++            provider: {
++                suggest: async () => await new Promise<string>((resolve) => {
++                    resolveTitle = resolve
++                })
++            }
++        })
++
++        const pending = automatic.onTurnCompleted(session.id)
++        await Promise.resolve()
++        await cache.renameSession(session.id, 'Manual title')
++        resolveTitle('Late automatic title')
++        await pending
++
++        expect(cache.getSession(session.id)?.metadata?.name).toBe('Manual title')
++        expect(cache.getSession(session.id)?.metadata?.summary).toBeUndefined()
++    })
++})
+diff --git a/hub/src/sync/automaticTitleSuggestion.ts b/hub/src/sync/automaticTitleSuggestion.ts
+new file mode 100644
+index 000000000..6721a1a2b
+--- /dev/null
++++ b/hub/src/sync/automaticTitleSuggestion.ts
+@@ -0,0 +1,99 @@
++import type { SessionCache } from './sessionCache'
++import type { TitleSuggestionService } from './titleSuggestion'
++
++/**
++ * Best-effort first-turn title fallback.
++ *
++ * This service owns only the automatic path. The existing manual Generate
++ * action remains available after an automatic attempt fails.
++ */
++export class AutomaticTitleSuggestionService {
++    private readonly inFlightSessionIds = new Set<string>()
++    private readonly observedTurns = new Map<string, { first: boolean; completed: boolean }>()
++    private stopped = false
++
++    constructor(
++        private readonly sessionCache: SessionCache,
++        private readonly titleSuggestionService: TitleSuggestionService,
++        private readonly now: () => number = Date.now
++    ) {
++    }
++
++    stop(): void {
++        this.stopped = true
++        this.observedTurns.clear()
++    }
++
++    forgetSession(sessionId: string): void {
++        this.observedTurns.delete(sessionId)
++    }
++
++    onTurnStarted(sessionId: string): void {
++        if (this.stopped || !this.titleSuggestionService.isConfigured()) return
++        const prior = this.observedTurns.get(sessionId)
++        if (prior && !prior.completed) return
++        const metadata = this.sessionCache.getSession(sessionId)?.metadata
++        if (metadata?.name?.trim() || metadata?.summary?.text?.trim()
++            || metadata?.titleSuggestionAutoAttemptedAt !== undefined) return
++        try {
++            // Capture before assistant output can interleave with steering.
++            // Pi completes with a false heartbeat, without a stored ready event.
++            const turn = metadata?.titleSuggestionTurn?.completed === false ? { ...metadata.titleSuggestionTurn } : {
++                first: !this.titleSuggestionService.hasTitleResponse(sessionId),
++                completed: false
++            }
++            if (this.sessionCache.updateAutomaticTitleTurn(sessionId, turn)) {
++                this.observedTurns.set(sessionId, turn)
++            }
++        } catch {
++            // Diagnostics and title fallback must not interrupt agent startup.
++        }
++    }
++
++    /**
++     * Schedule one non-blocking attempt after the first turn becomes idle.
++     * Errors are intentionally swallowed: title fallback must never affect the
++     * primary agent conversation.
++     */
++    onTurnCompleted(sessionId: string): Promise<void> {
++        if (this.stopped) return Promise.resolve()
++        const persistedTurn = this.sessionCache.getSession(sessionId)?.metadata?.titleSuggestionTurn
++        const turn = this.observedTurns.get(sessionId)
++            ?? (persistedTurn?.completed === false ? { ...persistedTurn } : undefined)
++        if (turn) this.observedTurns.set(sessionId, turn)
++        if (turn && !turn.completed) {
++            turn.completed = true
++            try {
++                this.sessionCache.updateAutomaticTitleTurn(sessionId, turn)
++            } catch {
++                // A lifecycle bookkeeping failure must not interrupt chat.
++            }
++        }
++        if (this.stopped || this.inFlightSessionIds.has(sessionId)) return Promise.resolve()
++        this.inFlightSessionIds.add(sessionId)
++
++        return Promise.resolve()
++            .then(async () => {
++                try {
++                    if (this.stopped) return
++                    if (!this.titleSuggestionService.isConfigured()) return
++                    const metadata = this.sessionCache.getSession(sessionId)?.metadata
++                    if (metadata?.name?.trim() || metadata?.summary?.text?.trim()
++                        || metadata?.titleSuggestionAutoAttemptedAt !== undefined) return
++                    if (turn?.first === false) return
++                    if (!this.titleSuggestionService.hasCompletedFirstTurn(sessionId, turn?.first)) return
++                    if (!this.sessionCache.claimAutomaticTitleAttempt(sessionId, this.now())) return
++
++                    const title = await this.titleSuggestionService.suggestTitle(sessionId)
++                    if (!this.stopped) {
++                        await this.sessionCache.updateAutomaticSessionSummary(sessionId, title)
++                    }
++                } catch {
++                    // Automatic title generation is best-effort and silent.
++                }
++            })
++            .finally(() => {
++                this.inFlightSessionIds.delete(sessionId)
++            })
++    }
++}
+diff --git a/hub/src/sync/sessionCache.ts b/hub/src/sync/sessionCache.ts
+index ddbb02791..a5c687bb6 100644
+--- a/hub/src/sync/sessionCache.ts
++++ b/hub/src/sync/sessionCache.ts
+@@ -1117,6 +1117,101 @@ export class SessionCache {
+         throw new Error('Session was modified concurrently. Please try again.')
+     }
+ 
++    /** Preserve the observed turn identity across a Hub restart. */
++    updateAutomaticTitleTurn(sessionId: string, turn: { first: boolean; completed: boolean }): boolean {
++        for (let attempt = 0; attempt < METADATA_RETRY_ATTEMPTS; attempt += 1) {
++            const session = this.sessions.get(sessionId) ?? this.refreshSession(sessionId)
++            if (!session) return false
++            const result = this.store.sessions.updateSessionMetadata(
++                sessionId,
++                { ...(session.metadata ?? { path: '', host: '' }), titleSuggestionTurn: turn },
++                session.metadataVersion,
++                session.namespace,
++                { touchUpdatedAt: false }
++            )
++            if (result.result === 'error') return false
++            if (result.result === 'success') {
++                this.refreshSession(sessionId)
++                return true
++            }
++            this.refreshSession(sessionId)
++        }
++        return false
++    }
++
++    /**
++     * Atomically reserve the one automatic first-turn title attempt.
++     * The Hub-owned marker survives sparse CLI updates and provider failure.
++     */
++    claimAutomaticTitleAttempt(sessionId: string, attemptedAt: number = Date.now()): boolean {
++        for (let attempt = 0; attempt < METADATA_RETRY_ATTEMPTS; attempt += 1) {
++            const session = this.sessions.get(sessionId) ?? this.refreshSession(sessionId)
++            if (!session) return false
++
++            const metadata = session.metadata
++            if (metadata?.name?.trim() || metadata?.summary?.text?.trim() || metadata?.titleSuggestionAutoAttemptedAt !== undefined) {
++                return false
++            }
++
++            const result = this.store.sessions.updateSessionMetadata(
++                sessionId,
++                { ...(metadata ?? { path: '', host: '' }), titleSuggestionAutoAttemptedAt: attemptedAt },
++                session.metadataVersion,
++                session.namespace,
++                { touchUpdatedAt: false }
++            )
++
++            if (result.result === 'error') return false
++            if (result.result === 'success') {
++                this.refreshSession(sessionId)
++                return true
++            }
++
++            this.refreshSession(sessionId)
++        }
++
++        return false
++    }
++
++    /**
++     * Persist an automatic title only while the session is still untitled.
++     * A manual/native title that arrives while the provider is in flight wins.
++     */
++    async updateAutomaticSessionSummary(sessionId: string, text: string): Promise<boolean> {
++        for (let attempt = 0; attempt < METADATA_RETRY_ATTEMPTS; attempt += 1) {
++            const session = this.sessions.get(sessionId) ?? this.refreshSession(sessionId)
++            if (!session) return false
++
++            const metadata = session.metadata
++            if (metadata?.name?.trim() || metadata?.summary?.text?.trim()) {
++                return false
++            }
++
++            const nextMetadata = { ...(metadata ?? { path: '', host: '' }) }
++            if (typeof nextMetadata.name === 'string' && !nextMetadata.name.trim()) {
++                delete nextMetadata.name
++            }
++
++            const result = this.store.sessions.updateSessionMetadata(
++                sessionId,
++                { ...nextMetadata, summary: { text, updatedAt: Date.now() } },
++                session.metadataVersion,
++                session.namespace,
++                { touchUpdatedAt: false }
++            )
++
++            if (result.result === 'error') return false
++            if (result.result === 'success') {
++                this.refreshSession(sessionId)
++                return true
++            }
++
++            this.refreshSession(sessionId)
++        }
++
++        return false
++    }
++
+     /**
+      * Clear archive-related metadata on an archived session so it can be resumed.
+      * - Removes `lifecycleState`, `archivedBy`, `archiveReason`, and stamps
+@@ -1611,6 +1706,17 @@ export class SessionCache {
+             changed = true
+         }
+ 
++        if (typeof oldObj.titleSuggestionAutoAttemptedAt === 'number'
++            && typeof newObj.titleSuggestionAutoAttemptedAt !== 'number') {
++            merged.titleSuggestionAutoAttemptedAt = oldObj.titleSuggestionAutoAttemptedAt
++            changed = true
++        }
++
++        if (oldObj.titleSuggestionTurn && !newObj.titleSuggestionTurn) {
++            merged.titleSuggestionTurn = oldObj.titleSuggestionTurn
++            changed = true
++        }
++
+         const oldSummary = oldObj.summary as { text?: unknown; updatedAt?: unknown } | undefined
+         const newSummary = newObj.summary as { text?: unknown; updatedAt?: unknown } | undefined
+         const oldUpdatedAt = typeof oldSummary?.updatedAt === 'number' ? oldSummary.updatedAt : null
+diff --git a/hub/src/sync/spawnSessionWithRemit.test.ts b/hub/src/sync/spawnSessionWithRemit.test.ts
+index 7742f5f12..0884bcb63 100644
+--- a/hub/src/sync/spawnSessionWithRemit.test.ts
++++ b/hub/src/sync/spawnSessionWithRemit.test.ts
+@@ -937,6 +937,7 @@ describe('archiveSession', () => {
+                     markSessionArchivedFromHub: () => { events.push('archived') }
+                 },
+                 emitCliSessionMetadataUpdate: () => {}, releaseSessionEnumerations: () => {},
++            titleTurnCompletedIds: new Set(), automaticTitleSuggestionService: { forgetSession: () => {} },
+                 handleSessionEnd: () => { events.push('ended') }
+             }
+             const result = SyncEngine.prototype.archiveSession.call(harness as unknown as SyncEngine, SESSION_ID)
+@@ -959,6 +960,7 @@ describe('archiveSession', () => {
+             rpcGateway: { killSession: async () => {} },
+             sessionCache: { getSession: () => ({ metadata: {} }), markSessionArchivedFromHub },
+             emitCliSessionMetadataUpdate: () => {}, releaseSessionEnumerations: () => {},
++            titleTurnCompletedIds: new Set(), automaticTitleSuggestionService: { forgetSession: () => {} },
+             handleSessionEnd
+         } as unknown as SyncEngine, SESSION_ID)
+ 
+@@ -979,7 +981,8 @@ describe('deleteSession', () => {
+             archiveSession: SyncEngine.prototype.archiveSession,
+             rpcGateway: { killSession: async () => { throw new RpcTargetMissingError('killSession', 'socket-disconnected') }, stopRunnerSession },
+             sessionCache: { deleteSession, getSession: () => ({ metadata: { machineId: 'machine-1', startedBy: 'runner', hostPid: 4242 } }), markSessionArchivedFromHub: () => {} },
+-            emitCliSessionMetadataUpdate: () => {}, releaseSessionEnumerations: () => {}, handleSessionEnd: () => {}
++            emitCliSessionMetadataUpdate: () => {}, releaseSessionEnumerations: () => {},
++            titleTurnCompletedIds: new Set(), automaticTitleSuggestionService: { forgetSession: () => {} }, handleSessionEnd: () => {}
+         } as unknown as SyncEngine, SESSION_ID)
+ 
+         expect(deleteSession).toHaveBeenCalledWith(SESSION_ID)
+@@ -1008,7 +1011,8 @@ describe('deleteSession', () => {
+                         deleteSession: mock(async () => { events.push('deleted') }),
+                         getSession: () => ({ metadata: { machineId: 'machine-1', ...runnerMetadata } }), markSessionArchivedFromHub: () => {},
+                     },
+-                    emitCliSessionMetadataUpdate: () => {}, releaseSessionEnumerations: () => {}, handleSessionEnd: () => {},
++                    emitCliSessionMetadataUpdate: () => {}, releaseSessionEnumerations: () => {},
++            titleTurnCompletedIds: new Set(), automaticTitleSuggestionService: { forgetSession: () => {} }, handleSessionEnd: () => {},
+                     store: { sessions: { getSession: () => undefined } }
+                 }
+                 const result = SyncEngine.prototype.deleteSession.call(harness as unknown as SyncEngine, SESSION_ID)
+@@ -1033,7 +1037,8 @@ describe('deleteSession', () => {
+             getSession: () => ({ active, metadata: { startedBy: active ? 'runner' : 'terminal' } }),
+             stopSession,
+             sessionCache: { deleteSession },
+-            releaseSessionEnumerations: () => {}
++            releaseSessionEnumerations: () => {},
++            titleTurnCompletedIds: new Set(), automaticTitleSuggestionService: { forgetSession: () => {} }
+         } as unknown as SyncEngine, SESSION_ID)
+ 
+         if (active) {
+diff --git a/hub/src/sync/syncEngine.ts b/hub/src/sync/syncEngine.ts
+index d07eff367..e598c2b98 100644
+--- a/hub/src/sync/syncEngine.ts
++++ b/hub/src/sync/syncEngine.ts
+@@ -68,6 +68,8 @@ import {
+ } from './rpcGateway'
+ import { SessionCache } from './sessionCache'
+ import { SessionEnumerationCache } from './sessionEnumerationCache'
++import { AutomaticTitleSuggestionService } from './automaticTitleSuggestion'
++import { extractMessageEventType } from '../notifications/eventParsing'
+ import { ingestNotifySummaryFromMessage } from './workGraphNotifyIngest'
+ 
+ type PiResumeAttempt = NonNullable<NonNullable<Session['metadata']>['piResumeAttempt']>
+@@ -215,6 +217,9 @@ export class SyncEngine {
+     private readonly machineCache: MachineCache
+     private readonly messageService: MessageService
+     private readonly titleSuggestionService: TitleSuggestionService
++    private readonly automaticTitleSuggestionService: AutomaticTitleSuggestionService
++    /** Completed turns whose final chat message may still be in transit. */
++    private readonly titleTurnCompletedIds = new Set<string>()
+     private readonly rpcGateway: RpcGateway
+     private inactivityTimer: NodeJS.Timeout | null = null
+     /** Sessions that emitted `session-ready` (Cursor ACP or validated Pi get_state). */
+@@ -299,6 +304,10 @@ export class SyncEngine {
+             (sessionId, updatedAt) => this.recordSessionActivity(sessionId, updatedAt)
+         )
+         this.titleSuggestionService = createTitleSuggestionService(store)
++        this.automaticTitleSuggestionService = new AutomaticTitleSuggestionService(
++            this.sessionCache,
++            this.titleSuggestionService
++        )
+         this.rpcGateway = new RpcGateway(io, rpcRegistry)
+         this.reloadAll()
+         this.inactivityTimer = setInterval(() => this.expireInactive(), 5_000)
+@@ -309,6 +318,8 @@ export class SyncEngine {
+     }
+ 
+     stop(): void {
++        this.automaticTitleSuggestionService.stop()
++        this.titleTurnCompletedIds.clear()
+         if (this.inactivityTimer) {
+             clearInterval(this.inactivityTimer)
+             this.inactivityTimer = null
+@@ -569,6 +580,13 @@ export class SyncEngine {
+         this.eventPublisher.emit(event)
+ 
+         if (event.type === 'message-received' && event.sessionId && 'message' in event && event.message) {
++            if (extractMessageEventType(event) === 'ready') {
++                this.titleTurnCompletedIds.add(event.sessionId)
++                void this.automaticTitleSuggestionService.onTurnCompleted(event.sessionId)
++            } else if (this.titleTurnCompletedIds.has(event.sessionId) && !this.getSession(event.sessionId)?.thinking) {
++                void this.automaticTitleSuggestionService.onTurnCompleted(event.sessionId)
++            }
++
+             // A2A P3: well-formed AGENT_NOTIFY_SUMMARY → work-graph work_ad.
+             // Capture is independent of chat display settings (#1462/#1464).
+             const session = this.getSession(event.sessionId)
+@@ -604,7 +622,15 @@ export class SyncEngine {
+         collaborationMode?: CodexCollaborationMode
+         copilotAgentMode?: CopilotAgentMode
+     }): void {
++        const wasThinking = this.sessionCache.getSession(payload.sid)?.thinking === true
++        if (!wasThinking && payload.thinking === true) {
++            this.automaticTitleSuggestionService.onTurnStarted(payload.sid)
++        }
+         this.sessionCache.handleSessionAlive(payload)
++        if (wasThinking && !this.sessionCache.getSession(payload.sid)?.thinking) {
++            this.titleTurnCompletedIds.add(payload.sid)
++            void this.automaticTitleSuggestionService.onTurnCompleted(payload.sid)
++        }
+         this.messageService.replayImmediateQueuedMessages(payload.sid)
+         this.triggerDedupIfNeeded(payload.sid)
+     }
+@@ -647,6 +673,10 @@ export class SyncEngine {
+         const shouldRetryDedup = !ownsPiAttempt && !isPiAttemptChild && (!isCursorAcp || this.sessionReadyIds.has(payload.sid))
+ 
+         this.sessionCache.handleSessionEnd(payload)
++        if (payload.reason === 'completed') {
++            this.titleTurnCompletedIds.add(payload.sid)
++            void this.automaticTitleSuggestionService.onTurnCompleted(payload.sid)
++        }
+         this.eventPublisher.emit({
+             type: 'session-ended',
+             sessionId: payload.sid,
+@@ -1186,12 +1216,16 @@ export class SyncEngine {
+         if (this.historyActionsInFlight.has(sessionId)) {
+             throw new Error('Conversation history action already in progress')
+         }
++        const wasThinking = this.sessionCache.getSession(sessionId)?.thinking === true
+         const { actualSessionId, createdAt: activeTurnStartedAt, inserted, invokedAt } = await this.messageService.sendMessage(sessionId, payload)
+         // A retry of a message the agent already consumed resolved to that old row:
+         // nothing is queued, so it is neither a fresh turn nor agent progress (it must
+         // not wake an idle session or re-arm `thinking`). A retry of a still-queued
+         // message keeps starting a fresh grace window.
+         if (!inserted && invokedAt !== null) return
++        if (!wasThinking) {
++            this.automaticTitleSuggestionService.onTurnStarted(sessionId)
++        }
+         this.sessionCache.markMessageQueued(actualSessionId, Date.now(), activeTurnStartedAt)
+         this.sessionCache.recordSessionActivity(actualSessionId, Date.now())
+     }
+@@ -2305,6 +2339,8 @@ export class SyncEngine {
+             await this.archiveSession(sessionId)
+         }
+         await this.sessionCache.deleteSession(sessionId)
++        this.titleTurnCompletedIds.delete(sessionId)
++        this.automaticTitleSuggestionService.forgetSession(sessionId)
+         this.releaseSessionEnumerations(sessionId)
+     }
+ 
+diff --git a/hub/src/sync/titleSuggestion.ts b/hub/src/sync/titleSuggestion.ts
+index 2c6a50515..0a39f6abe 100644
+--- a/hub/src/sync/titleSuggestion.ts
++++ b/hub/src/sync/titleSuggestion.ts
+@@ -6,6 +6,7 @@ import {
+ } from '@hapi/protocol/messages'
+ import { isObject } from '@hapi/protocol'
+ import type { Store, StoredMessage } from '../store'
++import { extractMessageEventType } from '../notifications/eventParsing'
+ 
+ export const TITLE_SUGGESTION_MESSAGE_LIMIT = 200
+ export const TITLE_SUGGESTION_MAX_INPUT_CHARS = 16_000
+@@ -312,6 +313,69 @@ export class TitleSuggestionService {
+         this.rateWindowMs = options.rateWindowMs ?? TITLE_SUGGESTION_RATE_WINDOW_MS
+     }
+ 
++    isConfigured(): boolean {
++        return this.provider !== null
++    }
++
++    hasTitleResponse(sessionId: string): boolean {
++        let before: { at: number; seq: number } | undefined
++        let assistantSeen = false
++        while (true) {
++            const messages = this.store.messages.getMessagesByPosition(sessionId, TITLE_SUGGESTION_MESSAGE_LIMIT, before)
++            for (let index = messages.length - 1; index >= 0; index -= 1) {
++                const extracted = extractTitleMessage(messages[index]!)
++                if (extracted?.role === 'assistant') assistantSeen = true
++                if (extracted?.role === 'user' && assistantSeen) return true
++            }
++            if (messages.length < TITLE_SUGGESTION_MESSAGE_LIMIT) return false
++            const oldest = messages[0]!
++            before = { at: oldest.invokedAt ?? oldest.createdAt, seq: oldest.seq }
++        }
++    }
++
++    hasCompletedFirstTurn(sessionId: string, observedFirstTurn: boolean = false): boolean {
++        // Scan beyond the provider's bounded prompt window. A long first turn
++        // can have hundreds of tool rows; a later turn must not look like the
++        // first just because the older user message fell outside that window.
++        let before: { at: number; seq: number } | undefined
++        let userSeen = false
++        let assistantSeen = false
++        let answered = false
++        let readySeen = false
++        let interleavedPrompts = false
++        let userSeenAfterAssistant = false
++        while (true) {
++            const messages = this.store.messages.getMessagesByPosition(sessionId, TITLE_SUGGESTION_MESSAGE_LIMIT, before)
++            for (let index = messages.length - 1; index >= 0; index -= 1) {
++                const message = messages[index]!
++                if (extractMessageEventType({ type: 'message-received', sessionId, message }) === 'ready') {
++                    // Reading backwards: a ready before a consumed prompt is
++                    // an earlier completed turn, not part of the current one.
++                    if (userSeen) return false
++                    readySeen = true
++                }
++                const extracted = extractTitleMessage(message)
++                if (extracted?.role === 'assistant') {
++                    assistantSeen = true
++                    if (userSeen) userSeenAfterAssistant = true
++                }
++                if (extracted?.role === 'user') {
++                    if (userSeenAfterAssistant) interleavedPrompts = true
++                    userSeen = true
++                    answered = assistantSeen
++                }
++            }
++            if (messages.length < TITLE_SUGGESTION_MESSAGE_LIMIT) {
++                // Batched prompts are one turn. A single ready boundary also
++                // permits steering after partial assistant output. Without a
++                // durable boundary, keep the conservative legacy-history guard.
++                return userSeen && answered && (observedFirstTurn || readySeen || !interleavedPrompts)
++            }
++            const oldest = messages[0]!
++            before = { at: oldest.invokedAt ?? oldest.createdAt, seq: oldest.seq }
++        }
++    }
++
+     async suggestTitle(sessionId: string): Promise<string> {
+         if (!this.provider) {
+             throw new TitleSuggestionError(
+diff --git a/shared/src/schemas.metadata.test.ts b/shared/src/schemas.metadata.test.ts
+index d3e018946..5dae6602a 100644
+--- a/shared/src/schemas.metadata.test.ts
++++ b/shared/src/schemas.metadata.test.ts
+@@ -24,4 +24,16 @@ describe('MetadataSchema cursorSessionProtocol', () => {
+         expect(result.success).toBe(true);
+         expect(result.data?.conversationHistoryEntryIds).toEqual({ 'local-user-id': 'pi-entry-id' });
+     });
++
++    it('accepts the Hub-owned automatic title attempt marker', () => {
++        const result = MetadataSchema.safeParse({
++            ...base,
++            titleSuggestionAutoAttemptedAt: 1234,
++            titleSuggestionTurn: { first: true, completed: false },
++        });
++
++        expect(result.success).toBe(true);
++        expect(result.data?.titleSuggestionAutoAttemptedAt).toBe(1234);
++        expect(result.data?.titleSuggestionTurn).toEqual({ first: true, completed: false });
++    });
+ });
+diff --git a/shared/src/schemas.ts b/shared/src/schemas.ts
+index 1dfd45d9d..31b917eba 100644
+--- a/shared/src/schemas.ts
++++ b/shared/src/schemas.ts
+@@ -74,6 +74,11 @@ export const MetadataSchema = z.object({
+     titleLocked: z.boolean().optional(),
+     os: z.string().optional(),
+     summary: MetadataSummarySchema.optional(),
++    // Hub-owned marker: the automatic first-turn title fallback has been
++    // attempted for this session. It prevents silent retries after failures.
++    titleSuggestionAutoAttemptedAt: z.number().int().positive().optional(),
++    // Hub-owned lifecycle snapshot used to recognize a first turn after restart.
++    titleSuggestionTurn: z.object({ first: z.boolean(), completed: z.boolean() }).optional(),
+     machineId: z.string().optional(),
+     claudeSessionId: z.string().optional(),
+     // Parent HAPI session id when this session was created by message-level fork

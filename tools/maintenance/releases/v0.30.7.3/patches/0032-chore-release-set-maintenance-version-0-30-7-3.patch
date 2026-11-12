@@ -1,0 +1,100 @@
+From 4cd89ea6d239f651fe2d0db7055f0d6f29268908 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 26 Sep 2026 16:45:43 +0800
+Subject: [PATCH] chore(release): set maintenance version 0.30.7.3
+
+---
+ android/app/build.gradle.kts       | 2 +-
+ bun.lock                           | 1 -
+ cli/package.json                   | 2 +-
+ ios/Hapi.xcodeproj/project.pbxproj | 8 ++++----
+ shared/src/buildInfo.ts            | 2 +-
+ 5 files changed, 7 insertions(+), 8 deletions(-)
+
+diff --git a/android/app/build.gradle.kts b/android/app/build.gradle.kts
+index a7292fb55..2f2dbe5f2 100644
+--- a/android/app/build.gradle.kts
++++ b/android/app/build.gradle.kts
+@@ -80,7 +80,7 @@ android {
+             value.toInt().also { require(it > 0) { "hapiVersionCode must be positive" } }
+         }.orElse(1).get()
+         // Tracks the hapi CLI/hub release train.
+-        versionName = providers.gradleProperty("hapiVersionName").orElse("0.30.7").get()
++        versionName = providers.gradleProperty("hapiVersionName").orElse("0.30.7.3").get()
+         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+     }
+ 
+diff --git a/bun.lock b/bun.lock
+index 19b5e23de..5c712ed9a 100644
+--- a/bun.lock
++++ b/bun.lock
+@@ -13,7 +13,6 @@
+     },
+     "cli": {
+       "name": "@twsxtd/hapi",
+-      "version": "0.30.7",
+       "bin": {
+         "hapi": "bin/hapi.cjs",
+       },
+diff --git a/cli/package.json b/cli/package.json
+index e7f9a0849..2787275e4 100644
+--- a/cli/package.json
++++ b/cli/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "@twsxtd/hapi",
+-  "version": "0.30.7",
++  "version": "0.30.7.3",
+   "description": "App for agentic coding - access coding agent anywhere",
+   "author": "Kirill Dubovitskiy & weishu",
+   "license": "AGPL-3.0-only",
+diff --git a/ios/Hapi.xcodeproj/project.pbxproj b/ios/Hapi.xcodeproj/project.pbxproj
+index 489c1dd22..df6b48c99 100644
+--- a/ios/Hapi.xcodeproj/project.pbxproj
++++ b/ios/Hapi.xcodeproj/project.pbxproj
+@@ -407,7 +407,7 @@
+ 					"$(inherited)",
+ 					"@executable_path/Frameworks",
+ 				);
+-				MARKETING_VERSION = 0.30.7;
++				MARKETING_VERSION = 0.30.7.3;
+ 				PRODUCT_BUNDLE_IDENTIFIER = run.hapi.app;
+ 				PRODUCT_NAME = "$(TARGET_NAME)";
+ 				SWIFT_EMIT_LOC_STRINGS = NO;
+@@ -438,7 +438,7 @@
+ 					"$(inherited)",
+ 					"@executable_path/Frameworks",
+ 				);
+-				MARKETING_VERSION = 0.30.7;
++				MARKETING_VERSION = 0.30.7.3;
+ 				PRODUCT_BUNDLE_IDENTIFIER = run.hapi.app;
+ 				PRODUCT_NAME = "$(TARGET_NAME)";
+ 				SWIFT_EMIT_LOC_STRINGS = NO;
+@@ -462,7 +462,7 @@
+ 					"@executable_path/Frameworks",
+ 					"@executable_path/../../Frameworks",
+ 				);
+-				MARKETING_VERSION = 0.30.7;
++				MARKETING_VERSION = 0.30.7.3;
+ 				PRODUCT_BUNDLE_IDENTIFIER = run.hapi.app.HapiNotificationService;
+ 				PRODUCT_NAME = "$(TARGET_NAME)";
+ 				SKIP_INSTALL = YES;
+@@ -487,7 +487,7 @@
+ 					"@executable_path/Frameworks",
+ 					"@executable_path/../../Frameworks",
+ 				);
+-				MARKETING_VERSION = 0.30.7;
++				MARKETING_VERSION = 0.30.7.3;
+ 				PRODUCT_BUNDLE_IDENTIFIER = run.hapi.app.HapiNotificationService;
+ 				PRODUCT_NAME = "$(TARGET_NAME)";
+ 				SKIP_INSTALL = YES;
+diff --git a/shared/src/buildInfo.ts b/shared/src/buildInfo.ts
+index 2eaf2c38b..92bfb1faf 100644
+--- a/shared/src/buildInfo.ts
++++ b/shared/src/buildInfo.ts
+@@ -1 +1 @@
+-export const APP_VERSION = '0.30.7'
++export const APP_VERSION = '0.30.7.3'
+-- 
+2.54.0 (Apple Git-157)
+

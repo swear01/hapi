@@ -1,0 +1,2271 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Fri, 23 Oct 2026 19:22:52 +0000
+Subject: [PATCH 79/94] carry(upstream): PR #2080 feat(web,hub): sync session
+ read/unread state across devices
+
+---
+ docs/api/client-contract/rest.md              |  31 ++
+ docs/api/client-contract/sse.md               |   3 +-
+ hub/src/store/index.ts                        |  20 +-
+ hub/src/store/migration-v13.test.ts           |   6 +-
+ hub/src/store/migration-v15.test.ts           |   6 +-
+ hub/src/store/migration-v18.test.ts           |   2 +-
+ hub/src/store/migration-v19.test.ts           |   2 +-
+ hub/src/store/migration-v20.test.ts           |   2 +-
+ hub/src/store/migration-v23.test.ts           |   4 +-
+ hub/src/store/migration-v24.test.ts           |   6 +-
+ hub/src/store/migration-v25.test.ts           |   2 +-
+ hub/src/store/migration-v28.test.ts           |   4 +-
+ hub/src/store/sessionReadStore.test.ts        | 112 ++++++
+ hub/src/store/sessionReadStore.ts             |  75 ++++
+ hub/src/web/routes/sessionReads.test.ts       |  62 +++
+ hub/src/web/routes/sessionReads.ts            |  34 ++
+ hub/src/web/server.ts                         |   2 +
+ scripts/dev/seed-session-read-sync.ts         |  26 ++
+ shared/src/index.ts                           |   1 +
+ shared/src/schemas.ts                         |   5 +
+ shared/src/sessionReadState.test.ts           |  20 +
+ shared/src/sessionReadState.ts                |  34 ++
+ web/README.md                                 |  17 +
+ web/e2e/session-read-sync.spec.ts             | 165 ++++++++
+ web/playwright.live.config.ts                 |   2 +-
+ web/src/App.tsx                               |  17 +-
+ web/src/api/client.ts                         |  11 +
+ web/src/components/SessionHeader.test.tsx     |  10 +
+ web/src/components/SessionHeader.tsx          |   5 +-
+ .../SessionList.mark-all-read.test.tsx        |  18 +-
+ web/src/components/SessionList.tsx            |  11 +-
+ web/src/hooks/useSelectedSessionSeen.test.ts  |  12 +-
+ web/src/hooks/useSelectedSessionSeen.ts       |   7 +-
+ web/src/hooks/useSessionReadSync.ts           |  22 ++
+ web/src/lib/locales/en.ts                     |   2 +-
+ web/src/lib/locales/ru.ts                     |   2 +-
+ web/src/lib/locales/zh-CN.ts                  |   2 +-
+ web/src/lib/sessionLastSeen.ts                |  82 +++-
+ web/src/lib/sessionReadSync.test.ts           | 363 ++++++++++++++++++
+ web/src/lib/sessionReadSync.ts                | 257 +++++++++++++
+ 40 files changed, 1419 insertions(+), 45 deletions(-)
+ create mode 100644 hub/src/store/sessionReadStore.test.ts
+ create mode 100644 hub/src/store/sessionReadStore.ts
+ create mode 100644 hub/src/web/routes/sessionReads.test.ts
+ create mode 100644 hub/src/web/routes/sessionReads.ts
+ create mode 100644 scripts/dev/seed-session-read-sync.ts
+ create mode 100644 shared/src/sessionReadState.test.ts
+ create mode 100644 shared/src/sessionReadState.ts
+ create mode 100644 web/e2e/session-read-sync.spec.ts
+ create mode 100644 web/src/hooks/useSessionReadSync.ts
+ create mode 100644 web/src/lib/sessionReadSync.test.ts
+ create mode 100644 web/src/lib/sessionReadSync.ts
+
+diff --git a/docs/api/client-contract/rest.md b/docs/api/client-contract/rest.md
+index be1ba21c9..10dff0fb4 100644
+--- a/docs/api/client-contract/rest.md
++++ b/docs/api/client-contract/rest.md
+@@ -36,6 +36,37 @@ Source: `hub/src/web/routes/sessions.ts`; shapes `SessionSchema` (`shared/src/sc
+ 
+ Default list order: globalPinned → pinned → active → pending-request count → `updatedAt` desc; `order=updatedAt` gives pure recency. List badges come from `SessionSummary.pendingRequestsCount` (authoritative total) and `pendingRequests` (capped at 5, oldest-first) — do not derive counts from `pendingRequests.length`.
+ 
++### Sessions — shared read state
++
++Source: `hub/src/web/routes/sessionReads.ts`, `shared/src/sessionReadState.ts`.
++
++| Method & path | Request | Response |
++|---|---|---|
++| `GET /api/session-read-state` | — | `{states: SessionReadState[]}` for the authenticated namespace |
++| `POST /api/session-read-state` | `{mutations: [{mutationId, sessionId, kind, activityAt, expectedVersion}]}`; 1–500 operations | `{states: SessionReadState[], acceptedSessionIds: string[]}` |
++
++`SessionReadState` is `{sessionId, lastSeenAt, manualUnreadAt: number | null,
++version}`. A missing record has last-seen `0`, no manual marker, and expected
++version `0`. `kind` is `seen`, `unread`, or `import-unread`. Numeric fields must
++be nonnegative safe integers; stored versions start at `1`. A read position
++cannot exceed the session's current `updatedAt`.
++
++Read state is shared within a namespace, persisted independently from activity,
++and cascades when a session is deleted. Reads advance the observed watermark;
++manual unread records the target activity and moves its watermark behind it.
++`import-unread` only initializes a missing record.
++
++Each action carries a unique `mutationId` (at most 200 characters). Retrying the
++latest accepted action returns it as accepted without another version increment.
++Other writes require an exact `expectedVersion` match. Conflicts return current
++state but omit that session from `acceptedSessionIds`; do not rebase a dependent
++offline action chain onto the peer's newer state. Missing/foreign targets return
++404 and invalid requests return 400, with no partial writes for those errors.
++
++Clients merge responses and `session-read-state-updated` SSE events by per-session
++version, subscribe globally with `all=true`, and refetch after reconnect. Web/PWA
++uses this contract; native clients must adopt it to share their local read state.
++
+ ### Sessions — lifecycle
+ 
+ Source: `hub/src/web/routes/sessions.ts`; request schemas in `shared/src/apiTypes.ts`.
+diff --git a/docs/api/client-contract/sse.md b/docs/api/client-contract/sse.md
+index 3bcf2ce5c..d55dd8fbf 100644
+--- a/docs/api/client-contract/sse.md
++++ b/docs/api/client-contract/sse.md
+@@ -130,13 +130,14 @@ The two connections have **no ordering relationship with each other** — the sa
+ 
+ ---
+ 
+-## SyncEvent union (16 types)
++## SyncEvent union
+ 
+ Schema: `SyncEventSchema` in `shared/src/schemas.ts` (discriminated on `type`). All events except `connection-changed` carry `namespace?: string`. Ignore unknown event types.
+ 
+ | `type` | Payload (beyond `type`, `namespace?`) | Client handling |
+ |---|---|---|
+ | `session-added` | `sessionId`, `data?: unknown` | Handle exactly like `session-updated` (the reference client shares the branch): a full `Session` upserts; anything else falls back to refetching the session list. |
++| `session-read-state-updated` | `states: SessionReadState[]` | Sent to `all=true` subscribers in the authenticated namespace. Merge each session's read state only when its version increases; update unread UI without changing session activity. See the [REST read-state contract](./rest.md#sessions-shared-read-state). |
+ | `session-updated` | `sessionId`, `data?: Session \| SessionPatch` | See [Versioned patch algorithm](#versioned-patch-algorithm). |
+ | `session-removed` | `sessionId` | Drop the session from the list, drop its detail cache, clear its message window. |
+ | `message-received` | `sessionId`, `message: DecryptedMessage` | Ingest into the message window; advance the tail cursor (see [pagination](./pagination.md)). Also fired for the caller's own send (the localId echo). |
+diff --git a/hub/src/store/index.ts b/hub/src/store/index.ts
+index 9e1969fcb..b3399d25d 100644
+--- a/hub/src/store/index.ts
++++ b/hub/src/store/index.ts
+@@ -10,6 +10,7 @@ import { PushStore } from './pushStore'
+ import { FcmStore } from './fcmStore'
+ import { ScratchlistStore } from './scratchlistStore'
+ import { SessionStore } from './sessionStore'
++import { SessionReadStore } from './sessionReadStore'
+ import { UserStore } from './userStore'
+ import { UsageStore } from './usageStore'
+ import { WorkGraphStore } from './workGraphStore'
+@@ -42,9 +43,10 @@ export {
+     WorkGraphValidationError
+ } from './workGraph'
+ 
+-const SCHEMA_VERSION: number = 28
++const SCHEMA_VERSION: number = 29
+ const REQUIRED_TABLES = [
+     'sessions',
++    'session_read_states',
+     'machines',
+     'messages',
+     'message_epochs',
+@@ -64,6 +66,7 @@ export class Store {
+     private closed: boolean = false
+ 
+     readonly sessions: SessionStore
++    readonly sessionReads: SessionReadStore
+     readonly machines: MachineStore
+     readonly messages: MessageStore
+     readonly users: UserStore
+@@ -118,6 +121,7 @@ export class Store {
+         }
+ 
+         this.sessions = new SessionStore(this.db)
++        this.sessionReads = new SessionReadStore(this.db)
+         this.machines = new MachineStore(this.db)
+         this.messages = new MessageStore(this.db)
+         this.users = new UserStore(this.db)
+@@ -366,6 +370,7 @@ export class Store {
+             25: () => this.migrateFromV25ToV26(),
+             26: () => this.migrateFromV26ToV27(),
+             27: () => this.migrateFromV27ToV28(),
++            28: () => this.createSessionReadSchema(),
+         })
+ 
+         if (currentVersion === 0) {
+@@ -621,6 +626,19 @@ export class Store {
+             CREATE INDEX IF NOT EXISTS idx_event_links_namespace_to
+                 ON event_links(namespace, to_event_id);
+         `)
++        this.createSessionReadSchema()
++    }
++
++    private createSessionReadSchema(): void {
++        this.db.exec(`
++            CREATE TABLE IF NOT EXISTS session_read_states (
++                session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
++                last_seen_at INTEGER NOT NULL DEFAULT 0,
++                manual_unread_at INTEGER,
++                last_mutation_id TEXT NOT NULL,
++                version INTEGER NOT NULL
++            );
++        `)
+     }
+ 
+     private migrateLegacySchemaIfNeeded(): void {
+diff --git a/hub/src/store/migration-v13.test.ts b/hub/src/store/migration-v13.test.ts
+index 84dd38e46..d36aee8b2 100644
+--- a/hub/src/store/migration-v13.test.ts
++++ b/hub/src/store/migration-v13.test.ts
+@@ -10,7 +10,7 @@ describe('Store V12/V13→V14 schema reconciliation', () => {
+         const store = new Store(':memory:')
+         expect(tableExists(store, 'message_epochs')).toBe(true)
+         expect(tableExists(store, 'session_scratchlist')).toBe(true)
+-        expect(getUserVersion(store)).toBe(28)
++        expect(getUserVersion(store)).toBe(29)
+         store.close()
+     })
+ 
+@@ -34,7 +34,7 @@ describe('Store V12/V13→V14 schema reconciliation', () => {
+             store = new Store(dbPath)
+             expect(tableExists(store, 'message_epochs')).toBe(true)
+             expect(tableExists(store, 'session_scratchlist')).toBe(true)
+-            expect(getUserVersion(store)).toBe(28)
++            expect(getUserVersion(store)).toBe(29)
+             expect(store.messages.getMessageEpoch('session-1')).toBe(0)
+             expect(store.messages.getMessages('session-1')).toHaveLength(1)
+         } finally {
+@@ -72,7 +72,7 @@ describe('Store V12/V13→V14 schema reconciliation', () => {
+             store = new Store(dbPath)
+             expect(tableExists(store, 'message_epochs')).toBe(true)
+             expect(tableExists(store, 'session_scratchlist')).toBe(true)
+-            expect(getUserVersion(store)).toBe(28)
++            expect(getUserVersion(store)).toBe(29)
+             expect(store.messages.getMessages('session-1')).toHaveLength(1)
+         } finally {
+             store?.close()
+diff --git a/hub/src/store/migration-v15.test.ts b/hub/src/store/migration-v15.test.ts
+index 8353dba2a..c3d78e1c2 100644
+--- a/hub/src/store/migration-v15.test.ts
++++ b/hub/src/store/migration-v15.test.ts
+@@ -19,7 +19,7 @@ describe('Store V14→V15 migration: scratchlist attachments column', () => {
+         expect(cols).toContain('attachments')
+         expect(getColumns(store, 'usage_events')).toContain('last_input_tokens')
+         expect(getColumns(store, 'usage_scan_state')).toContain('last_seq')
+-        expect(getUserVersion(store)).toBe(28)
++        expect(getUserVersion(store)).toBe(29)
+         store.close()
+     })
+ 
+@@ -40,7 +40,7 @@ describe('Store V14→V15 migration: scratchlist attachments column', () => {
+             expect(cols).toContain('attachments')
+             expect(getColumns(store, 'usage_events')).toContain('last_input_tokens')
+             expect(getColumns(store, 'usage_scan_state')).toContain('last_seq')
+-            expect(getUserVersion(store)).toBe(28)
++            expect(getUserVersion(store)).toBe(29)
+         } finally {
+             store?.close()
+             rmSync(dir, { recursive: true, force: true })
+@@ -60,7 +60,7 @@ describe('Store V14→V15 migration: scratchlist attachments column', () => {
+             store2 = new Store(dbPath)
+             const cols2 = getColumns(store2, 'session_scratchlist')
+             expect(cols2).toEqual(cols1)
+-            expect(getUserVersion(store2)).toBe(28)
++            expect(getUserVersion(store2)).toBe(29)
+         } finally {
+             store2?.close()
+             store1?.close()
+diff --git a/hub/src/store/migration-v18.test.ts b/hub/src/store/migration-v18.test.ts
+index faee78c80..439ff63bb 100644
+--- a/hub/src/store/migration-v18.test.ts
++++ b/hub/src/store/migration-v18.test.ts
+@@ -38,7 +38,7 @@ describe('Store V18->V19 migration: usage scan state', () => {
+             const usageRows = internalDb.prepare('SELECT COUNT(*) AS count FROM usage_events').get() as { count: number }
+ 
+             expect(table?.name).toBe('usage_scan_state')
+-            expect(version.user_version).toBe(28)
++            expect(version.user_version).toBe(29)
+             expect(usageRows.count).toBe(0)
+         } finally {
+             store?.close()
+diff --git a/hub/src/store/migration-v19.test.ts b/hub/src/store/migration-v19.test.ts
+index 8f40f99ca..6ec9b97c7 100644
+--- a/hub/src/store/migration-v19.test.ts
++++ b/hub/src/store/migration-v19.test.ts
+@@ -37,7 +37,7 @@ describe('Store V19->current migration: usage re-index', () => {
+             const scanRows = internalDb.prepare('SELECT COUNT(*) AS count FROM usage_scan_state').get() as { count: number }
+             const usageRows = internalDb.prepare('SELECT COUNT(*) AS count FROM usage_events').get() as { count: number }
+ 
+-            expect(version.user_version).toBe(28)
++            expect(version.user_version).toBe(29)
+             expect(scanRows.count).toBe(0)
+             expect(usageRows.count).toBe(0)
+         } finally {
+diff --git a/hub/src/store/migration-v20.test.ts b/hub/src/store/migration-v20.test.ts
+index 400852fc5..01506017f 100644
+--- a/hub/src/store/migration-v20.test.ts
++++ b/hub/src/store/migration-v20.test.ts
+@@ -43,7 +43,7 @@ describe('Store V20->V21 migration: usage semantics re-index', () => {
+             store = new Store(dbPath)
+             const internalDb = (store as unknown as { db: Database }).db
+             const count = (table: string): number => (internalDb.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count
+-            expect((internalDb.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(28)
++            expect((internalDb.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(29)
+             expect(count('usage_events')).toBe(0)
+             expect(count('usage_scan_state')).toBe(0)
+             expect(store.messages.getMessages(session.id)).toHaveLength(1)
+diff --git a/hub/src/store/migration-v23.test.ts b/hub/src/store/migration-v23.test.ts
+index b9fb258dd..50aa6dad4 100644
+--- a/hub/src/store/migration-v23.test.ts
++++ b/hub/src/store/migration-v23.test.ts
+@@ -13,7 +13,7 @@ afterEach(() => {
+     }
+ })
+ 
+-describe('schema migration v22 to v28', () => {
++describe('schema migration v22 to v29', () => {
+     it('adds events and event_links tables to a V22 database', () => {
+         const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v23-'))
+         tempDirs.push(dir)
+@@ -42,7 +42,7 @@ describe('schema migration v22 to v28', () => {
+         expect(links?.name).toBe('event_links')
+         const columns = internalDb.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>
+         expect(columns.map((column) => column.name)).toContain('delivery_state')
+-        expect(version.user_version).toBe(28)
++        expect(version.user_version).toBe(29)
+         migrated.close()
+     })
+ })
+diff --git a/hub/src/store/migration-v24.test.ts b/hub/src/store/migration-v24.test.ts
+index 6bf20c960..09beea633 100644
+--- a/hub/src/store/migration-v24.test.ts
++++ b/hub/src/store/migration-v24.test.ts
+@@ -13,7 +13,7 @@ afterEach(() => {
+     }
+ })
+ 
+-describe('schema migration v23 to v28', () => {
++describe('schema migration v23 to v29', () => {
+     it('adds fcm_devices.push_key to a V23 database and keeps existing rows', () => {
+         const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v24-'))
+         tempDirs.push(dir)
+@@ -37,7 +37,7 @@ describe('schema migration v23 to v28', () => {
+         expect(columns.some((col) => col.name === 'push_key')).toBe(true)
+         const messageColumns = internalDb.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>
+         expect(messageColumns.some((col) => col.name === 'delivery_state')).toBe(true)
+-        expect(version.user_version).toBe(28)
++        expect(version.user_version).toBe(29)
+ 
+         // Existing Android rows survive with a NULL push key.
+         const devices = migrated.fcm.getDevicesByNamespace('default')
+@@ -74,7 +74,7 @@ describe('schema migration v23 to v28', () => {
+         const columns = internalDb.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>
+         const version = internalDb.prepare('PRAGMA user_version').get() as { user_version: number }
+         expect(columns.some((col) => col.name === 'delivery_state')).toBe(true)
+-        expect(version.user_version).toBe(28)
++        expect(version.user_version).toBe(29)
+         migrated.close()
+     })
+ })
+diff --git a/hub/src/store/migration-v25.test.ts b/hub/src/store/migration-v25.test.ts
+index c92092ff8..f2f651a51 100644
+--- a/hub/src/store/migration-v25.test.ts
++++ b/hub/src/store/migration-v25.test.ts
+@@ -42,7 +42,7 @@ describe('schema migration v25/v26', () => {
+             ORDER BY seq ASC
+         `).all('session-id') as Array<{ detail: string }>
+ 
+-        expect(version.user_version).toBe(28)
++        expect(version.user_version).toBe(29)
+         const columns = internalDb.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string; dflt_value: string }>
+         expect(columns.find(column => column.name === 'steered')?.dflt_value).toBe('0')
+         expect(plan.some((row) => row.detail.includes('idx_messages_immediate_queued'))).toBe(true)
+diff --git a/hub/src/store/migration-v28.test.ts b/hub/src/store/migration-v28.test.ts
+index 6d7f1565a..23dea1fdb 100644
+--- a/hub/src/store/migration-v28.test.ts
++++ b/hub/src/store/migration-v28.test.ts
+@@ -60,7 +60,7 @@ describe('Store V27→V28 migration: ACP usage columns', () => {
+             )
+             const version = internalDb.prepare('PRAGMA user_version').get() as { user_version: number }
+ 
+-            expect(version.user_version).toBe(28)
++            expect(version.user_version).toBe(29)
+             expect(columns.has('context_only')).toBe(true)
+             expect(columns.has('cost')).toBe(true)
+             expect(columns.has('cost_currency')).toBe(true)
+@@ -112,7 +112,7 @@ describe('Store V27→V28 migration: ACP usage columns', () => {
+             const internalDb = (store as unknown as { db: Database }).db
+             const version = internalDb.prepare('PRAGMA user_version').get() as { user_version: number }
+ 
+-            expect(version.user_version).toBe(28)
++            expect(version.user_version).toBe(29)
+             expect((internalDb.prepare('SELECT COUNT(*) AS count FROM usage_events').get() as { count: number }).count).toBe(0)
+             expect((internalDb.prepare('SELECT COUNT(*) AS count FROM usage_scan_state').get() as { count: number }).count).toBe(0)
+         } finally {
+diff --git a/hub/src/store/sessionReadStore.test.ts b/hub/src/store/sessionReadStore.test.ts
+new file mode 100644
+index 000000000..da05ef6e5
+--- /dev/null
++++ b/hub/src/store/sessionReadStore.test.ts
+@@ -0,0 +1,112 @@
++import { afterEach, describe, expect, it } from 'bun:test'
++import { Database } from 'bun:sqlite'
++import { mkdtempSync, rmSync } from 'node:fs'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import { spawnSync } from 'node:child_process'
++import { pathToFileURL } from 'node:url'
++import { Store } from './index'
++
++const stores: Store[] = []
++const dirs: string[] = []
++afterEach(() => {
++    for (const store of stores.splice(0)) store.close()
++    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
++})
++function setup(path = ':memory:') {
++    const store = new Store(path)
++    stores.push(store)
++    const session = store.sessions.getOrCreateSession('read-test', { path: '/test', host: 'test' }, null, 'default')
++    store.sessions.touchSessionUpdatedAt(session.id, 10000, 'default')
++    return { store, id: session.id }
++}
++
++describe('shared session read state', () => {
++    it('persists read positions without touching session activity, then cascades deletion', () => {
++        const { store, id } = setup()
++        const before = store.sessions.getSession(id)!.updatedAt
++        expect(store.sessionReads.update('default', [{ mutationId: 'seen-100', sessionId: id, kind: 'seen', activityAt: 100, expectedVersion: 0 }]).states)
++            .toEqual([{ sessionId: id, lastSeenAt: 100, manualUnreadAt: null, version: 1 }])
++        expect(store.sessions.getSession(id)!.updatedAt).toBe(before)
++        expect(store.sessionReads.update('default', [{ mutationId: 'seen-50', sessionId: id, kind: 'seen', activityAt: 50, expectedVersion: 1 }]).states[0]!.lastSeenAt).toBe(100)
++        store.sessions.deleteSession(id, 'default')
++        expect(store.sessionReads.list('default')).toEqual([])
++    })
++
++    it('rejects stale and duplicate requests without erasing manual unread state', () => {
++        const { store, id } = setup()
++        const seen = { mutationId: 'seen-original', sessionId: id, kind: 'seen' as const, activityAt: 100, expectedVersion: 0 }
++        store.sessionReads.update('default', [seen])
++        store.sessionReads.update('default', [{ mutationId: 'unread-100', sessionId: id, kind: 'unread', activityAt: 100, expectedVersion: 1 }])
++        const unread = store.sessionReads.list('default')
++        expect(unread[0]).toMatchObject({ lastSeenAt: 99, manualUnreadAt: 100, version: 2 })
++        expect(store.sessionReads.update('default', [seen]).states).toEqual(unread)
++        expect(store.sessionReads.update('default', [{ ...seen, expectedVersion: 1 }]).states).toEqual(unread)
++        expect(store.sessionReads.update('default', [{ ...seen, mutationId: 'new-seen', expectedVersion: 2 }]).states[0])
++            .toMatchObject({ lastSeenAt: 100, manualUnreadAt: null, version: 3 })
++    })
++
++    it('keeps newer activity unread when an observed older position is acknowledged', () => {
++        const { store, id } = setup()
++        store.sessionReads.update('default', [{ mutationId: 'unread-100', sessionId: id, kind: 'unread', activityAt: 200, expectedVersion: 0 }])
++        expect(store.sessionReads.update('default', [{ mutationId: 'seen-100-later', sessionId: id, kind: 'seen', activityAt: 100, expectedVersion: 1 }]).states[0])
++            .toMatchObject({ lastSeenAt: 100, manualUnreadAt: 200 })
++    })
++
++    it('rolls back mixed namespace batches and does not expose foreign read state', () => {
++        const { store, id } = setup()
++        const foreign = store.sessions.getOrCreateSession('foreign', {}, null, 'other')
++        expect(() => store.sessionReads.update('default', [
++            { mutationId: 'seen-100', sessionId: id, kind: 'seen', activityAt: 100, expectedVersion: 0 },
++            { mutationId: 'foreign', sessionId: foreign.id, kind: 'seen', activityAt: 100, expectedVersion: 0 }
++        ])).toThrow('session-not-found')
++        expect(store.sessionReads.list('default')).toEqual([])
++        store.sessionReads.update('other', [{ mutationId: 'foreign', sessionId: foreign.id, kind: 'seen', activityAt: 100, expectedVersion: 0 }])
++        expect(store.sessionReads.list('default')).toEqual([])
++    })
++
++    it('imports manual unread only once and rejects positions beyond observed activity', () => {
++        const { store, id } = setup()
++        const mutation = { mutationId: 'import-original', sessionId: id, kind: 'import-unread' as const, activityAt: 100, expectedVersion: 0 }
++        store.sessionReads.update('default', [mutation])
++        store.sessionReads.update('default', [{ ...mutation, mutationId: 'new-seen', kind: 'seen', expectedVersion: 1 }])
++        store.sessionReads.update('default', [mutation])
++        expect(store.sessionReads.list('default')[0]).toMatchObject({ lastSeenAt: 100, manualUnreadAt: null, version: 2 })
++        expect(() => store.sessionReads.update('default', [{ ...mutation, activityAt: Number.MAX_SAFE_INTEGER }])).toThrow('future-activity')
++    })
++
++    it('migrates v26 without changing session rows and survives a store restart', () => {
++        const dir = mkdtempSync(join(tmpdir(), 'hapi-read-sync-'))
++        dirs.push(dir)
++        const path = join(dir, 'test.db')
++        const run = (source: string) => {
++            const result = spawnSync(process.execPath, ['-e', `
++                import { Store } from ${JSON.stringify(pathToFileURL(join(import.meta.dir, 'index.ts')).href)};
++                const path = process.argv[1];
++                ${source}
++            `, path], { encoding: 'utf8' })
++            expect(result.stderr).toBe('')
++            expect(result.status).toBe(0)
++            return JSON.parse(result.stdout.trim())
++        }
++        const original = run(`
++            const store = new Store(path);
++            const session = store.sessions.getOrCreateSession('test', {}, null, 'default');
++            console.log(JSON.stringify(session)); store.close();
++        `)
++        const legacy = new Database(path)
++        legacy.exec('DROP TABLE session_read_states; PRAGMA user_version = 26')
++        legacy.close()
++        const migrated = run(`
++            const store = new Store(path);
++            const session = store.sessions.getSessionsByNamespace('default')[0];
++            const before = store.sessionReads.list('default');
++            store.sessionReads.update('default', [{ mutationId: 'persisted', sessionId: session.id, kind: 'unread', activityAt: 100, expectedVersion: 0 }]);
++            console.log(JSON.stringify({ session, before })); store.close();
++        `)
++        expect(migrated.session).toEqual(original)
++        expect(migrated.before).toEqual([])
++        const reopened = run(`const store = new Store(path); console.log(JSON.stringify(store.sessionReads.list('default'))); store.close();`)
++        expect(reopened[0]).toMatchObject({ manualUnreadAt: 100, version: 1 })
++    }, 30000)
++})
+diff --git a/hub/src/store/sessionReadStore.ts b/hub/src/store/sessionReadStore.ts
+new file mode 100644
+index 000000000..101b42d23
+--- /dev/null
++++ b/hub/src/store/sessionReadStore.ts
+@@ -0,0 +1,75 @@
++import type { Database } from 'bun:sqlite'
++import { emptySessionReadState, type SessionReadMutation, type SessionReadState } from '@hapi/protocol'
++
++export class SessionReadStore {
++    constructor(private readonly db: Database) {}
++
++    list(namespace: string): SessionReadState[] {
++        return this.db.query<SessionReadState, [string]>(`
++            SELECT r.session_id AS sessionId, r.last_seen_at AS lastSeenAt,
++                   r.manual_unread_at AS manualUnreadAt, r.version
++            FROM session_read_states r JOIN sessions s ON s.id = r.session_id
++            WHERE s.namespace = ?
++        `).all(namespace)
++    }
++
++    /** Validate every target before writing; namespace failures roll back the entire batch. */
++    update(namespace: string, mutations: SessionReadMutation[]) {
++        return this.db.transaction(() => {
++            const targets = mutations.map(mutation => {
++                const session = this.db.query<{ updated_at: number }, [string, string]>(
++                    'SELECT updated_at FROM sessions WHERE id = ? AND namespace = ?'
++                ).get(mutation.sessionId, namespace)
++                if (!session) throw new Error('session-not-found')
++                if (mutation.activityAt > session.updated_at) throw new Error('future-activity')
++                return mutation
++            })
++            const result = new Map<string, SessionReadState>()
++            const acceptedSessionIds: string[] = []
++            for (const mutation of targets) {
++                const stored = this.db.query<SessionReadState & { mutationId: string }, [string]>(`
++                    SELECT session_id AS sessionId, last_seen_at AS lastSeenAt,
++                           manual_unread_at AS manualUnreadAt, version, last_mutation_id AS mutationId
++                    FROM session_read_states WHERE session_id = ?
++                `).get(mutation.sessionId)
++                const current = stored ? {
++                    sessionId: stored.sessionId, lastSeenAt: stored.lastSeenAt,
++                    manualUnreadAt: stored.manualUnreadAt, version: stored.version
++                } : emptySessionReadState(mutation.sessionId)
++                if (stored?.mutationId === mutation.mutationId) {
++                    result.set(current.sessionId, current)
++                    acceptedSessionIds.push(current.sessionId)
++                    continue
++                }
++                // Compare-and-swap also makes retries after a lost response idempotent.
++                if (current.version !== mutation.expectedVersion
++                    || (mutation.kind === 'import-unread' && current.version !== 0)) {
++                    if (current.version > 0) result.set(current.sessionId, current)
++                    continue
++                }
++                const seen = mutation.kind === 'seen'
++                const next: SessionReadState = {
++                    sessionId: mutation.sessionId,
++                    lastSeenAt: seen
++                        ? Math.max(current.lastSeenAt, mutation.activityAt)
++                        : Math.min(current.lastSeenAt, Math.max(0, mutation.activityAt - 1)),
++                    manualUnreadAt: seen
++                        ? (mutation.activityAt >= (current.manualUnreadAt ?? 0) ? null : current.manualUnreadAt)
++                        : mutation.activityAt,
++                    version: current.version + 1
++                }
++                this.db.query(`
++                    INSERT INTO session_read_states(session_id, last_seen_at, manual_unread_at, version, last_mutation_id)
++                    VALUES (?, ?, ?, ?, ?)
++                    ON CONFLICT(session_id) DO UPDATE SET
++                        last_seen_at = excluded.last_seen_at,
++                        manual_unread_at = excluded.manual_unread_at, version = excluded.version,
++                        last_mutation_id = excluded.last_mutation_id
++                `).run(next.sessionId, next.lastSeenAt, next.manualUnreadAt, next.version, mutation.mutationId)
++                result.set(next.sessionId, next)
++                acceptedSessionIds.push(next.sessionId)
++            }
++            return { states: [...result.values()], acceptedSessionIds }
++        }).immediate()
++    }
++}
+diff --git a/hub/src/web/routes/sessionReads.test.ts b/hub/src/web/routes/sessionReads.test.ts
+new file mode 100644
+index 000000000..26f393f41
+--- /dev/null
++++ b/hub/src/web/routes/sessionReads.test.ts
+@@ -0,0 +1,62 @@
++import { afterEach, describe, expect, it } from 'bun:test'
++import { Hono } from 'hono'
++import { SignJWT } from 'jose'
++import { Store } from '../../store'
++import { SSEManager } from '../../sse/sseManager'
++import { VisibilityTracker } from '../../visibility/visibilityTracker'
++import { createAuthMiddleware, type WebAppEnv } from '../middleware/auth'
++import { createSessionReadsRoutes } from './sessionReads'
++
++const cleanup: Array<() => void> = []
++afterEach(() => { for (const stop of cleanup.splice(0)) stop() })
++async function setup() {
++    const store = new Store(':memory:')
++    cleanup.push(() => store.close())
++    const manager = new SSEManager(60000, new VisibilityTracker())
++    cleanup.push(() => manager.stop())
++    const secret = new TextEncoder().encode('read-state-test-secret')
++    const token = await new SignJWT({ uid: 1, ns: 'default' }).setProtectedHeader({ alg: 'HS256' }).sign(secret)
++    const app = new Hono<WebAppEnv>()
++    app.use('/api/*', createAuthMiddleware(secret))
++    app.route('/api', createSessionReadsRoutes(store, () => manager))
++    const session = store.sessions.getOrCreateSession('test', {}, null, 'default')
++    const request = (body?: unknown, auth = true) => app.request('/api/session-read-state', {
++        method: body === undefined ? 'GET' : 'POST',
++        headers: auth ? { authorization: `Bearer ${token}`, 'content-type': 'application/json' } : {},
++        ...(body === undefined ? {} : { body: JSON.stringify(body) })
++    })
++    return { store, manager, request, id: session.id }
++}
++describe('session read state API', () => {
++    it('requires authentication for reads and writes', async () => {
++        const { request } = await setup()
++        expect((await request(undefined, false)).status).toBe(401)
++        expect((await request({ mutations: [] }, false)).status).toBe(401)
++    })
++    it('broadcasts to two clients in the namespace without leaking to another namespace', async () => {
++        const { manager, request, id } = await setup()
++        const events: unknown[][] = [[], [], []]
++        for (let i = 0; i < 3; i++) manager.subscribe({
++            id: `client-${i}`, namespace: i === 2 ? 'other' : 'default', all: true,
++            send: event => { events[i]!.push(event) }, sendHeartbeat: () => {}
++        })
++        const response = await request({ mutations: [{ mutationId: 'request', sessionId: id, kind: 'seen', activityAt: 100, expectedVersion: 0 }] })
++        expect(response.status).toBe(200)
++        const snapshot = await response.json() as { states: unknown[] }
++        expect(await (await request()).json()).toEqual({ states: snapshot.states })
++        expect(events[0]).toEqual(events[1])
++        expect(events[0]).toHaveLength(1)
++        expect(events[0]![0]).toMatchObject({ type: 'session-read-state-updated', namespace: 'default', states: snapshot.states })
++        expect(events[2]).toEqual([])
++    })
++    it('validates payloads, foreign targets, and future read positions', async () => {
++        const { store, request, id } = await setup()
++        for (const mutations of [[], [{ mutationId: 'request', sessionId: id, kind: 'seen', activityAt: -1, expectedVersion: 0 }],
++            [{ mutationId: 'request', sessionId: id, kind: 'seen', activityAt: 100, expectedVersion: 0.5 }], Array(501).fill({})]) {
++            expect((await request({ mutations })).status).toBe(400)
++        }
++        const foreign = store.sessions.getOrCreateSession('other', {}, null, 'other')
++        expect((await request({ mutations: [{ mutationId: 'request', sessionId: foreign.id, kind: 'seen', activityAt: 100, expectedVersion: 0 }] })).status).toBe(404)
++        expect((await request({ mutations: [{ mutationId: 'request', sessionId: id, kind: 'seen', activityAt: Number.MAX_SAFE_INTEGER, expectedVersion: 0 }] })).status).toBe(400)
++    })
++})
+diff --git a/hub/src/web/routes/sessionReads.ts b/hub/src/web/routes/sessionReads.ts
+new file mode 100644
+index 000000000..c89222a6e
+--- /dev/null
++++ b/hub/src/web/routes/sessionReads.ts
+@@ -0,0 +1,34 @@
++import { Hono } from 'hono'
++import { SessionReadUpdateSchema } from '@hapi/protocol'
++import type { Store } from '../../store'
++import type { SSEManager } from '../../sse/sseManager'
++import type { WebAppEnv } from '../middleware/auth'
++
++export function createSessionReadsRoutes(store: Store, getSseManager: () => SSEManager | null): Hono<WebAppEnv> {
++    const app = new Hono<WebAppEnv>()
++
++    app.get('/session-read-state', c => c.json({ states: store.sessionReads.list(c.get('namespace')) }))
++
++    app.post('/session-read-state', async c => {
++        const parsed = SessionReadUpdateSchema.safeParse(await c.req.json().catch(() => null))
++        if (!parsed.success) return c.json({ error: 'Invalid read-state request' }, 400)
++        const namespace = c.get('namespace')
++        try {
++            const result = store.sessionReads.update(namespace, parsed.data.mutations)
++            const states = result.states.filter(state => result.acceptedSessionIds.includes(state.sessionId))
++            if (states.length > 0) {
++                getSseManager()?.broadcast({ type: 'session-read-state-updated', namespace, states })
++            }
++            return c.json(result)
++        } catch (error) {
++            if (error instanceof Error && error.message === 'session-not-found') {
++                return c.json({ error: 'Session not found' }, 404)
++            }
++            if (error instanceof Error && error.message === 'future-activity') {
++                return c.json({ error: 'Read position exceeds session activity' }, 400)
++            }
++            throw error
++        }
++    })
++    return app
++}
+diff --git a/hub/src/web/server.ts b/hub/src/web/server.ts
+index 3444b88ce..ada50a7f4 100644
+--- a/hub/src/web/server.ts
++++ b/hub/src/web/server.ts
+@@ -18,6 +18,7 @@ import { createAuthRoutes } from './routes/auth'
+ import { createBindRoutes } from './routes/bind'
+ import { createEventsRoutes } from './routes/events'
+ import { createSessionsRoutes } from './routes/sessions'
++import { createSessionReadsRoutes } from './routes/sessionReads'
+ import { createMessagesRoutes } from './routes/messages'
+ import { createPermissionsRoutes } from './routes/permissions'
+ import { createMachinesRoutes } from './routes/machines'
+@@ -285,6 +286,7 @@ function createWebApp(options: {
+     app.route('/api', createBindRoutes(options.jwtSecret, options.store))
+ 
+     app.use('/api/*', createAuthMiddleware(options.jwtSecret))
++    app.route('/api', createSessionReadsRoutes(options.store, options.getSseManager))
+     app.route('/api', createEventsRoutes(options.getSseManager, options.getSyncEngine, options.getVisibilityTracker))
+     app.route('/api', createSessionsRoutes(options.getSyncEngine))
+     app.route('/api', createMessagesRoutes(options.getSyncEngine))
+diff --git a/scripts/dev/seed-session-read-sync.ts b/scripts/dev/seed-session-read-sync.ts
+new file mode 100644
+index 000000000..ab6f38981
+--- /dev/null
++++ b/scripts/dev/seed-session-read-sync.ts
+@@ -0,0 +1,26 @@
++/** Isolated archived fixtures; requires an explicit disposable Hub database. */
++import { resolve } from 'node:path'
++import { Store } from '../../hub/src/store'
++
++const dbPath = process.env.HAPI_READ_SYNC_TEST_DB
++if (!dbPath || !resolve(dbPath).includes('session-read-sync')) {
++    throw new Error('Set HAPI_READ_SYNC_TEST_DB to the isolated session-read-sync test database')
++}
++const store = new Store(dbPath)
++for (const suffix of ['a', 'b', 'c']) {
++    const id = `read-sync-fixture-${suffix}`
++    const existing = store.sessions.getSession(id)
++    if (existing && existing.tag !== id) throw new Error('Refusing to overwrite a non-fixture session')
++    const session = store.sessions.getOrCreateSession(id, {
++        path: '/read-sync-fixture', host: 'Read sync fixtures', name: `Read sync ${suffix.toUpperCase()}`,
++        flavor: 'claude', lifecycleState: 'archived'
++    }, null, 'default', undefined, undefined, undefined, id)
++    if (!store.messages.countMessages(session.id)) store.messages.addMessage(session.id, {
++        role: 'agent', content: { type: 'output', data: {
++            type: 'assistant', uuid: `reply-${suffix}`, parentUuid: null, isSidechain: false,
++            message: { content: [{ type: 'text', text: `Read synchronization fixture ${suffix.toUpperCase()}.` }] }
++        } }
++    })
++    console.log(`${session.id}: ${store.sessions.getSession(id)!.updatedAt}`)
++}
++store.close()
+diff --git a/shared/src/index.ts b/shared/src/index.ts
+index 3e35fdd0b..8b9964c54 100644
+--- a/shared/src/index.ts
++++ b/shared/src/index.ts
+@@ -1,4 +1,5 @@
+ export * from './scratchlistAttachments'
++export * from './sessionReadState'
+ export * from './workGraph'
+ export * from './apiTypes'
+ export * from './cursorCliSku'
+diff --git a/shared/src/schemas.ts b/shared/src/schemas.ts
+index 0e175a7d4..0915a097a 100644
+--- a/shared/src/schemas.ts
++++ b/shared/src/schemas.ts
+@@ -1,4 +1,5 @@
+ import { z } from 'zod'
++import { SessionReadStateSchema } from './sessionReadState'
+ import { COPILOT_AGENT_MODES, type CopilotAgentMode } from './copilotModes'
+ import { CODEX_COLLABORATION_MODES, PERMISSION_MODES } from './modes'
+ import { AgentConfigDescriptorSchema } from './agentConfig'
+@@ -592,6 +593,10 @@ const MachineChangedSchema = SessionEventBaseSchema.extend({
+ })
+ 
+ export const SyncEventSchema = z.discriminatedUnion('type', [
++    SessionEventBaseSchema.extend({
++        type: z.literal('session-read-state-updated'),
++        states: z.array(SessionReadStateSchema)
++    }),
+     SessionChangedSchema.extend({
+         type: z.literal('session-added'),
+         data: z.unknown().optional()
+diff --git a/shared/src/sessionReadState.test.ts b/shared/src/sessionReadState.test.ts
+new file mode 100644
+index 000000000..0fce4a566
+--- /dev/null
++++ b/shared/src/sessionReadState.test.ts
+@@ -0,0 +1,20 @@
++import { describe, expect, it } from 'bun:test'
++import { SessionReadMutationSchema, SessionReadSnapshotSchema, SessionReadUpdateSchema } from './sessionReadState'
++import { SyncEventSchema } from './schemas'
++
++describe('session read state wire contract', () => {
++    it('validates snapshots and namespace-scoped SSE payloads', () => {
++        const states = [{ sessionId: 'a', lastSeenAt: 100, manualUnreadAt: null, version: 1 }]
++        expect(SessionReadSnapshotSchema.safeParse({ states }).success).toBe(true)
++        expect(SyncEventSchema.safeParse({ type: 'session-read-state-updated', namespace: 'default', states }).success).toBe(true)
++    })
++    it('rejects unbounded or invalid read operations', () => {
++        const mutation = { mutationId: 'test', sessionId: 'a', kind: 'seen', activityAt: 100, expectedVersion: 0 }
++        for (const change of [{ activityAt: -1 }, { activityAt: Infinity }, { activityAt: 0.1 },
++            { activityAt: Number.MAX_SAFE_INTEGER + 1 }, { expectedVersion: -1 }, { kind: 'reset' }, { sessionId: '' }]) {
++            expect(SessionReadMutationSchema.safeParse({ ...mutation, ...change }).success).toBe(false)
++        }
++        expect(SessionReadUpdateSchema.safeParse({ mutations: [] }).success).toBe(false)
++        expect(SessionReadUpdateSchema.safeParse({ mutations: Array(501).fill(mutation) }).success).toBe(false)
++    })
++})
+diff --git a/shared/src/sessionReadState.ts b/shared/src/sessionReadState.ts
+new file mode 100644
+index 000000000..4a81b8b1f
+--- /dev/null
++++ b/shared/src/sessionReadState.ts
+@@ -0,0 +1,34 @@
++import { z } from 'zod'
++
++const timestamp = z.number().int().nonnegative().safe()
++
++export const SessionReadStateSchema = z.object({
++    sessionId: z.string().min(1),
++    lastSeenAt: timestamp,
++    manualUnreadAt: timestamp.nullable(),
++    version: z.number().int().positive().safe()
++})
++
++export const SessionReadMutationSchema = z.object({
++    mutationId: z.string().min(1).max(200),
++    sessionId: z.string().min(1).max(200),
++    kind: z.enum(['seen', 'unread', 'import-unread']),
++    activityAt: timestamp,
++    expectedVersion: z.number().int().nonnegative().safe()
++})
++
++export const SessionReadUpdateSchema = z.object({
++    mutations: z.array(SessionReadMutationSchema).min(1).max(500)
++})
++
++export const SessionReadSnapshotSchema = z.object({ states: z.array(SessionReadStateSchema) })
++export const SessionReadUpdateResponseSchema = SessionReadSnapshotSchema.extend({
++    acceptedSessionIds: z.array(z.string())
++})
++export type SessionReadState = z.infer<typeof SessionReadStateSchema>
++export type SessionReadMutation = z.infer<typeof SessionReadMutationSchema>
++
++/** Untracked sessions remain unread until observed; never import legacy read receipts. */
++export function emptySessionReadState(sessionId: string) {
++    return { sessionId, lastSeenAt: 0, manualUnreadAt: null, version: 0 }
++}
+diff --git a/web/README.md b/web/README.md
+index dcb13bc4e..74da4e38c 100644
+--- a/web/README.md
++++ b/web/README.md
+@@ -19,10 +19,27 @@ React Mini App / PWA for monitoring and controlling hapi sessions.
+ 
+ ## Runtime behavior
+ 
++The isolated read-state Live regression suite is opt-in: set
++`HAPI_READ_SYNC_TEST_URL` to a disposable seeded Hub before selecting
++`session-read-sync.spec.ts`. Ordinary Live runs, including
++`test:mermaid-lightbox:live`, skip these read-state tests when that variable is
++unset. Seed only the disposable database with
++`HAPI_READ_SYNC_TEST_DB=<path> bun run scripts/dev/seed-session-read-sync.ts`.
++
+ - When opened inside Telegram, auth uses Telegram WebApp init data.
+ - When opened in a normal browser, you can log in with `CLI_API_TOKEN:<namespace>` (or `CLI_API_TOKEN` for the default namespace).
+ - The login screen includes a top-right hub picker; if unset, the app uses the same origin it was loaded from.
+ - Live updates come from the hub via SSE.
++- Session read/unread state is shared by Web/PWA clients connected to the same
++  Hub and namespace. Opening a visible session, marking it unread, and marking
++  all sessions read synchronize automatically; no extra setting is required.
++  Offline changes retry on reconnect. A newer peer change wins over a stale
++  offline action, and read-state changes never affect session activity/sorting.
++- On first upgrade, legacy browser read receipts are not uploaded, so they
++  cannot clear another device's unread activity. Existing sessions without a
++  Hub read position start unread. Matching explicit manual-unread markers are
++  imported only for a previously used Hub's default namespace and never replace
++  an existing Hub record. Other namespaces start with isolated shared state.
+ - Session `@` suggestions require conversation content, including untitled conversations. Names and directory labels affect display/search, not eligibility; empty stubs stay excluded.
+ - On desktop, drag a session with conversation content from the sidebar into the rich composer to insert the same session mention as `@`. It uses the current caret, or the end of the draft when no editor selection exists. The current session cannot reference itself.
+ 
+diff --git a/web/e2e/session-read-sync.spec.ts b/web/e2e/session-read-sync.spec.ts
+new file mode 100644
+index 000000000..edbc657e5
+--- /dev/null
++++ b/web/e2e/session-read-sync.spec.ts
+@@ -0,0 +1,165 @@
++import { expect, test, type BrowserContext, type Page } from '@playwright/test'
++import type { SessionReadState } from '../../shared/src/sessionReadState'
++
++test.describe('session read state across isolated devices', () => {
++    test.skip(process.env.HAPI_LIVE !== '1' || !process.env.HAPI_READ_SYNC_TEST_URL,
++        'Set HAPI_LIVE=1 and HAPI_READ_SYNC_TEST_URL for an explicitly isolated seeded Hub')
++
++    test('recovers a closed offline tab without randomUUID or sessionStorage', async ({ browser, request }) => {
++        const baseUrl = process.env.HAPI_READ_SYNC_TEST_URL ?? process.env.HAPI_URL
++        const accessToken = process.env.HAPI_ACCESS_TOKEN
++        if (!baseUrl || !accessToken || /:3006(?:\/|$)/.test(baseUrl)) throw new Error('Explicit isolated Hub URL and token required')
++        const auth = await request.post(`${baseUrl}/api/auth`, { data: { accessToken } })
++        expect(auth.ok()).toBe(true)
++        const { token } = await auth.json() as { token: string }
++        const headers = { authorization: `Bearer ${token}` }
++        const id = 'read-sync-fixture-c'
++        const sessions = await (await request.get(`${baseUrl}/api/sessions`, { headers })).json() as {
++            sessions: Array<{ id: string; updatedAt: number }>
++        }
++        const session = sessions.sessions.find(row => row.id === id)!
++        expect(session).toBeTruthy()
++        const readState = async () => {
++            const response = await request.get(`${baseUrl}/api/session-read-state`, { headers })
++            return (await response.json() as { states: SessionReadState[] }).states.find(row => row.sessionId === id)
++        }
++        const current = await readState()
++        const response = await request.post(`${baseUrl}/api/session-read-state`, { headers, data: { mutations: [{
++            mutationId: crypto.randomUUID(), sessionId: id, kind: 'seen', activityAt: session.updatedAt,
++            expectedVersion: current?.version ?? 0
++        }] } })
++        expect(response.ok()).toBe(true)
++        const context = await browser.newContext({ serviceWorkers: 'block' })
++        try {
++            await context.addInitScript(({ url, access }) => {
++                localStorage.setItem(`hapi_access_token::${url}`, access)
++                localStorage.setItem('hapi-session-list-status-mode', 'detailed')
++                localStorage.setItem('hapi-language', 'en')
++                Object.defineProperty(crypto, 'randomUUID', { configurable: true, value: undefined })
++            }, { url: baseUrl, access: accessToken })
++            const page = await context.newPage()
++            await page.goto(`${baseUrl}/sessions`, { waitUntil: 'domcontentloaded' })
++            const row = page.locator('button.session-list-item').filter({ hasText: 'Read sync C' })
++            await expect(row).toBeVisible()
++            await context.setOffline(true)
++            await row.dispatchEvent('contextmenu', { clientX: 120, clientY: 180 })
++            await page.getByRole('menuitem', { name: 'Mark as unread', exact: true }).click()
++            await expect(row.locator('span.rounded-full[class*="--app-link"]')).toBeVisible()
++            await page.close()
++            await context.setOffline(false)
++            const reopened = await context.newPage()
++            await reopened.goto(`${baseUrl}/sessions`, { waitUntil: 'domcontentloaded' })
++            await expect.poll(async () => (await readState())?.manualUnreadAt, { timeout: 75000 }).toBe(session.updatedAt)
++            await expect(reopened.locator('button.session-list-item').filter({ hasText: 'Read sync C' })
++                .locator('span.rounded-full[class*="--app-link"]')).toBeVisible()
++        } finally { await context.close() }
++    })
++
++    test('desktop/mobile share read, manual unread, bulk read, filtering, badge, reload and offline recovery', async ({ browser, request }) => {
++        const baseUrl = process.env.HAPI_READ_SYNC_TEST_URL ?? process.env.HAPI_URL
++        const accessToken = process.env.HAPI_ACCESS_TOKEN
++        if (!baseUrl || !accessToken || /:3006(?:\/|$)/.test(baseUrl)) throw new Error('Explicit isolated Hub URL and token required')
++        const auth = await request.post(`${baseUrl}/api/auth`, { data: { accessToken } })
++        expect(auth.ok()).toBe(true)
++        const { token } = await auth.json() as { token: string }
++        const headers = { authorization: `Bearer ${token}` }
++        const snapshots = async () => {
++            const response = await request.get(`${baseUrl}/api/session-read-state`, { headers })
++            expect(response.ok()).toBe(true)
++            return (await response.json() as { states: SessionReadState[] }).states
++        }
++        const { sessions } = await (await request.get(`${baseUrl}/api/sessions`, { headers })).json() as {
++            sessions: Array<{ id: string; updatedAt: number }>
++        }
++        const fixtures = sessions.filter(session => session.id.startsWith('read-sync-fixture-'))
++        expect(fixtures).toHaveLength(3)
++        const current = await snapshots()
++        const reset = await request.post(`${baseUrl}/api/session-read-state`, { headers, data: { mutations: fixtures.map(session => ({
++            mutationId: crypto.randomUUID(),
++            sessionId: session.id, kind: 'unread', activityAt: session.updatedAt,
++            expectedVersion: current.find(state => state.sessionId === session.id)?.version ?? 0
++        })) } })
++        expect(reset.ok()).toBe(true)
++
++        const contexts: BrowserContext[] = []
++        const openDevice = async (mobile: boolean) => {
++            const context = await browser.newContext({ serviceWorkers: 'block', viewport: mobile ? { width: 412, height: 915 } : { width: 1440, height: 1000 } })
++            contexts.push(context)
++            await context.addInitScript(({ url, access }) => {
++                localStorage.setItem(`hapi_access_token::${url}`, access)
++                localStorage.setItem('hapi-session-list-status-mode', 'detailed')
++                localStorage.setItem('hapi-language', 'en')
++                localStorage.setItem('hapi-app-badge-enabled', 'true')
++                const originalMatchMedia = window.matchMedia.bind(window)
++                Object.defineProperty(window, 'matchMedia', { value: (query: string) => query === '(display-mode: standalone)' ? ({
++                    matches: true, media: query,
++                    addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {}, dispatchEvent() { return true }
++                }) : originalMatchMedia(query) })
++                Object.defineProperty(navigator, 'setAppBadge', { configurable: true, value: async (count: number) => {
++                    (window as unknown as { badgeCount: number }).badgeCount = count
++                } })
++                Object.defineProperty(navigator, 'clearAppBadge', { configurable: true, value: async () => {
++                    (window as unknown as { badgeCount: number }).badgeCount = 0
++                } })
++            }, { url: baseUrl, access: accessToken })
++            const page = await context.newPage()
++            page.setDefaultTimeout(15000)
++            await page.goto(`${baseUrl}/sessions`, { waitUntil: 'domcontentloaded', timeout: 30000 })
++            await expect(row(page, 'A')).toBeVisible()
++            return { page, context }
++        }
++        const row = (page: Page, suffix: string) => page.locator('button.session-list-item').filter({ hasText: `Read sync ${suffix}` })
++        const unread = (page: Page, suffix: string) => row(page, suffix).locator('span.rounded-full[class*="--app-link"]')
++        const badge = (page: Page) => page.evaluate(() => (window as unknown as { badgeCount: number }).badgeCount)
++        const markUnread = async (page: Page, suffix: string) => {
++            // Exercise the row's context-menu action independently of the existing
++            // left-scrollbar hit-testing issue on desktop Chromium.
++            await row(page, suffix).dispatchEvent('contextmenu', { clientX: 120, clientY: 180 })
++            await page.getByRole('menuitem', { name: 'Mark as unread', exact: true }).click()
++        }
++        try {
++            const desktop = await openDevice(false)
++            const mobile = await openDevice(true)
++            await expect(unread(desktop.page, 'A')).toBeVisible()
++            await expect(unread(mobile.page, 'A')).toBeVisible()
++            await expect.poll(() => badge(mobile.page)).toBe(3)
++
++            await desktop.page.bringToFront()
++            await row(desktop.page, 'A').press('Enter')
++            await expect.poll(async () => (await snapshots()).find(s => s.sessionId === 'read-sync-fixture-a')?.manualUnreadAt).toBeNull()
++            await expect(unread(mobile.page, 'A')).toHaveCount(0)
++            await expect.poll(() => badge(mobile.page)).toBe(2)
++            await desktop.page.goto(`${baseUrl}/sessions`, { waitUntil: 'domcontentloaded', timeout: 30000 })
++            await markUnread(desktop.page, 'A')
++            await expect(unread(mobile.page, 'A')).toBeVisible()
++            await expect.poll(() => badge(mobile.page)).toBe(3)
++            await expect.poll(async () => (await snapshots()).find(s => s.sessionId === 'read-sync-fixture-a')?.manualUnreadAt).not.toBeNull()
++
++            await mobile.page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 })
++            await expect(unread(mobile.page, 'A')).toBeVisible()
++            await desktop.page.getByRole('button', { name: /Mark all as read/ }).click()
++            const dialog = desktop.page.getByRole('dialog')
++            await expect(dialog.getByText(/across your devices/)).toBeVisible()
++            await dialog.getByRole('button', { name: 'Confirm', exact: true }).click()
++            for (const suffix of ['A', 'B', 'C']) await expect(unread(mobile.page, suffix)).toHaveCount(0)
++            await expect.poll(() => badge(mobile.page)).toBe(0)
++
++            // Offline manual-unread intent is retained, but an intervening peer action wins.
++            await desktop.context.setOffline(true)
++            await markUnread(desktop.page, 'B')
++            await expect(unread(desktop.page, 'B')).toBeVisible()
++            await markUnread(mobile.page, 'B')
++            await expect.poll(async () => (await snapshots()).find(s => s.sessionId === 'read-sync-fixture-b')?.manualUnreadAt).not.toBeNull()
++            await desktop.context.setOffline(false)
++            await expect(unread(desktop.page, 'B')).toBeVisible()
++            await desktop.page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 })
++            await expect(unread(desktop.page, 'B')).toBeVisible()
++            await expect(unread(desktop.page, 'A')).toHaveCount(0)
++            await mobile.page.getByRole('button', { name: 'Unread only', exact: true }).click()
++            await expect(row(mobile.page, 'B')).toBeVisible()
++            await expect(row(mobile.page, 'A')).toHaveCount(0)
++            await expect(row(mobile.page, 'C')).toHaveCount(0)
++            await expect.poll(() => badge(mobile.page)).toBe(1)
++        } finally { await Promise.allSettled(contexts.map(context => context.close({ reason: 'Test complete' }))) }
++    })
++})
+diff --git a/web/playwright.live.config.ts b/web/playwright.live.config.ts
+index 6446d75a2..d87adb093 100644
+--- a/web/playwright.live.config.ts
++++ b/web/playwright.live.config.ts
+@@ -5,7 +5,7 @@ const chromePath = process.env.PLAYWRIGHT_CHROME_PATH
+ /** Live hub session tests — no Vite; hits HAPI_URL with HAPI_LIVE=1. */
+ export default defineConfig({
+     testDir: './e2e',
+-    testMatch: ['mermaid-lightbox-session.spec.ts', 'latex-bracket-math-session.spec.ts', 'codex-rewind-session.spec.ts'],
++    testMatch: ['mermaid-lightbox-session.spec.ts', 'latex-bracket-math-session.spec.ts', 'codex-rewind-session.spec.ts', 'session-read-sync.spec.ts'],
+     timeout: 120_000,
+     expect: { timeout: 20_000 },
+     fullyParallel: false,
+diff --git a/web/src/App.tsx b/web/src/App.tsx
+index a4e8e6233..1768aceeb 100644
+--- a/web/src/App.tsx
++++ b/web/src/App.tsx
+@@ -9,6 +9,7 @@ import { useAuth } from '@/hooks/useAuth'
+ import { useAuthSource } from '@/hooks/useAuthSource'
+ import { useServerUrl } from '@/hooks/useServerUrl'
+ import { useSSE } from '@/hooks/useSSE'
++import { useSessionReadSync } from '@/hooks/useSessionReadSync'
+ import { useSessions } from '@/hooks/queries/useSessions'
+ import { useReconnectingState } from '@/hooks/useReconnectingState'
+ import { useSyncingState } from '@/hooks/useSyncingState'
+@@ -71,6 +72,7 @@ function AppInner() {
+     const { serverUrl, baseUrl, setServerUrl, clearServerUrl } = useServerUrl()
+     const { authSource, isLoading: isAuthSourceLoading, setAccessToken } = useAuthSource(baseUrl)
+     const { token, api, isLoading: isAuthLoading, error: authError, needsBinding, bind } = useAuth(authSource, baseUrl)
++    const { refresh: refreshReadState, receive: receiveReadState } = useSessionReadSync(api, baseUrl, token)
+     const [titleSuggestionAvailable, setTitleSuggestionAvailable] = useState(false)
+     const goBack = useAppGoBack()
+     const pathname = useLocation({ select: (location) => location.pathname })
+@@ -268,6 +270,7 @@ function AppInner() {
+     }, [api, isPushSupported, pushPermission, requestPermission, subscribe, token])
+ 
+     const handleSseConnect = useCallback((info: { resumed: boolean }) => {
++        refreshReadState()
+         // Clear disconnected state on successful connection
+         reportSseConnect()
+ 
+@@ -314,7 +317,7 @@ function AppInner() {
+                     endSync()
+                 }
+             })
+-    }, [api, queryClient, selectedSessionId, startSync, endSync, reportSseConnect])
++    }, [api, queryClient, selectedSessionId, startSync, endSync, reportSseConnect, refreshReadState])
+ 
+     const handleSseDisconnect = useCallback((reason: string) => {
+         // Only show reconnecting banner if we've already connected once
+@@ -324,6 +327,10 @@ function AppInner() {
+     }, [reportSseDisconnect])
+ 
+     const handleSseEvent = useCallback((event: SyncEvent) => {
++        if (event.type === 'session-read-state-updated') {
++            receiveReadState(event.states)
++            return
++        }
+         if (event.type !== 'messages-invalidated') {
+             return
+         }
+@@ -336,7 +343,11 @@ function AppInner() {
+             clearMessageWindow(event.sessionId)
+         }
+         void syncTailMessages(api, event.sessionId)
+-    }, [api, selectedSessionId])
++    }, [api, selectedSessionId, receiveReadState])
++
++    const handleGlobalSseEvent = useCallback((event: SyncEvent) => {
++        if (event.type === 'session-read-state-updated') receiveReadState(event.states)
++    }, [receiveReadState])
+ 
+     const handleSessionSseConnect = useCallback((info: { resumed: boolean }) => {
+         if (!api || !selectedSessionId) {
+@@ -426,7 +437,7 @@ function AppInner() {
+         scope: 'global',
+         onConnect: handleSseConnect,
+         onDisconnect: handleSseDisconnect,
+-        onEvent: () => {},
++        onEvent: handleGlobalSseEvent,
+         onToast: handleToast
+     })
+ 
+diff --git a/web/src/api/client.ts b/web/src/api/client.ts
+index f703c69ef..5085ae80c 100644
+--- a/web/src/api/client.ts
++++ b/web/src/api/client.ts
+@@ -63,6 +63,7 @@ import type {
+ } from '@hapi/protocol/apiTypes'
+ import { fetchThroughAuthProxy } from '@/api/authProxy'
+ import type { AgentFlavor, MessageDeliveryMode } from '@hapi/protocol'
++import { SessionReadSnapshotSchema, SessionReadUpdateResponseSchema, type SessionReadMutation } from '@hapi/protocol'
+ import type { CancelMessageResponse, SteerQueuedMessageResponse } from '@hapi/protocol/schemas'
+ import type { TranscriptionMode, TranscriptionProvider, TranscriptionProviderInfo } from '@hapi/protocol/voice'
+ 
+@@ -269,6 +270,16 @@ export class ApiClient {
+         return await this.request<SessionsResponse>('/api/sessions')
+     }
+ 
++    async getSessionReadState() {
++        return SessionReadSnapshotSchema.parse(await this.request('/api/session-read-state'))
++    }
++
++    async updateSessionReadState(mutations: SessionReadMutation[]) {
++        return SessionReadUpdateResponseSchema.parse(await this.request('/api/session-read-state', {
++            method: 'POST', body: JSON.stringify({ mutations })
++        }))
++    }
++
+     async getHealth(): Promise<HubHealthResponse> {
+         return await this.request<HubHealthResponse>('/health')
+     }
+diff --git a/web/src/components/SessionHeader.test.tsx b/web/src/components/SessionHeader.test.tsx
+index 786f59f21..2a8d20ded 100644
+--- a/web/src/components/SessionHeader.test.tsx
++++ b/web/src/components/SessionHeader.test.tsx
+@@ -6,6 +6,7 @@ import type { CodexModelSummary, Session } from '@/types/api'
+ import { I18nProvider } from '@/lib/i18n-context'
+ import { ToastProvider, useToast } from '@/lib/toast-context'
+ import { resolveSessionHeaderMachineLabel, SessionHeader } from './SessionHeader'
++import { applySessionReadStates, configureSessionReadSync, disconnectSessionReadSync } from '@/lib/sessionLastSeen'
+ 
+ const mocks = vi.hoisted(() => ({
+     telegramApp: false,
+@@ -27,6 +28,7 @@ vi.mock('@/hooks/queries/useCodexModels', () => ({
+ 
+ afterEach(() => {
+     cleanup()
++    disconnectSessionReadSync()
+     localStorage.clear()
+     mocks.telegramApp = false
+     mocks.useCodexModels.mockClear()
+@@ -92,6 +94,14 @@ function renderHeaderWithApi(session: Session, api: ApiClient) {
+ }
+ 
+ describe('resolveSessionHeaderMachineLabel', () => {
++    it('waits for the initial Hub snapshot before offering the header unread action', () => {
++        configureSessionReadSync('pending-hub', vi.fn())
++        renderHeader(baseSession({ updatedAt: 100 }))
++        fireEvent.click(screen.getByTitle('More actions'))
++        expect(screen.queryByRole('menuitem', { name: 'Mark as unread' })).toBeNull()
++        act(() => applySessionReadStates([{ sessionId: 'session-1', lastSeenAt: 100, manualUnreadAt: null, version: 1 }]))
++        expect(screen.getByRole('menuitem', { name: 'Mark as unread' })).toBeTruthy()
++    })
+     it('prefers cached/display labels, then host, then short machine id', () => {
+         expect(resolveSessionHeaderMachineLabel(
+             baseSession({ metadata: { flavor: 'cursor', path: '/r', host: 'host.local', machineId: 'abc123456789' } }),
+diff --git a/web/src/components/SessionHeader.tsx b/web/src/components/SessionHeader.tsx
+index d2605f8c6..9f838367b 100644
+--- a/web/src/components/SessionHeader.tsx
++++ b/web/src/components/SessionHeader.tsx
+@@ -33,7 +33,7 @@ import { useSessionHeaderMetadata } from '@/hooks/useSessionHeaderMetadata'
+ import { formatSessionHeaderTimestamp } from '@/lib/sessionHeaderTimestamp'
+ import { selectMobileSessionHeaderSecondary } from '@/lib/sessionHeaderMobileMetadata'
+ import { useMinuteTick } from '@/hooks/useMinuteTick'
+-import { markSessionUnread } from '@/lib/sessionLastSeen'
++import { markSessionUnread, useSessionReadReady } from '@/lib/sessionLastSeen'
+ 
+ /** Same preference order as session-list chips: display label → host → short id. */
+ export function resolveSessionHeaderMachineLabel(
+@@ -164,6 +164,7 @@ export function SessionHeader(props: {
+     const queryClient = useQueryClient()
+     const { addToast } = useToast()
+     const { session, api, onSessionDeleted, onSessionReopened } = props
++    const readReady = useSessionReadReady()
+     const title = useMemo(() => getSessionTitle(session), [session])
+     const projectPath = getSessionProjectPath(session.metadata)
+     const projectLabel = projectPath ? getSessionProjectLabel(projectPath) : null
+@@ -565,7 +566,7 @@ export function SessionHeader(props: {
+                 sessionPinned={Boolean(session.pinned)}
+                 sessionGlobalPinned={Boolean(session.globalPinned)}
+                 onRename={() => setRenameOpen(true)}
+-                onMarkUnread={() => markSessionUnread(session.id, session.updatedAt)}
++                onMarkUnread={readReady ? () => markSessionUnread(session.id, session.updatedAt) : undefined}
+                 onSetPinMode={api ? (mode) => void handleSetPinMode(mode) : undefined}
+                 onExport={() => setExportOpen(true)}
+                 onSyncCodex={api && codexSessionId && !session.active ? handleSyncCodex : undefined}
+diff --git a/web/src/components/SessionList.mark-all-read.test.tsx b/web/src/components/SessionList.mark-all-read.test.tsx
+index bbdbea000..82a0652dd 100644
+--- a/web/src/components/SessionList.mark-all-read.test.tsx
++++ b/web/src/components/SessionList.mark-all-read.test.tsx
+@@ -1,4 +1,5 @@
+-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
++import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
++import { applySessionReadStates, configureSessionReadSync, disconnectSessionReadSync } from '@/lib/sessionLastSeen'
+ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+ import type { ReactNode } from 'react'
+@@ -7,7 +8,7 @@ import { I18nProvider } from '@/lib/i18n-context'
+ import { ToastProvider } from '@/lib/toast-context'
+ import { SessionList } from './SessionList'
+ 
+-afterEach(() => cleanup())
++afterEach(() => { cleanup(); disconnectSessionReadSync() })
+ 
+ function makeSession(overrides: Partial<SessionSummary> & { id: string }): SessionSummary {
+     return {
+@@ -63,6 +64,17 @@ function renderSessionList(sessions: SessionSummary[]) {
+ }
+ 
+ describe('SessionList mark all as read', () => {
++    it('offers manual unread and bulk read only after the initial Hub state is ready', () => {
++        configureSessionReadSync('pending-hub', vi.fn())
++        renderSessionList([makeSession({ id: 'loading', updatedAt: 1000, metadata: { path: '/work', name: 'Loading state' } })])
++        expect(screen.queryByRole('button', { name: 'Mark all as read (1)' })).toBeNull()
++        const row = screen.getByRole('button', { name: /Loading state/ })
++        fireEvent.contextMenu(row, { clientX: 100, clientY: 100 })
++        expect(screen.queryByRole('menuitem', { name: 'Mark as unread' })).toBeNull()
++        act(() => applySessionReadStates([{ sessionId: 'loading', lastSeenAt: 0, manualUnreadAt: null, version: 1 }]))
++        expect(screen.getByRole('button', { name: 'Mark all as read (1)' })).toBeTruthy()
++        expect(screen.getByRole('menuitem', { name: 'Mark as unread' })).toBeTruthy()
++    })
+     beforeEach(() => {
+         localStorage.clear()
+     })
+@@ -105,7 +117,7 @@ describe('SessionList mark all as read', () => {
+         const title = within(dialog).getByRole('heading', { name: 'Mark all as read?' })
+         expect(title.parentElement).toHaveClass('pr-0')
+         expect(title).toHaveClass('min-h-6', 'px-10', 'text-center', 'leading-6')
+-        expect(screen.getByText('This will mark 2 unread sessions as read on this device.')).toBeTruthy()
++        expect(screen.getByText('This will mark 2 unread sessions as read across your devices.')).toBeTruthy()
+         expect(within(dialog).getByRole('button', { name: 'Confirm' })).toHaveClass('bg-red-600', 'text-white')
+         expect(JSON.parse(localStorage.getItem('hapi.sessionLastSeen.v1')!)).toMatchObject({ unreadA: 1000, unreadB: 2000 })
+ 
+diff --git a/web/src/components/SessionList.tsx b/web/src/components/SessionList.tsx
+index f1fdc97e8..f47da7179 100644
+--- a/web/src/components/SessionList.tsx
++++ b/web/src/components/SessionList.tsx
+@@ -98,7 +98,8 @@ import {
+     getUnreadSessionCount,
+     markAllSessionsSeen,
+     markSessionUnread,
+-    useSessionLastSeenVersion
++    useSessionLastSeenVersion,
++    useSessionReadReady
+ } from '@/lib/sessionLastSeen'
+ import { useSessionRowTooltipIds } from '@/components/HoverTooltip'
+ import { subscribeCodexImportedSessions } from '@/lib/codexImportedSessions'
+@@ -1371,6 +1372,7 @@ function SessionItem(props: {
+         lastSeenVersion
+     } = props
+     const { haptic, isTouch } = usePlatform()
++    const readReady = useSessionReadReady()
+     const [menuOpen, setMenuOpen] = useState(false)
+     const [menuAnchorPoint, setMenuAnchorPoint] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
+     const [renameOpen, setRenameOpen] = useState(false)
+@@ -1521,7 +1523,7 @@ function SessionItem(props: {
+                 onSetPinMode={(mode) => void handleSetPinMode(mode)}
+                 onRename={() => setRenameOpen(true)}
+                 onExport={() => setExportOpen(true)}
+-                onMarkUnread={() => markSessionUnread(s.id, s.updatedAt)}
++                onMarkUnread={readReady ? () => markSessionUnread(s.id, s.updatedAt) : undefined}
+                 onArchive={() => setArchiveOpen(true)}
+                 onReopen={cursorReopenDisabledReason ? undefined : handleReopen}
+                 reopenDisabledReason={cursorReopenDisabledReason}
+@@ -1656,6 +1658,7 @@ export function SessionList(props: {
+     const { sessionListStatusMode } = useSessionListStatusMode()
+     const { showActiveSessionsOnly } = useShowActiveSessionsOnly()
+     const lastSeenVersion = useSessionLastSeenVersion()
++    const readReady = useSessionReadReady()
+     // Transient unread lens — not a Settings preference. Cleared on reload; rows drop as they're seen.
+     const [showUnreadOnly, setShowUnreadOnly] = useState(false)
+     const { pinInProgressSessions } = usePinInProgressSessions()
+@@ -2515,7 +2518,7 @@ export function SessionList(props: {
+                                     return measured > 0 ? measured : fallback
+                                 }
+                                 const definedSlots: Array<ToolbarShedSlot & { node: ReactNode }> = []
+-                                if (unreadSessionCount > 0) {
++                                if (readReady && unreadSessionCount > 0) {
+                                     definedSlots.push({
+                                         id: 'mark-all',
+                                         keep: 7,
+@@ -2788,7 +2791,7 @@ export function SessionList(props: {
+                 confirmLabel={t('sessions.markAllRead.confirm')}
+                 confirmingLabel={t('sessions.markAllRead.confirming')}
+                 onConfirm={async () => {
+-                    markAllSessionsSeen(readableSessions)
++                    if (readReady) markAllSessionsSeen(readableSessions)
+                 }}
+                 isPending={false}
+                 centerTitle
+diff --git a/web/src/hooks/useSelectedSessionSeen.test.ts b/web/src/hooks/useSelectedSessionSeen.test.ts
+index 61c2fb98a..6a5707b2e 100644
+--- a/web/src/hooks/useSelectedSessionSeen.test.ts
++++ b/web/src/hooks/useSelectedSessionSeen.test.ts
+@@ -1,6 +1,6 @@
+ import { act, renderHook } from '@testing-library/react'
+ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+-import { getSessionLastSeenAt } from '@/lib/sessionLastSeen'
++import { applySessionReadStates, configureSessionReadSync, disconnectSessionReadSync, getSessionLastSeenAt, getSessionManualUnreadAt } from '@/lib/sessionLastSeen'
+ import { useSelectedSessionSeen } from './useSelectedSessionSeen'
+ 
+ function setVisibilityState(state: DocumentVisibilityState): void {
+@@ -15,10 +15,20 @@ beforeEach(() => {
+ })
+ 
+ afterEach(() => {
++    disconnectSessionReadSync()
+     setVisibilityState('visible')
+ })
+ 
+ describe('useSelectedSessionSeen', () => {
++    it('waits for Hub read state before marking a visible selected session seen', () => {
++        configureSessionReadSync('hub', () => {})
++        renderHook(() => useSelectedSessionSeen('session-a', 300))
++        expect(getSessionLastSeenAt('session-a')).toBe(0)
++        act(() => applySessionReadStates([{ sessionId: 'session-a', lastSeenAt: 200, manualUnreadAt: null, version: 1 }]))
++        expect(getSessionLastSeenAt('session-a')).toBe(300)
++        act(() => applySessionReadStates([{ sessionId: 'session-a', lastSeenAt: 299, manualUnreadAt: 300, version: 3 }]))
++        expect(getSessionManualUnreadAt('session-a')).toBe(300)
++    })
+     it('does not mark hidden selected-session updates as seen', () => {
+         setVisibilityState('hidden')
+         const { rerender } = renderHook(
+diff --git a/web/src/hooks/useSelectedSessionSeen.ts b/web/src/hooks/useSelectedSessionSeen.ts
+index 9e5fbce56..bb6fe9a4c 100644
+--- a/web/src/hooks/useSelectedSessionSeen.ts
++++ b/web/src/hooks/useSelectedSessionSeen.ts
+@@ -1,5 +1,5 @@
+ import { useEffect } from 'react'
+-import { markSessionSeen } from '@/lib/sessionLastSeen'
++import { markSessionSeen, useSessionReadReady } from '@/lib/sessionLastSeen'
+ import { useDocumentVisibility } from './useDocumentVisibility'
+ 
+ /** Mark the selected session read only while the document is visible. */
+@@ -8,12 +8,13 @@ export function useSelectedSessionSeen(
+     updatedAt: number | undefined,
+ ): void {
+     const isDocumentVisible = useDocumentVisibility()
++    const readReady = useSessionReadReady()
+ 
+     useEffect(() => {
+-        if (!isDocumentVisible || !selectedSessionId || updatedAt === undefined) {
++        if (!readReady || !isDocumentVisible || !selectedSessionId || updatedAt === undefined) {
+             return
+         }
+ 
+         markSessionSeen(selectedSessionId, updatedAt)
+-    }, [isDocumentVisible, selectedSessionId, updatedAt])
++    }, [readReady, isDocumentVisible, selectedSessionId, updatedAt])
+ }
+diff --git a/web/src/hooks/useSessionReadSync.ts b/web/src/hooks/useSessionReadSync.ts
+new file mode 100644
+index 000000000..dca62faec
+--- /dev/null
++++ b/web/src/hooks/useSessionReadSync.ts
+@@ -0,0 +1,22 @@
++import { useCallback, useLayoutEffect, useRef } from 'react'
++import type { ApiClient } from '@/api/client'
++import { sessionReadScope, startSessionReadSync } from '@/lib/sessionReadSync'
++import type { SessionReadState } from '@hapi/protocol'
++
++export function useSessionReadSync(api: ApiClient | null, baseUrl: string, token: string | null) {
++    const controller = useRef<ReturnType<typeof startSessionReadSync> | null>(null)
++    let scope: string | null = null
++    if (token) {
++        try { scope = sessionReadScope(baseUrl, token) } catch { /* Authentication is not ready. */ }
++    }
++    useLayoutEffect(() => {
++        if (!api || scope === null) return
++        const sync = startSessionReadSync(api, scope)
++        controller.current = sync
++        return () => { controller.current = null; sync.stop() }
++    }, [api, scope])
++
++    const refresh = useCallback(() => { void controller.current?.refresh() }, [])
++    const receive = useCallback((states: SessionReadState[]) => { controller.current?.receive(states) }, [])
++    return { refresh, receive }
++}
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index 55c9ba8c5..30c44b32d 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -93,7 +93,7 @@ export default {
+   'sessions.toolbar.more': 'More session list actions',
+   'sessions.markAllRead.button': 'Mark all as read ({count})',
+   'sessions.markAllRead.title': 'Mark all as read?',
+-  'sessions.markAllRead.description': 'This will mark {count} unread sessions as read on this device.',
++  'sessions.markAllRead.description': 'This will mark {count} unread sessions as read across your devices.',
+   'sessions.markAllRead.confirm': 'Confirm',
+   'sessions.markAllRead.confirming': 'Marking as read…',
+   'sessions.timeFilter.label': 'Filter sessions by last activity',
+diff --git a/web/src/lib/locales/ru.ts b/web/src/lib/locales/ru.ts
+index 43aec5c39..cfcad4d3f 100644
+--- a/web/src/lib/locales/ru.ts
++++ b/web/src/lib/locales/ru.ts
+@@ -82,7 +82,7 @@ export default {
+   'sessions.toolbar.more': 'Другие действия списка сессий',
+   'sessions.markAllRead.button': 'Отметить все как прочитанные ({count})',
+   'sessions.markAllRead.title': 'Отметить все как прочитанные?',
+-  'sessions.markAllRead.description': 'Будут отмечены как прочитанные {count} непрочитанных сессий на этом устройстве.',
++  'sessions.markAllRead.description': 'Будут отмечены как прочитанные {count} непрочитанных сессий на всех ваших устройствах.',
+   'sessions.markAllRead.confirm': 'Подтвердить',
+   'sessions.markAllRead.confirming': 'Отмечаем как прочитанные…',
+   'sessions.timeFilter.label': 'Фильтр сессий по последней активности',
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index 772ce0fb4..d140b2b5b 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -93,7 +93,7 @@ export default {
+   'sessions.toolbar.more': '更多会话列表操作',
+   'sessions.markAllRead.button': '全部标为已读（{count}）',
+   'sessions.markAllRead.title': '全部标为已读？',
+-  'sessions.markAllRead.description': '这会将当前设备上的 {count} 个未读会话标记为已读。',
++  'sessions.markAllRead.description': '这会在各设备上将 {count} 个未读会话标记为已读。',
+   'sessions.markAllRead.confirm': '确定',
+   'sessions.markAllRead.confirming': '标记中…',
+   'sessions.timeFilter.label': '按最后活动时间筛选会话',
+diff --git a/web/src/lib/sessionLastSeen.ts b/web/src/lib/sessionLastSeen.ts
+index bebd150e0..35a7120d2 100644
+--- a/web/src/lib/sessionLastSeen.ts
++++ b/web/src/lib/sessionLastSeen.ts
+@@ -1,4 +1,5 @@
+ import { useSyncExternalStore } from 'react'
++import type { SessionReadState } from '@hapi/protocol'
+ 
+ const STORAGE_KEY = 'hapi.sessionLastSeen.v1'
+ const MANUAL_UNREAD_KEY = 'hapi.sessionManualUnread.v1'
+@@ -6,9 +7,67 @@ const BASELINE_KEY = 'hapi.sessionLastSeenBaseline.v1'
+ const CHANGE_EVENT = 'hapi.sessionLastSeen.changed'
+ 
+ let changeVersion = 0
++let syncScope: string | null = null
++let syncReady = false
++let onMutation: ((kind: 'seen' | 'unread', sessions: SessionReadStateInput[]) => void) | null = null
++
++function scopedKey(key: string): string {
++    return syncScope === null ? key : `${key}:${syncScope}`
++}
++
++export function configureSessionReadSync(scope: string, mutate: NonNullable<typeof onMutation>): void {
++    remoteSeen = {}
++    remoteUnread = {}
++    syncScope = scope
++    syncReady = false
++    onMutation = mutate
++    notifyStoreChanged()
++}
++
++export function disconnectSessionReadSync(): void {
++    syncScope = null
++    syncReady = false
++    onMutation = null
++    notifyStoreChanged()
++}
++
++export function applySessionReadStates(states: SessionReadState[], replace = false, ready = true): void {
++    const seen = replace ? {} : readStore()
++    const unread = replace ? {} : readManualUnreadStore()
++    for (const state of states) {
++        seen[state.sessionId] = state.lastSeenAt
++        if (state.manualUnreadAt === null) delete unread[state.sessionId]
++        else unread[state.sessionId] = state.manualUnreadAt
++    }
++    writeStore(seen)
++    writeManualUnreadStore(unread)
++    syncReady = ready
++    notifyStoreChanged()
++}
++
++export function useSessionReadReady(): boolean {
++    return useSyncExternalStore(subscribeToStoreChanges, () => syncScope === null || syncReady, () => false)
++}
++
++/** Only explicit legacy unread marks are safe to import; read receipts could clear another device. */
++export function getLegacyManualUnread(scope: string): Record<string, number> {
++    try {
++        const [hub, namespace] = JSON.parse(scope) as [string, string]
++        const storage = getLocalStorage()
++        // Legacy watermarks were not namespace-scoped. Only migrate the original
++        // default namespace, and only with evidence this browser used this Hub.
++        if (namespace !== 'default' || storage?.getItem(`${BASELINE_KEY}:${hub}`) !== '1') return {}
++        const value: unknown = JSON.parse(storage?.getItem(MANUAL_UNREAD_KEY) ?? '{}')
++        return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, number> : {}
++    } catch {
++        return {}
++    }
++}
+ 
+ type LastSeenStore = Record<string, number>
+ type ManualUnreadStore = Record<string, number>
++let remoteSeen: LastSeenStore = {}
++let remoteUnread: ManualUnreadStore = {}
+ 
+ function getLocalStorage(): Storage | null {
+     if (typeof window === 'undefined') {
+@@ -22,13 +81,14 @@ function getLocalStorage(): Storage | null {
+ }
+ 
+ function readStore(): LastSeenStore {
++    if (syncScope !== null) return { ...remoteSeen }
+     const storage = getLocalStorage()
+     if (!storage) {
+         return {}
+     }
+ 
+     try {
+-        const raw = storage.getItem(STORAGE_KEY)
++        const raw = storage.getItem(scopedKey(STORAGE_KEY))
+         if (!raw) {
+             return {}
+         }
+@@ -43,13 +103,14 @@ function readStore(): LastSeenStore {
+ }
+ 
+ function readManualUnreadStore(): ManualUnreadStore {
++    if (syncScope !== null) return { ...remoteUnread }
+     const storage = getLocalStorage()
+     if (!storage) {
+         return {}
+     }
+ 
+     try {
+-        const raw = storage.getItem(MANUAL_UNREAD_KEY)
++        const raw = storage.getItem(scopedKey(MANUAL_UNREAD_KEY))
+         if (!raw) {
+             return {}
+         }
+@@ -64,12 +125,13 @@ function readManualUnreadStore(): ManualUnreadStore {
+ }
+ 
+ function writeStore(store: LastSeenStore): boolean {
++    if (syncScope !== null) remoteSeen = store
+     const storage = getLocalStorage()
+     if (!storage) {
+         return false
+     }
+     try {
+-        storage.setItem(STORAGE_KEY, JSON.stringify(store))
++        storage.setItem(scopedKey(STORAGE_KEY), JSON.stringify(store))
+         return true
+     } catch {
+         // Ignore storage errors
+@@ -78,12 +140,13 @@ function writeStore(store: LastSeenStore): boolean {
+ }
+ 
+ function writeManualUnreadStore(store: ManualUnreadStore): boolean {
++    if (syncScope !== null) remoteUnread = store
+     const storage = getLocalStorage()
+     if (!storage) {
+         return false
+     }
+     try {
+-        storage.setItem(MANUAL_UNREAD_KEY, JSON.stringify(store))
++        storage.setItem(scopedKey(MANUAL_UNREAD_KEY), JSON.stringify(store))
+         return true
+     } catch {
+         // Ignore storage errors
+@@ -104,7 +167,7 @@ function subscribeToStoreChanges(listener: () => void): () => void {
+     }
+ 
+     const handleStorage = (event: StorageEvent) => {
+-        if (event.key !== STORAGE_KEY && event.key !== MANUAL_UNREAD_KEY) {
++        if (event.key !== scopedKey(STORAGE_KEY) && event.key !== scopedKey(MANUAL_UNREAD_KEY)) {
+             return
+         }
+         changeVersion += 1
+@@ -192,7 +255,7 @@ export function getUnreadSessionCount(sessions: Iterable<SessionReadStateInput>)
+     return count
+ }
+ 
+-/** Mark all supplied unread sessions as seen on this device. Returns changed count. */
++/** Mark supplied unread sessions seen and publish the batch through the active sync. */
+ export function markAllSessionsSeen(sessions: Iterable<SessionReadStateInput>): number {
+     const latest = latestSessionUpdates(sessions)
+     if (latest.size === 0) {
+@@ -230,6 +293,8 @@ export function markAllSessionsSeen(sessions: Iterable<SessionReadStateInput>):
+         return 0
+     }
+ 
++    onMutation?.('seen', [...latest].map(([id, updatedAt]) => ({ id, updatedAt })))
++
+     const seenWritten = !seenChanged || writeStore(store)
+     const manualUnreadWritten = !manualUnreadChanged || writeManualUnreadStore(manualUnreadStore)
+     if (seenWritten || manualUnreadWritten) {
+@@ -239,6 +304,7 @@ export function markAllSessionsSeen(sessions: Iterable<SessionReadStateInput>):
+ }
+ 
+ export function initializeSessionLastSeen(scope: string, sessions: Iterable<{ id: string; updatedAt: number }>): void {
++    if (syncScope !== null) return
+     const storage = getLocalStorage()
+     if (!storage) {
+         return
+@@ -276,6 +342,8 @@ export function markSessionSeen(sessionId: string, seenAt: number): void {
+         return
+     }
+ 
++    onMutation?.('seen', [{ id: sessionId, updatedAt: seenAt }])
++
+     if (seenChanged) {
+         store[sessionId] = nextSeenAt
+     }
+@@ -306,6 +374,8 @@ export function markSessionUnread(sessionId: string, updatedAt: number): void {
+         return
+     }
+ 
++    onMutation?.('unread', [{ id: sessionId, updatedAt }])
++
+     if (seenChanged) {
+         store[sessionId] = unreadBefore
+     }
+diff --git a/web/src/lib/sessionReadSync.test.ts b/web/src/lib/sessionReadSync.test.ts
+new file mode 100644
+index 000000000..24c4648f8
+--- /dev/null
++++ b/web/src/lib/sessionReadSync.test.ts
+@@ -0,0 +1,363 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++import { act, renderHook } from '@testing-library/react'
++import { useSelectedSessionSeen } from '@/hooks/useSelectedSessionSeen'
++import type { SessionReadMutation, SessionReadState } from '@hapi/protocol'
++import type { SessionsResponse } from '@/types/api'
++import { ApiError } from '@/api/client'
++import { startSessionReadSync, sessionReadScope } from './sessionReadSync'
++import { getSessionLastSeenAt, getSessionManualUnreadAt, markAllSessionsSeen, markSessionSeen, markSessionUnread } from './sessionLastSeen'
++
++const scope = JSON.stringify(['http://hub', 'default'])
++let sync: ReturnType<typeof startSessionReadSync> | undefined
++const state = (version: number, lastSeenAt = 100, manualUnreadAt: number | null = null): SessionReadState =>
++    ({ sessionId: 'a', version, lastSeenAt, manualUnreadAt })
++const tick = async () => { for (let i = 0; i < 15; i++) await Promise.resolve() }
++
++function mockApi(initial: SessionReadState[] = []) {
++    const records = new Map(initial.map(row => [row.sessionId, row]))
++    const mutationIds = new Map<string, string>()
++    return {
++        records,
++        getSessions: vi.fn(async (): Promise<SessionsResponse> => ({ sessions: [{ id: 'a', updatedAt: 100 } as SessionsResponse['sessions'][number]] })),
++        getSessionReadState: vi.fn(async () => ({ states: [...records.values()] })),
++        updateSessionReadState: vi.fn(async (mutations: SessionReadMutation[]) => {
++            const acceptedSessionIds: string[] = []
++            const states = mutations.flatMap(mutation => {
++            const current = records.get(mutation.sessionId)
++            if (current && mutationIds.get(mutation.sessionId) === mutation.mutationId) {
++                acceptedSessionIds.push(current.sessionId)
++                return [current]
++            }
++            if ((current?.version ?? 0) === mutation.expectedVersion) {
++                const next = {
++                    sessionId: mutation.sessionId,
++                    version: mutation.expectedVersion + 1,
++                    lastSeenAt: mutation.kind === 'seen' ? mutation.activityAt : Math.max(0, mutation.activityAt - 1),
++                    manualUnreadAt: mutation.kind === 'seen' ? null : mutation.activityAt
++                }
++                records.set(next.sessionId, next)
++                mutationIds.set(next.sessionId, mutation.mutationId)
++                acceptedSessionIds.push(next.sessionId)
++                return [next]
++            }
++            return current ? [current] : []
++            })
++            return { states, acceptedSessionIds }
++        })
++    }
++}
++beforeEach(() => { vi.useFakeTimers(); localStorage.clear(); sessionStorage.clear() })
++afterEach(() => { sync?.stop(); sync = undefined; vi.useRealTimers(); vi.restoreAllMocks() })
++
++describe('Hub read-state synchronization', () => {
++    it('starts a fresh snapshot after a connection refresh overlaps an older request', async () => {
++        const api = mockApi([state(2, 99, 100)])
++        let release!: (value: { states: SessionReadState[] }) => void
++        api.getSessionReadState.mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
++        sync = startSessionReadSync(api, scope)
++        const connectedRefresh = sync.refresh()
++        release({ states: [state(1, 100)] })
++        await connectedRefresh
++        await tick()
++        expect(api.getSessionReadState).toHaveBeenCalledTimes(2)
++        expect(getSessionManualUnreadAt('a')).toBe(100)
++    })
++
++    it('keeps a fresh intent ordered after a dependent write already in flight', async () => {
++        const api = mockApi([state(1, 50)])
++        const update = api.updateSessionReadState.getMockImplementation()!
++        let release!: () => void
++        api.updateSessionReadState.mockImplementationOnce(update).mockImplementationOnce(async mutations => {
++            await new Promise<void>(resolve => { release = resolve })
++            return update(mutations)
++        })
++        sync = startSessionReadSync(api, scope)
++        await tick()
++        markSessionSeen('a', 100)
++        markSessionUnread('a', 100)
++        await tick()
++        markSessionSeen('a', 100)
++        release()
++        await tick()
++        expect(api.records.get('a')).toMatchObject({ version: 4, lastSeenAt: 100, manualUnreadAt: null })
++    })
++
++    it('retains an independent fresh intent when a stale in-flight request is rejected', async () => {
++        const api = mockApi([state(1, 50)])
++        let release!: (value: { states: SessionReadState[]; acceptedSessionIds: string[] }) => void
++        api.updateSessionReadState.mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
++        sync = startSessionReadSync(api, scope)
++        await tick()
++        markSessionSeen('a', 100)
++        await tick()
++        api.records.set('a', state(2, 99, 100))
++        sync.receive([state(2, 99, 100)])
++        markAllSessionsSeen([{ id: 'a', updatedAt: 100 }])
++        release({ states: [state(2, 99, 100)], acceptedSessionIds: [] })
++        await tick()
++        expect(api.records.get('a')).toMatchObject({ version: 3, lastSeenAt: 100, manualUnreadAt: null })
++    })
++
++    it('preserves a fresh action based on a peer update when an older offline chain is rejected', async () => {
++        const api = mockApi([state(1, 50)])
++        const update = api.updateSessionReadState.getMockImplementation()!
++        api.updateSessionReadState.mockRejectedValue(new TypeError('offline'))
++        sync = startSessionReadSync(api, scope)
++        await tick()
++        markSessionSeen('a', 100)
++        await tick()
++        api.records.set('a', state(2, 99, 100))
++        sync.receive([state(2, 99, 100)])
++        api.updateSessionReadState.mockImplementation(update)
++        markAllSessionsSeen([{ id: 'a', updatedAt: 100 }])
++        await tick()
++        expect(api.records.get('a')).toMatchObject({ version: 3, lastSeenAt: 100, manualUnreadAt: null })
++    })
++
++    it('acknowledges the selected session after a deferred Hub snapshot instead of trusting cached readiness', async () => {
++        localStorage.setItem(`hapi.sessionReadSync.v1:${scope}`, JSON.stringify({ states: [state(1, 100)] }))
++        const api = mockApi([state(2, 99, 100)])
++        let release!: (value: { states: SessionReadState[] }) => void
++        api.getSessionReadState.mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
++        sync = startSessionReadSync(api, scope)
++        const hook = renderHook(() => useSelectedSessionSeen('a', 100))
++        try {
++            expect(api.updateSessionReadState).not.toHaveBeenCalled()
++            await act(async () => { release({ states: [state(2, 99, 100)] }); await tick() })
++            expect(api.records.get('a')).toMatchObject({ version: 3, lastSeenAt: 100, manualUnreadAt: null })
++            act(() => sync!.receive([state(4, 99, 100)]))
++            await tick()
++            expect(getSessionManualUnreadAt('a')).toBe(100)
++            expect(api.updateSessionReadState).toHaveBeenCalledTimes(1)
++        } finally { hook.unmount() }
++    })
++
++    it('starts and creates mutations when randomUUID is unavailable on HTTP LAN origins', async () => {
++        vi.stubGlobal('crypto', {})
++        try {
++            const api = mockApi()
++            sync = startSessionReadSync(api, scope)
++            await tick()
++            markSessionUnread('a', 100)
++            await tick()
++            expect(api.records.get('a')?.manualUnreadAt).toBe(100)
++        } finally { vi.unstubAllGlobals() }
++    })
++
++    it('recovers an offline action after the tab closes and sessionStorage is discarded', async () => {
++        const api = mockApi([state(1, 50)])
++        const update = api.updateSessionReadState.getMockImplementation()!
++        api.updateSessionReadState.mockRejectedValue(new TypeError('offline'))
++        sync = startSessionReadSync(api, scope)
++        await tick()
++        markSessionUnread('a', 100)
++        await tick()
++        sync.stop()
++        sessionStorage.clear()
++        api.updateSessionReadState.mockImplementation(update)
++        sync = startSessionReadSync(api, scope)
++        await tick()
++        expect(api.records.get('a')).toMatchObject({ version: 2, manualUnreadAt: 100 })
++    })
++
++    it('leaves a live peer queue alone and recovers it only after its owner expires', async () => {
++        const prefix = `hapi.sessionReadSync.v1:${scope}`
++        localStorage.setItem(`${prefix}:pending:peer`, JSON.stringify([
++            { mutationId: 'offline-peer', sessionId: 'a', kind: 'unread', activityAt: 100, expectedVersion: 1 }
++        ]))
++        localStorage.setItem(`${prefix}:owner:peer`, String(Date.now()))
++        const api = mockApi([state(1, 50)])
++        sync = startSessionReadSync(api, scope)
++        await tick()
++        expect(api.updateSessionReadState).not.toHaveBeenCalled()
++        expect(localStorage.getItem(`${prefix}:pending:peer`)).not.toBeNull()
++        await vi.advanceTimersByTimeAsync(61000)
++        expect(api.records.get('a')).toMatchObject({ version: 2, manualUnreadAt: 100 })
++        expect(localStorage.getItem(`${prefix}:pending:peer`)).toBeNull()
++    })
++
++    it('does not adopt an orphan belonging to another namespace', async () => {
++        const otherScope = JSON.stringify(['http://hub', 'other'])
++        const key = `hapi.sessionReadSync.v1:${otherScope}:pending:closed`
++        localStorage.setItem(key, JSON.stringify([
++            { mutationId: 'foreign-action', sessionId: 'a', kind: 'unread', activityAt: 100, expectedVersion: 1 }
++        ]))
++        const api = mockApi([state(1, 50)])
++        sync = startSessionReadSync(api, scope)
++        await tick()
++        expect(api.updateSessionReadState).not.toHaveBeenCalled()
++        expect(localStorage.getItem(key)).not.toBeNull()
++    })
++
++    it('retains an orphan source when persisting the recovered copy fails', async () => {
++        const key = `hapi.sessionReadSync.v1:${scope}:pending:closed`
++        const saved = JSON.stringify([
++            { mutationId: 'recover-me', sessionId: 'a', kind: 'unread', activityAt: 100, expectedVersion: 1 }
++        ])
++        localStorage.setItem(key, saved)
++        vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('quota') })
++        const api = mockApi([state(1, 50)])
++        api.updateSessionReadState.mockRejectedValue(new TypeError('offline'))
++        sync = startSessionReadSync(api, scope)
++        await tick()
++        expect(localStorage.getItem(key)).toBe(saved)
++    })
++
++    it('loads Hub state instead of promoting a legacy read baseline', async () => {
++        localStorage.setItem('hapi.sessionLastSeen.v1', JSON.stringify({ a: 9999 }))
++        const api = mockApi([state(2, 99, 100)])
++        sync = startSessionReadSync(api, scope)
++        await tick()
++        expect(getSessionLastSeenAt('a')).toBe(99)
++        expect(getSessionManualUnreadAt('a')).toBe(100)
++        expect(api.updateSessionReadState).not.toHaveBeenCalled()
++    })
++
++    it('synchronizes sequential seen, manual unread, and bulk read actions', async () => {
++        const api = mockApi()
++        sync = startSessionReadSync(api, scope)
++        await tick()
++        markSessionSeen('a', 100)
++        markSessionUnread('a', 100)
++        await tick()
++        expect(api.records.get('a')).toMatchObject({ version: 2, manualUnreadAt: 100 })
++        expect(getSessionManualUnreadAt('a')).toBe(100)
++        expect(markAllSessionsSeen([{ id: 'a', updatedAt: 100 }, { id: 'b', updatedAt: 200 }])).toBe(2)
++        await tick()
++        expect(api.records.get('a')).toMatchObject({ lastSeenAt: 100, manualUnreadAt: null, version: 3 })
++        expect(api.records.get('b')).toMatchObject({ lastSeenAt: 200 })
++    })
++
++    it('ignores out-of-order SSE and snapshots without generating echo writes', async () => {
++        const api = mockApi([state(1)])
++        sync = startSessionReadSync(api, scope)
++        await tick()
++        sync.receive([state(3, 99, 100)])
++        sync.receive([state(2)])
++        await sync.refresh()
++        expect(getSessionManualUnreadAt('a')).toBe(100)
++        expect(api.updateSessionReadState).not.toHaveBeenCalled()
++    })
++
++    it('reconciles stale offline seen against a newer peer unread marker without rebasing', async () => {
++        const api = mockApi([state(1, 50)])
++        const originalUpdate = api.updateSessionReadState.getMockImplementation()!
++        api.updateSessionReadState.mockRejectedValue(new TypeError('offline'))
++        sync = startSessionReadSync(api, scope)
++        await tick()
++        markSessionSeen('a', 100)
++        await tick()
++        api.records.set('a', state(2, 99, 100))
++        api.updateSessionReadState.mockImplementation(originalUpdate)
++        await sync.refresh()
++        expect(getSessionManualUnreadAt('a')).toBe(100)
++        expect(api.updateSessionReadState.mock.calls.at(-1)?.[0][0]?.expectedVersion).toBe(1)
++    })
++
++    it('persists pending actions across a reload and retries lost responses idempotently', async () => {
++        const api = mockApi([state(1, 50)])
++        const originalUpdate = api.updateSessionReadState.getMockImplementation()!
++        api.updateSessionReadState.mockImplementationOnce(async mutations => {
++            await originalUpdate(mutations)
++            throw new TypeError('response lost')
++        })
++        sync = startSessionReadSync(api, scope)
++        await tick()
++        markSessionUnread('a', 100)
++        await tick()
++        sync.stop()
++        sync = startSessionReadSync(api, scope)
++        await tick()
++        expect(api.records.get('a')).toMatchObject({ version: 2, manualUnreadAt: 100 })
++        expect(getSessionManualUnreadAt('a')).toBe(100)
++        expect(api.updateSessionReadState).toHaveBeenCalledTimes(2)
++    })
++
++    it('drops dependent offline operations after a peer version collision', async () => {
++        const api = mockApi([state(1, 50)])
++        const update = api.updateSessionReadState.getMockImplementation()!
++        api.updateSessionReadState.mockRejectedValue(new TypeError('offline'))
++        sync = startSessionReadSync(api, scope)
++        await tick()
++        markSessionSeen('a', 100)
++        markSessionUnread('a', 100)
++        markSessionSeen('a', 100)
++        await tick()
++        api.records.set('a', state(2, 99, 100))
++        api.updateSessionReadState.mockImplementation(update)
++        await sync.refresh()
++        expect(api.records.get('a')).toEqual(state(2, 99, 100))
++        expect(getSessionManualUnreadAt('a')).toBe(100)
++    })
++
++    it('retries a committed operation after response loss before applying its dependent manual unread', async () => {
++        const api = mockApi([state(1, 50)])
++        const update = api.updateSessionReadState.getMockImplementation()!
++        api.updateSessionReadState.mockImplementationOnce(async mutations => {
++            await update(mutations)
++            throw new TypeError('response lost')
++        })
++        sync = startSessionReadSync(api, scope)
++        await tick()
++        markSessionSeen('a', 100)
++        markSessionUnread('a', 100)
++        await tick()
++        await sync.refresh()
++        expect(api.records.get('a')).toMatchObject({ version: 3, manualUnreadAt: 100 })
++        expect(getSessionManualUnreadAt('a')).toBe(100)
++    })
++
++    it('imports an explicit legacy unread only for the known default Hub', async () => {
++        localStorage.setItem('hapi.sessionLastSeenBaseline.v1:http://hub', '1')
++        localStorage.setItem('hapi.sessionManualUnread.v1', JSON.stringify({ a: 100, b: 200 }))
++        const api = mockApi()
++        sync = startSessionReadSync(api, scope)
++        await tick()
++        expect(api.updateSessionReadState).toHaveBeenCalledWith([
++            { mutationId: expect.any(String), sessionId: 'a', kind: 'import-unread', activityAt: 100, expectedVersion: 0, baseVersion: 0 }
++        ])
++        sync.stop()
++        const other = mockApi()
++        sync = startSessionReadSync(other, JSON.stringify(['http://hub', 'other']))
++        await tick()
++        expect(getSessionManualUnreadAt('a')).toBeNull()
++        expect(other.updateSessionReadState).not.toHaveBeenCalled()
++    })
++
++    it('discards deleted targets so one failed operation does not block later actions', async () => {
++        const api = mockApi()
++        api.updateSessionReadState.mockRejectedValueOnce(new ApiError('not found', 404))
++        sync = startSessionReadSync(api, scope)
++        await tick()
++        markSessionSeen('deleted', 100)
++        markSessionUnread('a', 100)
++        await tick()
++        await vi.advanceTimersByTimeAsync(5000)
++        expect(api.records.get('a')?.manualUnreadAt).toBe(100)
++    })
++
++    it('continues online without localStorage and isolates delayed responses after a Hub switch', async () => {
++        vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('quota') })
++        const api = mockApi([state(1, 50)])
++        let release!: (value: { states: SessionReadState[] }) => void
++        api.getSessionReadState.mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
++        sync = startSessionReadSync(api, scope)
++        sync.stop()
++        const other = mockApi([state(2, 70)])
++        sync = startSessionReadSync(other, JSON.stringify(['http://other', 'default']))
++        await tick()
++        release({ states: [state(10, 999)] })
++        await tick()
++        expect(getSessionLastSeenAt('a')).toBe(70)
++        markSessionSeen('a', 100)
++        await tick()
++        expect(other.records.get('a')?.lastSeenAt).toBe(100)
++    })
++
++    it('uses Hub and namespace as identity across JWT refreshes', () => {
++        const jwt = (ns: string, exp: number) => `header.${btoa(JSON.stringify({ ns, exp }))}.sig`
++        expect(sessionReadScope('hub-a', jwt('default', 1))).toBe(sessionReadScope('hub-a', jwt('default', 2)))
++        expect(sessionReadScope('hub-a', jwt('other', 1))).not.toBe(sessionReadScope('hub-a', jwt('default', 1)))
++        expect(sessionReadScope('hub-b', jwt('default', 1))).not.toBe(sessionReadScope('hub-a', jwt('default', 1)))
++    })
++})
+diff --git a/web/src/lib/sessionReadSync.ts b/web/src/lib/sessionReadSync.ts
+new file mode 100644
+index 000000000..d307ebda0
+--- /dev/null
++++ b/web/src/lib/sessionReadSync.ts
+@@ -0,0 +1,257 @@
++import type { ApiClient } from '@/api/client'
++import { ApiError } from '@/api/client'
++import { randomId } from './randomId'
++import { SessionReadMutationSchema, SessionReadSnapshotSchema, type SessionReadMutation, type SessionReadState } from '@hapi/protocol'
++import {
++    applySessionReadStates, configureSessionReadSync, disconnectSessionReadSync, getLegacyManualUnread
++} from './sessionLastSeen'
++
++type ReadApi = Pick<ApiClient, 'getSessionReadState' | 'updateSessionReadState' | 'getSessions'>
++type PendingMutation = SessionReadMutation & { baseVersion: number }
++
++/** Hub identity includes namespace, not the short-lived JWT or user transport identity. */
++export function sessionReadScope(baseUrl: string, token: string): string {
++    const payload: unknown = JSON.parse(atob(token.split('.')[1]!.replace(/-/g, '+').replace(/_/g, '/')))
++    if (!payload || typeof payload !== 'object' || !('ns' in payload) || typeof payload.ns !== 'string') {
++        throw new Error('Missing read-state namespace')
++    }
++    return JSON.stringify([baseUrl, payload.ns])
++}
++
++export function startSessionReadSync(api: ReadApi, scope: string) {
++    const states = new Map<string, SessionReadState>()
++    let stopped = false
++    let ready = false
++    let running = false
++    let refreshPromise: Promise<void> | null = null
++    let followupRefresh: Promise<void> | null = null
++    let retry: ReturnType<typeof setTimeout> | undefined
++    // Every controller owns a distinct durable queue, including duplicated tabs.
++    // Closed/crashed controllers are discovered by scope instead of sessionStorage.
++    const tabId = randomId()
++    const cacheKey = `hapi.sessionReadSync.v1:${scope}`
++    const queuePrefix = `${cacheKey}:pending:`
++    const queueKey = `${queuePrefix}${tabId}`
++    const ownerPrefix = `${cacheKey}:owner:`
++    const ownerKey = `${ownerPrefix}${tabId}`
++    const ownerTtlMs = 60000
++    let pending: PendingMutation[] = []
++    let inFlight = new Set<PendingMutation>()
++    const parsePending = (value: unknown): PendingMutation | null => {
++        const parsed = SessionReadMutationSchema.safeParse(value)
++        if (!parsed.success) return null
++        const base = (value as { baseVersion?: unknown }).baseVersion
++        return { ...parsed.data, baseVersion: typeof base === 'number' && Number.isSafeInteger(base) && base >= 0
++            ? base : parsed.data.expectedVersion }
++    }
++    try {
++        const cached = SessionReadSnapshotSchema.safeParse(JSON.parse(localStorage.getItem(cacheKey) ?? 'null'))
++        if (cached.success) for (const state of cached.data.states) states.set(state.sessionId, state)
++        const queue: unknown = JSON.parse(localStorage.getItem(queueKey) ?? '[]')
++        if (Array.isArray(queue)) {
++            // Reuse the wire validator, including numeric bounds, for persisted queue data.
++            for (const value of queue) {
++                const parsed = parsePending(value)
++                if (parsed) pending.push(parsed)
++            }
++        }
++    } catch { /* Storage is optional; online synchronization still works. */ }
++
++    const persist = () => {
++        try {
++            localStorage.setItem(cacheKey, JSON.stringify({ states: [...states.values()] }))
++            if (pending.length) localStorage.setItem(queueKey, JSON.stringify(pending))
++            else localStorage.removeItem(queueKey)
++            return true
++        } catch { /* Storage can be unavailable in private browsing. */ }
++        return false
++    }
++    const releaseOwnership = () => {
++        try { localStorage.removeItem(ownerKey) } catch { /* Optional storage. */ }
++    }
++    const renewOwnership = () => {
++        try { localStorage.setItem(ownerKey, String(Date.now())) } catch { /* Optional storage. */ }
++    }
++    const recoverOrphanedQueues = () => {
++        let recovered = false
++        try {
++            const keys = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i))
++            const knownIds = new Set(pending.map(item => item.mutationId))
++            for (const key of keys) {
++                if (!key?.startsWith(queuePrefix) || key === queueKey) continue
++                const lease = `${ownerPrefix}${key.slice(queuePrefix.length)}`
++                const renewedAt = Number(localStorage.getItem(lease))
++                if (renewedAt > Date.now() - ownerTtlMs) continue
++                const raw = localStorage.getItem(key)
++                let queue: unknown
++                try { queue = JSON.parse(raw ?? 'null') } catch { continue }
++                if (!Array.isArray(queue)) continue
++                for (const value of queue) {
++                    const parsed = parsePending(value)
++                    if (!parsed || knownIds.has(parsed.mutationId)) continue
++                    pending.push(parsed)
++                    recovered = true
++                    knownIds.add(parsed.mutationId)
++                }
++                // Copy durably before removing the source; failed writes retain it.
++                // Concurrent recovery is harmless: mutation IDs are idempotent at the Hub.
++                if (persist() && localStorage.getItem(key) === raw) {
++                    localStorage.removeItem(key)
++                    localStorage.removeItem(lease)
++                }
++            }
++        } catch { /* Online sync must still work when storage is inaccessible. */ }
++        return recovered
++    }
++    const publish = () => {
++        const visible = new Map(states)
++        for (const mutation of pending) {
++            const current = visible.get(mutation.sessionId)
++            if ((current?.version ?? 0) !== mutation.expectedVersion) continue
++            const seen = mutation.kind === 'seen'
++            visible.set(mutation.sessionId, {
++                sessionId: mutation.sessionId,
++                version: mutation.expectedVersion + 1,
++                lastSeenAt: seen ? Math.max(current?.lastSeenAt ?? 0, mutation.activityAt)
++                    : Math.min(current?.lastSeenAt ?? 0, Math.max(0, mutation.activityAt - 1)),
++                manualUnreadAt: seen
++                    ? (mutation.activityAt >= (current?.manualUnreadAt ?? 0) ? null : current!.manualUnreadAt)
++                    : mutation.activityAt
++            })
++        }
++        applySessionReadStates([...visible.values()], true, ready)
++    }
++    const apply = (incoming: SessionReadState[]) => {
++        if (stopped) return
++        for (const state of incoming) {
++            if (state.version > (states.get(state.sessionId)?.version ?? 0)) states.set(state.sessionId, state)
++        }
++        persist()
++        publish()
++    }
++    const schedule = () => {
++        if (stopped || retry) return
++        retry = setTimeout(() => { retry = undefined; void refresh() }, 5000)
++    }
++    const flush = async () => {
++        if (!ready || running || stopped) return
++        running = true
++        let singleTarget = false
++        try {
++            while (pending.length && !stopped) {
++                // Batch independent targets, but serialize each session's intent order.
++                // Never rebase an offline action over a peer's newer version.
++                const targets = new Set<string>()
++                const batch = pending.filter(mutation => {
++                    if (targets.has(mutation.sessionId) || targets.size >= (singleTarget ? 1 : 500)) return false
++                    targets.add(mutation.sessionId)
++                    return true
++                })
++                let response
++                try {
++                    inFlight = new Set(batch)
++                    response = await api.updateSessionReadState(batch)
++                } catch (error) {
++                    if (stopped) return
++                    if (error instanceof ApiError && (error.status === 400 || error.status === 404)) {
++                        // A deleted target rolls back a batch. Split it to retain valid work.
++                        if (batch.length > 1) singleTarget = true
++                        else pending = pending.filter(item => item !== batch[0])
++                        persist()
++                        continue
++                    }
++                    throw error
++                } finally { inFlight.clear() }
++                if (stopped) return
++                const rejected = new Map(batch.filter(item => !response.acceptedSessionIds.includes(item.sessionId))
++                    .map(item => [item.sessionId, item.baseVersion]))
++                // Drop the entire dependent offline chain on conflict. Its projected
++                // versions might otherwise accidentally match an intervening peer write.
++                pending = pending.filter(item => !batch.includes(item)
++                    && (!rejected.has(item.sessionId) || item.baseVersion > rejected.get(item.sessionId)!))
++                apply(response.states)
++            }
++        } catch {
++            if (stopped) return
++            schedule()
++        } finally { running = false }
++    }
++    configureSessionReadSync(scope, (kind, sessions) => {
++        for (const { id, updatedAt } of sessions) {
++            const confirmedVersion = states.get(id)?.version ?? 0
++            const parent = [...inFlight].find(item => item.sessionId === id && item.expectedVersion >= confirmedVersion)
++            const baseVersion = parent?.baseVersion ?? confirmedVersion
++            // A fresh intent based on an observed peer update supersedes unsent
++            // intents from older state, but does not depend on a stale in-flight write.
++            pending = pending.filter(item => item.sessionId !== id || item.baseVersion >= confirmedVersion || inFlight.has(item))
++            const expectedVersion = pending.filter(item => item.sessionId === id && item.baseVersion === baseVersion)
++                .reduce((version, item) => Math.max(version, item.expectedVersion + 1), baseVersion)
++            pending.push({ mutationId: randomId(), sessionId: id, kind, activityAt: updatedAt, expectedVersion, baseVersion })
++        }
++        persist()
++        // Let the optimistic local update finish before an immediate mocked response.
++        void Promise.resolve().then(flush)
++    })
++    if (states.size || pending.length) publish()
++
++    async function refresh(): Promise<void> {
++        if (stopped) return
++        if (refreshPromise) {
++            // A connection handshake must observe a snapshot captured after the
++            // subscription registered. Coalesce overlaps into one subsequent GET.
++            followupRefresh ??= refreshPromise.then(() => {
++                followupRefresh = null
++                return refresh()
++            })
++            return followupRefresh
++        }
++        refreshPromise = (async () => {
++            try {
++                renewOwnership()
++                recoverOrphanedQueues()
++                const snapshot = await api.getSessionReadState()
++                if (stopped) return
++                apply(snapshot.states)
++                if (!ready) {
++                    // Import only explicit unread markers and only for a session whose
++                    // current activity still matches. Never promote legacy seen receipts.
++                    const legacy = getLegacyManualUnread(scope)
++                    if (Object.keys(legacy).length) {
++                        const sessions = await api.getSessions()
++                        if (stopped) return
++                        for (const session of sessions.sessions) {
++                            if (!states.has(session.id) && legacy[session.id] === session.updatedAt) {
++                                pending.push({ mutationId: randomId(), sessionId: session.id, kind: 'import-unread', activityAt: session.updatedAt, expectedVersion: 0, baseVersion: 0 })
++                            }
++                        }
++                    }
++                }
++                ready = true
++                publish()
++                await flush()
++            } catch { schedule() }
++            finally { refreshPromise = null }
++        })()
++        return refreshPromise
++    }
++    // Keep live tab queues separate; recover abandoned queues even when another
++    // tab stays open through the original owner's crash. pagehide handles normal closes.
++    const ownershipTimer = setInterval(() => {
++        renewOwnership()
++        if (recoverOrphanedQueues()) void refresh()
++    }, 10000)
++    window.addEventListener('pagehide', releaseOwnership)
++    void refresh()
++    return {
++        refresh,
++        receive: apply,
++        stop() {
++            stopped = true
++            clearTimeout(retry)
++            clearInterval(ownershipTimer)
++            window.removeEventListener('pagehide', releaseOwnership)
++            releaseOwnership()
++            disconnectSessionReadSync()
++        }
++    }
++}

@@ -1,0 +1,40 @@
+From 83f1f7648c1430712282bde72fc8902edbe36ac7 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 26 Sep 2026 17:09:09 +0800
+Subject: [PATCH] docs(release): explain upstream rebuild and accepted removals
+
+---
+ .github/release-notes/v0.30.7.3.md | 21 +++++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+ create mode 100644 .github/release-notes/v0.30.7.3.md
+
+diff --git a/.github/release-notes/v0.30.7.3.md b/.github/release-notes/v0.30.7.3.md
+new file mode 100644
+index 000000000..fe6a98bb1
+--- /dev/null
++++ b/.github/release-notes/v0.30.7.3.md
+@@ -0,0 +1,21 @@
++# HAPI v0.30.7.3 (self-use maintained build)
++
++Built from official `upstream/main` at `86c88df93baf5d1f738dd4b202078bdf6dec376e` with individually audited open PRs and maintained distribution changes.
++
++## Compared with the previous maintained release
++
++Compared with `v0.30.7.2`, this release adopts the current official source and 24 selected open PRs. It retains the desktop distribution and release tooling, plus focused Android text and spinner fixes. It includes the open #1436 voice draft delivery and #1771 session runtime carries.
++
++The old fork-only fleet self-upgrade, notification preferences and model-error copy, namespace settings, and Claude session import are removed. Other source and test files from the previous whole-source overlay were also omitted; see `tools/maintenance/releases/v0.30.7.3/audit.md` for the inventory and provenance. The owner accepted removal of these old fork-only features for self-use maintenance releases on 2026-09-26. Fleet updates for this release use the external deployment workflow.
++
++Closed, unmerged PR #847's Codex quota schema, scanner, indicator, and adapter are excluded. No old whole-source overlay is replayed. The newer open PR #1901 is deferred and is not included.
++
++## Compared with the official release
++
++Compared with official `v0.30.7`, this build is based on the newer official `main` and includes 24 audited open PR carries, the maintained desktop and standalone release distribution, and the focused integration fixes recorded in the release audit. It does not add the removed old fork-only features above.
++
++## Verification and exceptions
++
++Local frozen install, full typecheck and unit suite, CLI integration, selected Playwright flows, maintenance safety tests, desktop build/tests, and macOS standalone smoke check passed. The patch queue replayed to the same source tree in an isolated worktree. Android build is delegated to CI because the local Android SDK is unavailable.
++
++Personal PR policy exceptions: #1419 had an unstable merge result and #1771 had a dirty merge result at audit time. Both remain open personal PRs and their live heads were verified for the isolated carry.
+-- 
+2.54.0 (Apple Git-157)
+

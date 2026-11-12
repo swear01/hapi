@@ -1,0 +1,447 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Mon, 19 Oct 2026 15:35:53 +0000
+Subject: [PATCH 26/95] carry(upstream): PR #1938 fix(codex): reuse live model
+ catalogs and extend discovery cache
+
+Upstream-head: 3162a904d1568c5cccf119ad395c84b748725704
+---
+ cli/src/modules/common/codexModels.test.ts    | 82 ++++++++++++++++++-
+ cli/src/modules/common/codexModels.ts         | 59 ++++++++++---
+ hub/src/web/routes/sessions.test.ts           | 19 +++++
+ hub/src/web/routes/sessions.ts                | 10 ++-
+ web/src/components/SessionChat.tsx            |  1 +
+ web/src/hooks/queries/useCodexModels.test.tsx | 43 ++++++++++
+ web/src/hooks/queries/useCodexModels.ts       | 26 ++++--
+ 7 files changed, 214 insertions(+), 26 deletions(-)
+
+diff --git a/cli/src/modules/common/codexModels.test.ts b/cli/src/modules/common/codexModels.test.ts
+index 25c62c946..ebfb83767 100644
+--- a/cli/src/modules/common/codexModels.test.ts
++++ b/cli/src/modules/common/codexModels.test.ts
+@@ -1,4 +1,7 @@
+-import { beforeEach, describe, expect, it, vi } from 'vitest';
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
++import { mkdtemp, rm, writeFile } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
+ 
+ const { constructorOptions, listModelsMock } = vi.hoisted(() => ({
+     constructorOptions: [] as unknown[],
+@@ -28,11 +31,16 @@ vi.mock('@/codex/codexAppServerClient', () => ({
+ import { listCodexModels, _resetCodexModelsCacheForTests } from './codexModels';
+ 
+ describe('listCodexModels cwd', () => {
++    const temporaryHomes: string[] = [];
+     beforeEach(() => {
+         constructorOptions.length = 0;
+         listModelsMock.mockReset();
+         _resetCodexModelsCacheForTests();
+     });
++    afterEach(async () => {
++        vi.unstubAllEnvs();
++        await Promise.all(temporaryHomes.splice(0).map(home => rm(home, { recursive: true, force: true })));
++    });
+ 
+     it('starts discovery from the user home instead of the caller cwd', async () => {
+         listModelsMock.mockResolvedValue({ data: [] });
+@@ -80,8 +88,7 @@ describe('listCodexModels cwd', () => {
+         const inflight1 = listCodexModels();
+         const inflight2 = listCodexModels();
+ 
+-        // Allow the microtasks to schedule the first request before resolving it.
+-        await new Promise((resolve) => setImmediate(resolve));
++        await vi.waitFor(() => expect(listModelsMock).toHaveBeenCalledTimes(1));
+         resolveList({ data: [{ id: 'gpt-5.6-sol', displayName: 'GPT-5.6-Sol' }] });
+ 
+         const [first, second] = await Promise.all([inflight1, inflight2]);
+@@ -102,12 +109,81 @@ describe('listCodexModels cwd', () => {
+ 
+             vi.advanceTimersByTime(5 * 60_000 + 1);
+             await listCodexModels();
++            expect(constructorOptions).toHaveLength(1);
++
++            vi.advanceTimersByTime(24 * 60 * 60_000);
++            await listCodexModels();
+             expect(constructorOptions).toHaveLength(2);
+         } finally {
+             vi.useRealTimers();
+         }
+     });
+ 
++    it('invalidates successful discovery when the local catalog or auth changes', async () => {
++        const home = await mkdtemp(join(tmpdir(), 'hapi-codex-models-'));
++        temporaryHomes.push(home);
++        vi.stubEnv('CODEX_HOME', home);
++        const catalog = join(home, 'models.json');
++        await writeFile(join(home, 'config.toml'), `model_catalog_json = ${JSON.stringify(catalog)}\n`);
++        await writeFile(catalog, '{"models":["first"]}');
++        listModelsMock.mockResolvedValue({ data: [{ id: 'first' }] });
++
++        await listCodexModels();
++        await listCodexModels();
++        expect(constructorOptions).toHaveLength(1);
++
++        await writeFile(catalog, '{"models":["second"]}');
++        listModelsMock.mockResolvedValue({ data: [{ id: 'second' }] });
++        expect((await listCodexModels())[0]?.id).toBe('second');
++        expect(constructorOptions).toHaveLength(2);
++
++        await writeFile(join(home, 'auth.json'), '{"auth":"changed"}');
++        await listCodexModels();
++        expect(constructorOptions).toHaveLength(3);
++
++        await writeFile(join(home, 'config.toml'), `model_catalog_json = ${JSON.stringify(catalog)}\nmodel = "second"\n`);
++        await listCodexModels();
++        expect(constructorOptions).toHaveLength(4);
++    });
++
++    it('resolves a relative catalog path from the Codex config directory', async () => {
++        const home = await mkdtemp(join(tmpdir(), 'hapi-codex-models-'));
++        temporaryHomes.push(home);
++        vi.stubEnv('CODEX_HOME', home);
++        await writeFile(join(home, 'config.toml'), 'model_catalog_json = "models.json"\n');
++        const catalog = join(home, 'models.json');
++        await writeFile(catalog, 'first');
++        listModelsMock.mockResolvedValue({ data: [{ id: 'first' }] });
++        await listCodexModels();
++
++        await writeFile(catalog, 'second');
++        listModelsMock.mockResolvedValue({ data: [{ id: 'second' }] });
++        expect((await listCodexModels())[0]?.id).toBe('second');
++        expect(constructorOptions).toHaveLength(2);
++    });
++
++    it('does not let an older in-flight lookup replace a newer catalog', async () => {
++        const home = await mkdtemp(join(tmpdir(), 'hapi-codex-models-'));
++        temporaryHomes.push(home);
++        vi.stubEnv('CODEX_HOME', home);
++        const catalog = join(home, 'models.json');
++        await writeFile(join(home, 'config.toml'), `model_catalog_json = ${JSON.stringify(catalog)}\n`);
++        await writeFile(catalog, 'first');
++        let resolveFirst: (value: { data: unknown[] }) => void = () => undefined;
++        listModelsMock.mockImplementationOnce(() => new Promise(resolve => { resolveFirst = resolve; }));
++        const first = listCodexModels();
++        await vi.waitFor(() => expect(listModelsMock).toHaveBeenCalledTimes(1));
++
++        await writeFile(catalog, 'second');
++        listModelsMock.mockResolvedValue({ data: [{ id: 'second' }] });
++        await listCodexModels();
++        resolveFirst({ data: [{ id: 'first' }] });
++        await first;
++
++        expect((await listCodexModels())[0]?.id).toBe('second');
++        expect(constructorOptions).toHaveLength(2);
++    });
++
+     it('does not cache empty or failed results', async () => {
+         listModelsMock.mockResolvedValue({ data: [] });
+         await listCodexModels();
+diff --git a/cli/src/modules/common/codexModels.ts b/cli/src/modules/common/codexModels.ts
+index fd39a0699..30a4cdeea 100644
+--- a/cli/src/modules/common/codexModels.ts
++++ b/cli/src/modules/common/codexModels.ts
+@@ -1,6 +1,10 @@
+ import { homedir } from 'node:os';
++import { createHash } from 'node:crypto';
++import { readFile } from 'node:fs/promises';
++import { join, resolve } from 'node:path';
+ import type { CodexModelsResponse, CodexModelSummary } from '@hapi/protocol/apiTypes';
+ import { CodexAppServerClient } from '@/codex/codexAppServerClient';
++import { resolveCodexHome } from '@/codex/utils/codexHome';
+ import { getErrorMessage } from './rpcResponses';
+ 
+ export interface ListCodexModelsRequest {
+@@ -83,44 +87,73 @@ export function normalizeCodexModel(entry: unknown): CodexModelSummary | null {
+ 
+ interface CacheEntry {
+     expiresAt: number;
++    fingerprint: string;
+     models: CodexModelSummary[];
+ }
+ 
+-// The Codex catalog is account-scoped and changes rarely. Each uncached call
+-// spawns a fresh `codex app-server` subprocess and validates the ChatGPT
+-// session, which can take 2-30s when a token refresh or network round trip is
+-// involved. Cache successful lists for 5 minutes (same shape as the opencode
+-// model cache) and coalesce concurrent requests into a single spawn.
+-const CACHE_TTL_MS = 5 * 60_000;
++// A model lookup starts a fresh app-server. Keep successful discovery for a
++// day, but discard it as soon as local auth, config, or the configured model
++// catalog changes. File checks happen only when discovery is requested.
++const CACHE_TTL_MS = 24 * 60 * 60_000;
+ const cache = new Map<boolean, CacheEntry>();
+-const inflight = new Map<boolean, Promise<CodexModelSummary[]>>();
++const inflight = new Map<boolean, { fingerprint: string; promise: Promise<CodexModelSummary[]> }>();
++
++async function readOptionalFile(path: string): Promise<Buffer | null> {
++    try {
++        return await readFile(path);
++    } catch (error) {
++        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
++        throw error;
++    }
++}
++
++async function catalogFingerprint(): Promise<string> {
++    const home = resolveCodexHome();
++    const config = await readOptionalFile(join(home, 'config.toml'));
++    const auth = await readOptionalFile(join(home, 'auth.json'));
++    const rootConfig = config?.toString('utf8').split(/^\s*\[/m, 1)[0] ?? '';
++    const rawPath = rootConfig.match(/^\s*model_catalog_json\s*=\s*("(?:[^"\\]|\\.)*"|'[^']*')/m)?.[1];
++    let catalogPath: string | undefined;
++    if (rawPath) {
++        catalogPath = rawPath.startsWith('"') ? JSON.parse(rawPath) as string : rawPath.slice(1, -1);
++    }
++    const catalog = catalogPath ? await readOptionalFile(resolve(home, catalogPath)) : null;
++    const hash = createHash('sha256');
++    for (const value of [home, config, auth, catalogPath, catalog]) {
++        hash.update(value === null || value === undefined ? 'missing' : value);
++        hash.update('\0');
++    }
++    return hash.digest('hex');
++}
+ 
+ export async function listCodexModels(includeHidden: boolean = false): Promise<CodexModelSummary[]> {
++    const fingerprint = await catalogFingerprint();
+     const cached = cache.get(includeHidden);
+-    if (cached && cached.expiresAt > Date.now()) {
++    if (cached && cached.fingerprint === fingerprint && cached.expiresAt > Date.now()) {
+         return cached.models;
+     }
+ 
+     const existing = inflight.get(includeHidden);
+-    if (existing) {
+-        return existing;
++    if (existing?.fingerprint === fingerprint) {
++        return existing.promise;
+     }
+ 
+     const promise = fetchCodexModelsFromAppServer(includeHidden)
+         .then((models) => {
+-            if (models.length > 0) {
++            if (models.length > 0 && inflight.get(includeHidden)?.promise === promise) {
+                 cache.set(includeHidden, {
+                     expiresAt: Date.now() + CACHE_TTL_MS,
++                    fingerprint,
+                     models
+                 });
+             }
+             return models;
+         })
+         .finally(() => {
+-            inflight.delete(includeHidden);
++            if (inflight.get(includeHidden)?.promise === promise) inflight.delete(includeHidden);
+         });
+ 
+-    inflight.set(includeHidden, promise);
++    inflight.set(includeHidden, { fingerprint, promise });
+     return promise;
+ }
+ 
+diff --git a/hub/src/web/routes/sessions.test.ts b/hub/src/web/routes/sessions.test.ts
+index 97b9a69de..b6ee8ded7 100644
+--- a/hub/src/web/routes/sessions.test.ts
++++ b/hub/src/web/routes/sessions.test.ts
+@@ -3,6 +3,7 @@ import { Hono } from 'hono'
+ import type { Session, SyncEngine } from '../../sync/syncEngine'
+ import type { WebAppEnv } from '../middleware/auth'
+ import { createSessionsRoutes } from './sessions'
++import { RpcTargetMissingError } from '../../sync/rpcGateway'
+ 
+ function createSession(overrides?: Partial<Session>): Session {
+     const baseMetadata = {
+@@ -374,6 +375,24 @@ describe('sessions routes', () => {
+         })
+     })
+ 
++    it('returns a stable code when the Codex session model RPC target is absent', async () => {
++        const session = createSession()
++        const { app } = createApp(session, {
++            listCodexModelsForSession: async () => {
++                throw new RpcTargetMissingError('session-1:listCodexModels', 'handler-not-registered')
++            }
++        })
++
++        const response = await app.request('/api/sessions/session-1/codex-models')
++
++        expect(response.status).toBe(503)
++        expect(await response.json()).toEqual({
++            success: false,
++            error: 'RPC handler not registered: session-1:listCodexModels',
++            code: 'rpc_target_missing'
++        })
++    })
++
+     it('returns the machine-scoped Cursor chat store status', async () => {
+         const session = createSession({
+             active: false,
+diff --git a/hub/src/web/routes/sessions.ts b/hub/src/web/routes/sessions.ts
+index 9d9e79848..a68fd815e 100644
+--- a/hub/src/web/routes/sessions.ts
++++ b/hub/src/web/routes/sessions.ts
+@@ -26,10 +26,11 @@ import {
+     toSessionSummary,
+     UploadFileRequestSchema
+ } from '@hapi/protocol'
+-import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
++import { RPC_METHODS, RPC_TARGET_MISSING_ERROR_CODE } from '@hapi/protocol/rpcMethods'
+ import type { SlashCommand } from '@hapi/protocol/apiTypes'
+ import { Hono, type Context } from 'hono'
+ import type { SyncEngine, Session } from '../../sync/syncEngine'
++import { RpcTargetMissingError } from '../../sync/rpcGateway'
+ import type { WebAppEnv } from '../middleware/auth'
+ import { loadScratchlistAttachmentLimitsFromEnv } from '../../config/scratchlistAttachmentLimits'
+ import { validateScratchlistAttachmentsForWrite, scratchlistSessionBytesBeforeForPut } from '../../scratchlistAttachments/validate'
+@@ -1400,6 +1401,13 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
+             const result = await engine.listCodexModelsForSession(sessionResult.sessionId)
+             return c.json(result)
+         } catch (error) {
++            if (error instanceof RpcTargetMissingError) {
++                return c.json({
++                    success: false,
++                    error: error.message,
++                    code: RPC_TARGET_MISSING_ERROR_CODE
++                }, 503)
++            }
+             return c.json({
+                 success: false,
+                 error: error instanceof Error ? error.message : 'Failed to list Codex models'
+diff --git a/web/src/components/SessionChat.tsx b/web/src/components/SessionChat.tsx
+index af161fb18..fec0b9f16 100644
+--- a/web/src/components/SessionChat.tsx
++++ b/web/src/components/SessionChat.tsx
+@@ -1003,6 +1003,7 @@ function SessionChatInner(props: SessionChatProps) {
+         api: props.api,
+         sessionId: props.session.id,
+         machineId: props.session.metadata?.machineId ?? null,
++        preferSession: props.session.metadata?.capabilities?.concurrentClients === true,
+         enabled: agentFlavor === 'codex' && props.session.active && !controlledByUser
+     })
+     const effectiveCodexServiceTier = agentFlavor === 'codex'
+diff --git a/web/src/hooks/queries/useCodexModels.test.tsx b/web/src/hooks/queries/useCodexModels.test.tsx
+index e0d0094ea..fc66fe56e 100644
+--- a/web/src/hooks/queries/useCodexModels.test.tsx
++++ b/web/src/hooks/queries/useCodexModels.test.tsx
+@@ -21,6 +21,49 @@ function createQueryClient(): QueryClient {
+ }
+ 
+ describe('useCodexModels query scoping', () => {
++    it('uses a shared session connection before machine discovery', async () => {
++        const getMachineCodexModels = vi.fn()
++        const getSessionCodexModels = vi.fn(async () => ({
++            success: true,
++            models: [{ id: 'session-model', displayName: 'Session Model', isDefault: true }]
++        }))
++        const api = { getMachineCodexModels, getSessionCodexModels } as unknown as ApiClient
++
++        const result = renderHook(() => useCodexModels({
++            api,
++            sessionId: 'session-1',
++            machineId: 'machine-1',
++            preferSession: true,
++            enabled: true
++        }), { wrapper: wrapper(createQueryClient()) })
++
++        await waitFor(() => expect(result.result.current.models[0]?.id).toBe('session-model'))
++        expect(getSessionCodexModels).toHaveBeenCalledWith('session-1')
++        expect(getMachineCodexModels).not.toHaveBeenCalled()
++    })
++
++    it('uses machine discovery when a shared session has no model RPC', async () => {
++        const getSessionCodexModels = vi.fn(async () => {
++            throw new ApiError('session RPC unavailable', 503, RPC_TARGET_MISSING_ERROR_CODE)
++        })
++        const getMachineCodexModels = vi.fn(async () => ({
++            success: true,
++            models: [{ id: 'machine-model', displayName: 'Machine Model', isDefault: true }]
++        }))
++        const api = { getMachineCodexModels, getSessionCodexModels } as unknown as ApiClient
++
++        const result = renderHook(() => useCodexModels({
++            api,
++            sessionId: 'session-1',
++            machineId: 'machine-1',
++            preferSession: true,
++            enabled: true
++        }), { wrapper: wrapper(createQueryClient()) })
++
++        await waitFor(() => expect(result.result.current.models[0]?.id).toBe('machine-model'))
++        expect(getMachineCodexModels).toHaveBeenCalledTimes(1)
++    })
++
+     it('shares machine-backed discovery across sessions on the same machine', async () => {
+         const getMachineCodexModels = vi.fn(async () => ({
+             success: true,
+diff --git a/web/src/hooks/queries/useCodexModels.ts b/web/src/hooks/queries/useCodexModels.ts
+index 17aef52ef..e28d32c45 100644
+--- a/web/src/hooks/queries/useCodexModels.ts
++++ b/web/src/hooks/queries/useCodexModels.ts
+@@ -8,6 +8,7 @@ export function useCodexModels(args: {
+     api: ApiClient | null
+     sessionId?: string | null
+     machineId?: string | null
++    preferSession?: boolean
+     enabled?: boolean
+ }): {
+     models: CodexModelSummary[]
+@@ -16,6 +17,7 @@ export function useCodexModels(args: {
+ } {
+     const { api, sessionId, machineId } = args
+     const enabled = Boolean(args.enabled && api && (sessionId || machineId))
++    const preferSession = Boolean(enabled && args.preferSession && sessionId)
+ 
+     const machineQuery = useQuery({
+         queryKey: queryKeys.machineCodexModels(machineId ?? 'unknown'),
+@@ -28,16 +30,17 @@ export function useCodexModels(args: {
+             }
+             throw new Error('Codex models target unavailable')
+         },
+-        enabled: Boolean(enabled && machineId),
++        enabled: Boolean(enabled && machineId && !preferSession),
+         staleTime: 30_000,
+         retry: false,
+     })
+ 
+-    // Successful machine discovery stays shared across chats and New Session.
+-    // Only an absent machine RPC unlocks the per-session neutral fallback.
+-    const useSessionFallback = Boolean(
++    // Legacy sessions use the shared machine catalog. A shared session uses
++    // its live app-server; only missing RPC targets need the other route.
++    const useLegacySessionFallback = Boolean(
+         enabled
+         && sessionId
++        && !preferSession
+         && (!machineId || (
+             machineQuery.error instanceof ApiError
+             && machineQuery.error.code === RPC_TARGET_MISSING_ERROR_CODE
+@@ -46,19 +49,24 @@ export function useCodexModels(args: {
+     const sessionQuery = useQuery({
+         queryKey: queryKeys.sessionCodexModels(sessionId ?? 'unknown'),
+         queryFn: async () => {
+-            if (!api) {
++            if (!api || !sessionId) {
+                 throw new Error('API unavailable')
+             }
+-            if (sessionId) {
++            try {
+                 return await api.getSessionCodexModels(sessionId)
++            } catch (error) {
++                if (preferSession && machineId && error instanceof ApiError
++                    && error.code === RPC_TARGET_MISSING_ERROR_CODE) {
++                    return await api.getMachineCodexModels(machineId)
++                }
++                throw error
+             }
+-            throw new Error('Codex models fallback target unavailable')
+         },
+-        enabled: useSessionFallback,
++        enabled: Boolean(preferSession || useLegacySessionFallback),
+         staleTime: 30_000,
+         retry: false,
+     })
+-    const query = useSessionFallback ? sessionQuery : machineQuery
++    const query = preferSession || useLegacySessionFallback ? sessionQuery : machineQuery
+ 
+     return {
+         models: query.data?.models ?? [],

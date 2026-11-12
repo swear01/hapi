@@ -1,0 +1,136 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Thu, 22 Oct 2026 05:08:23 +0000
+Subject: [PATCH 53/95] carry(upstream): PR #2077 fix(web): contain transient
+ scrollbar overflow during resize
+
+---
+ e2e/scrollbar-auto-hide.spec.ts               | 65 ++++++++++++++++++-
+ .../session-list-scrollbar-fixture.tsx        |  7 +-
+ web/src/index.css                             |  2 +
+ 3 files changed, 70 insertions(+), 4 deletions(-)
+
+diff --git a/e2e/scrollbar-auto-hide.spec.ts b/e2e/scrollbar-auto-hide.spec.ts
+index bd7d4c8cf..ea37c2821 100644
+--- a/e2e/scrollbar-auto-hide.spec.ts
++++ b/e2e/scrollbar-auto-hide.spec.ts
+@@ -11,7 +11,12 @@ async function expectScrollbarToHide(locator: Locator) {
+     }).toBeNull()
+ }
+ 
+-test.use({ ...devices['Pixel 5'], viewport: { width: 412, height: 915 }, deviceScaleFactor: 1 })
++test.use({
++    ...devices['Pixel 5'],
++    viewport: { width: 412, height: 915 },
++    deviceScaleFactor: 1,
++    launchOptions: { ignoreDefaultArgs: ['--hide-scrollbars'] }
++})
+ 
+ test.describe('session scrollbar auto-hide', () => {
+     test.describe.configure({ timeout: 60_000 })
+@@ -103,3 +108,61 @@ test.describe('session scrollbar auto-hide', () => {
+         await expect(fallback).toHaveAttribute('data-visible', 'true')
+     })
+ })
++
++for (const isMobile of [true, false]) {
++    test.describe(`touch scrollbar resize containment (mobile: ${isMobile})`, () => {
++        // A touch-capable desktop context also exercises physical scrollbars.
++        test.use({ isMobile, hasTouch: true })
++
++        test('keeps two expanded projects stable while the fallback thumb catches up with a shorter viewport', async ({ page }) => {
++            await page.addInitScript(() => localStorage.setItem('hapi-session-preview-limit', '99'))
++            await page.goto('/e2e-fixtures/session-list-scrollbar-fixture.html?two-projects')
++            const viewport = page.locator('.session-list-scrollbar-left')
++            await expect(viewport).toBeVisible()
++            await expect(viewport.locator('.collapsible-panel[data-open]')).toHaveCount(2)
++
++            const samples = await viewport.evaluate(async (element) => {
++                const root = document.documentElement
++                const toolbarHeight = element.getBoundingClientRect().top
++                const contentHeight = element.firstElementChild!.getBoundingClientRect().height
++                const height = contentHeight + toolbarHeight - 32
++                const setHeight = (value: number) => {
++                    root.style.height = `${value}px`
++                    document.body.style.height = `${value}px`
++                }
++                setHeight(height)
++                const nextFrame = () => new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
++                await nextFrame()
++                await nextFrame()
++                element.scrollTop = element.scrollHeight
++                await nextFrame()
++                await nextFrame()
++
++                const measure = () => ({
++                    width: element.getBoundingClientRect().width,
++                    bodyOverflow: document.body.scrollHeight - document.body.clientHeight,
++                    scrollTop: element.scrollTop
++                })
++                const frames = [measure()]
++                // Read layout synchronously after resizing, before ResizeObserver
++                // and the scheduled fallback-thumb update can run.
++                setHeight(height - 48)
++                element.scrollTop = element.scrollHeight
++                frames.push(measure())
++                for (let index = 0; index < 8; index++) {
++                    await nextFrame()
++                    frames.push(measure())
++                }
++                return frames
++            })
++
++            await test.info().attach('resize geometry', { body: JSON.stringify(samples), contentType: 'application/json' })
++
++            // The list must keep scrolling without making its ancestors scroll
++            // or changing its width, including before the thumb geometry updates.
++            expect(samples.every(sample => sample.scrollTop > 0)).toBe(true)
++            expect(samples.filter(sample => sample.bodyOverflow > 1)).toEqual([])
++            expect(samples.every(sample => sample.width === samples[0].width)).toBe(true)
++        })
++    })
++}
+diff --git a/web/e2e-fixtures/session-list-scrollbar-fixture.tsx b/web/e2e-fixtures/session-list-scrollbar-fixture.tsx
+index 6df92b3cb..f001b12aa 100644
+--- a/web/e2e-fixtures/session-list-scrollbar-fixture.tsx
++++ b/web/e2e-fixtures/session-list-scrollbar-fixture.tsx
+@@ -6,14 +6,15 @@ import { ToastProvider } from '../src/lib/toast-context'
+ import { SessionList } from '../src/components/SessionList'
+ import type { SessionSummary } from '../src/types/api'
+ 
+-const sessions: SessionSummary[] = Array.from({ length: 40 }, (_, index) => ({
++const twoProjects = new URLSearchParams(location.search).has('two-projects')
++const sessions: SessionSummary[] = Array.from({ length: twoProjects ? 16 : 40 }, (_, index) => ({
+     id: `session-list-scroll-${index}`,
+     active: true,
+     thinking: false,
+     activeAt: 1_700_000_000_000 - index,
+     updatedAt: 1_700_000_000_000 - index,
+     metadata: {
+-        path: '/work/hapi',
++        path: twoProjects ? (index < 9 ? '/work/project-a' : '/work/project-b') : '/work/hapi',
+         name: `Fixture session ${index + 1}`,
+         machineId: 'fixture-machine',
+         agentSessionId: `thread-${index}`
+@@ -43,7 +44,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
+     <QueryClientProvider client={queryClient}>
+         <ToastProvider>
+             <I18nProvider>
+-                <div className="flex h-screen min-h-0 flex-col">
++                <div className="flex h-full min-h-0 flex-col">
+                     <SessionList
+                         sessions={sessions}
+                         selectedSessionId={null}
+diff --git a/web/src/index.css b/web/src/index.css
+index 7bcb60236..97f22d590 100644
+--- a/web/src/index.css
++++ b/web/src/index.css
+@@ -367,6 +367,8 @@ html:has(.chat-scroll-y) #root {
+     bottom: 0;
+     z-index: 10;
+     width: 10px;
++    /* Stale thumb geometry during resize must not create outer scrollbars. */
++    overflow: hidden;
+     pointer-events: none;
+ }
+ 

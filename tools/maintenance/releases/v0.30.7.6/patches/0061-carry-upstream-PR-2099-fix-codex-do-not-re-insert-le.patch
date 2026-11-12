@@ -1,0 +1,518 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Thu, 22 Oct 2026 12:06:01 +0000
+Subject: [PATCH 61/95] carry(upstream): PR #2099 fix(codex): do not re-insert
+ legacy history on shared resume
+
+---
+ cli/src/agent/sessionFactory.test.ts          | 23 ++++-
+ cli/src/agent/sessionFactory.ts               |  6 ++
+ cli/src/codex/shared/projection.test.ts       |  9 ++
+ cli/src/codex/shared/projection.title.test.ts | 11 +++
+ cli/src/codex/shared/projection.ts            | 22 ++++-
+ cli/src/codex/shared/root.test.ts             | 97 +++++++++++++++++--
+ cli/src/codex/shared/root.ts                  | 51 ++++++++--
+ cli/src/codex/shared/runtime.ts               |  4 +-
+ shared/src/schemas.ts                         |  5 +
+ 9 files changed, 207 insertions(+), 21 deletions(-)
+
+diff --git a/cli/src/agent/sessionFactory.test.ts b/cli/src/agent/sessionFactory.test.ts
+index 7071698ba..2d86d692b 100644
+--- a/cli/src/agent/sessionFactory.test.ts
++++ b/cli/src/agent/sessionFactory.test.ts
+@@ -1,5 +1,5 @@
+ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+-import type { Session } from '@/api/types'
++import type { Metadata, Session } from '@/api/types'
+ 
+ const {
+     getSessionMock,
+@@ -341,6 +341,27 @@ describe('bootstrapExistingSession', () => {
+         )
+     })
+ 
++    it('derives metadata from the persisted row before overrides replace it', async () => {
++        const session = createSession()
++        session.metadata = { ...session.metadata!, codexSessionId: 'codex-thread-1' }
++        const sessionClient = { updateMetadata: vi.fn() }
++        getSessionMock.mockResolvedValue(session)
++        getOrCreateMachineMock.mockResolvedValue({ id: 'machine-1' })
++        sessionSyncClientMock.mockReturnValue(sessionClient)
++        readSettingsMock.mockResolvedValue({ machineId: 'machine-1' })
++        const baseline = { turns: [], before: 1, pending: [], capture: true }
++        const deriveMetadata = vi.fn((current: Metadata | null | undefined) =>
++            current?.capabilities?.concurrentClients ? {} : { codexHistoryBaseline: baseline })
++
++        const result = await bootstrapExistingSession({
++            sessionId: 'hapi-session-1', flavor: 'codex', workingDirectory: '/tmp/project', deriveMetadata,
++            metadataOverrides: { capabilities: { concurrentClients: true } }
++        })
++
++        expect(result.metadata).toMatchObject({ codexHistoryBaseline: baseline, capabilities: { concurrentClients: true } })
++        expect(sessionClient.updateMetadata.mock.calls[0][0](session.metadata)).toMatchObject({ codexHistoryBaseline: baseline })
++    })
++
+     it('advertises remote terminal capability in session metadata', () => {
+         const metadata = buildSessionMetadata({
+             flavor: 'codex',
+diff --git a/cli/src/agent/sessionFactory.ts b/cli/src/agent/sessionFactory.ts
+index f5e1513c0..74e0fccc2 100644
+--- a/cli/src/agent/sessionFactory.ts
++++ b/cli/src/agent/sessionFactory.ts
+@@ -203,6 +203,9 @@ function pickExistingSessionMetadata(metadata: Metadata | null | undefined): Par
+     if (metadata.conversationHistoryTurns !== undefined) {
+         preserved.conversationHistoryTurns = metadata.conversationHistoryTurns
+     }
++    if (metadata.codexHistoryBaseline !== undefined) {
++        preserved.codexHistoryBaseline = metadata.codexHistoryBaseline
++    }
+     if (metadata.conversationHistoryEntryIds !== undefined) {
+         preserved.conversationHistoryEntryIds = metadata.conversationHistoryEntryIds
+     }
+@@ -401,6 +404,8 @@ export async function bootstrapExistingSession(options: {
+     startedBy?: SessionStartedBy
+     workingDirectory: string
+     metadataOverrides?: Partial<Metadata>
++    /** Derived from the persisted row before `metadataOverrides` replace it. */
++    deriveMetadata?: (current: Metadata | null | undefined) => Partial<Metadata>
+ }): Promise<SessionBootstrapResult> {
+     await ensureHapiSessionControlSkill(options.flavor, options.workingDirectory)
+     const startedBy = options.startedBy ?? 'terminal'
+@@ -437,6 +442,7 @@ export async function bootstrapExistingSession(options: {
+             ...baseMetadata,
+             ...preserved,
+             ...options.metadataOverrides,
++            ...options.deriveMetadata?.(current),
+             capabilities: {
+                 ...baseMetadata.capabilities,
+                 ...preserved.capabilities,
+diff --git a/cli/src/codex/shared/projection.test.ts b/cli/src/codex/shared/projection.test.ts
+index 39b6e3681..dbe93bc0d 100644
+--- a/cli/src/codex/shared/projection.test.ts
++++ b/cli/src/codex/shared/projection.test.ts
+@@ -192,6 +192,15 @@ describe('shared history projection', () => {
+         expect(send).toHaveBeenCalledTimes(4);
+         expect(send.mock.calls.slice(0, 2)).toEqual(send.mock.calls.slice(2));
+     });
++    it('skips baseline turns but still acknowledges their user inputs (#2086)', async () => {
++        const send = vi.fn(); const user = vi.fn(); const committed = vi.fn(async () => {});
++        const session = { getMetadata: () => ({}), sendAgentMessage: send, sendUserMessage: user, updateMetadata() {} } as unknown as ApiSessionClient;
++        const projection = new SharedCodexProjection(session, 'thread', committed);
++        const items = [{ id: 'u', type: 'userMessage', clientId: 'local', content: [{ type: 'text', text: 'hi' }] }, { id: 'a', type: 'agentMessage', text: 'old' }];
++        await projection.history({ turns: [{ id: 'old', status: 'completed', items }] }, { turns: new Set(['old']), capture: false, before: 0 });
++        expect(committed).toHaveBeenCalledWith('local');
++        expect(send).not.toHaveBeenCalled(); expect(user).not.toHaveBeenCalled();
++    });
+     it('does not settle an active snapshot under the final message id', async () => {
+         const send = vi.fn();
+         const session = { getMetadata: () => ({}), sendAgentMessage: send } as unknown as ApiSessionClient;
+diff --git a/cli/src/codex/shared/projection.title.test.ts b/cli/src/codex/shared/projection.title.test.ts
+index f85985a46..3c010b2b4 100644
+--- a/cli/src/codex/shared/projection.title.test.ts
++++ b/cli/src/codex/shared/projection.title.test.ts
+@@ -111,6 +111,17 @@ describe('shared Codex titles', () => {
+         expect(f.update).toHaveBeenCalledTimes(1);
+     });
+ 
++    it('restores a historical title from a baseline turn without replaying it (#2086)', async () => {
++        const f = fixture();
++        f.update(metadata => {
++            const { name: _ignored, ...rest } = metadata;
++            return rest as Metadata;
++        });
++        await f.projection.history(history(titleItem('title', 'Legacy')), { turns: new Set(['turn']), capture: false, before: 0 });
++        expect(f.metadata().name).toBe('Legacy');
++        expect(f.send).not.toHaveBeenCalled();
++    });
++
+     it('never overwrites an existing display title during a cold history replay', async () => {
+         const f = fixture();
+         f.update(metadata => ({ ...metadata, summary: { text: 'Existing', updatedAt: 123 } }));
+diff --git a/cli/src/codex/shared/projection.ts b/cli/src/codex/shared/projection.ts
+index d95474736..7d2dfab27 100644
+--- a/cli/src/codex/shared/projection.ts
++++ b/cli/src/codex/shared/projection.ts
+@@ -33,6 +33,9 @@ function metadataHasDisplayTitle(metadata: { name?: string; summary?: { text: st
+     return Boolean(metadata?.name?.trim() || metadata?.summary?.text?.trim());
+ }
+ 
++// `before` (unix seconds) bounds capture to turns that predate the bind.
++export type HistoryBaseline = { turns: Set<string>; capture: boolean; before: number };
++
+ /** Canonical V2 stream only. Stable message IDs also deduplicate snapshot replay at the hub. */
+ export class SharedCodexProjection {
+     private converter = new AppServerEventConverter();
+@@ -215,7 +218,8 @@ export class SharedCodexProjection {
+         }
+     }
+ 
+-    async history(thread: unknown): Promise<void> {
++    /** Baseline turns were stored by HAPI before stable replay ids (no local id to match), so never replay them. */
++    async history(thread: unknown, baseline?: HistoryBaseline): Promise<void> {
+         const turns = record(thread).turns;
+         if (!Array.isArray(turns)) return;
+         const titleRevision = this.titleRevision;
+@@ -223,6 +227,12 @@ export class SharedCodexProjection {
+         for (const value of turns) {
+             const turn = record(value);
+             if (!Array.isArray(turn.items)) continue;
++            const turnId = string(turn.id);
++            const startedAt = typeof turn.startedAt === 'number' ? turn.startedAt : undefined;
++            if (turnId && baseline?.capture && turn.status !== 'inProgress' && (startedAt === undefined || startedAt < baseline.before)) {
++                baseline.turns.add(turnId);
++            }
++            const skip = Boolean(turnId && baseline?.turns.has(turnId));
+             for (const item of turn.items) {
+                 const params = { threadId: this.threadId, turnId: turn.id, item };
+                 const titleKey = `${string(turn.id) ?? 'thread'}:${record(item).id}`;
+@@ -230,7 +240,11 @@ export class SharedCodexProjection {
+                 if (!this.parentThreadId && string(record(item).id) && pendingTitle && !this.completedTitles.has(titleKey)) {
+                     this.pendingTitles.set(titleKey, pendingTitle);
+                 }
+-                await this.project('item/started', params, undefined, true);
++                // Stored before stable ids: emit nothing, but keep title repair
++                // and prove acceptance so a redelivered input never runs twice.
++                const clientId = string(record(item).clientId ?? record(item).clientUserMessageId);
++                if (!skip) await this.project('item/started', params, undefined, true);
++                else if (!this.parentThreadId && record(item).type === 'userMessage' && clientId) await this.committed(clientId);
+                 // Active snapshots can contain partial assistant text. Do not
+                 // settle it under the final stable id and suppress completion.
+                 if (turn.status !== 'inProgress' || record(item).status === 'completed' || record(item).type === 'userMessage') {
+@@ -242,10 +256,10 @@ export class SharedCodexProjection {
+                         }
+                         this.pendingTitles.delete(titleKey);
+                     }
+-                    await this.project('item/completed', params, undefined, true);
++                    if (!skip) await this.project('item/completed', params, undefined, true);
+                 }
+             }
+-            if (turn.status === 'completed' || turn.status === 'interrupted' || turn.status === 'failed') {
++            if (!skip && (turn.status === 'completed' || turn.status === 'interrupted' || turn.status === 'failed')) {
+                 await this.notification('turn/completed', { threadId: this.threadId, turn });
+             }
+         }
+diff --git a/cli/src/codex/shared/root.test.ts b/cli/src/codex/shared/root.test.ts
+index a52ba2d1c..b4e808ec7 100644
+--- a/cli/src/codex/shared/root.test.ts
++++ b/cli/src/codex/shared/root.test.ts
+@@ -3,17 +3,20 @@ import { mkdtemp, rm } from 'node:fs/promises';
+ import type { ApiSessionClient } from '@/api/apiSession';
+ import type { AgentState, Metadata } from '@/api/types';
+ import type { SessionBootstrapResult } from '@/agent/sessionFactory';
+-import { SharedCodexRoot, type RootHost } from './root';
++import { SharedCodexRoot, legacyHistoryCapture, type RootHost } from './root';
+ import { codexPlanProposalId } from './plan';
+ import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
+ import { SharedRewindBarrier } from './rewind';
+ 
+-type NativeTurn = { id: string; status: string; items: unknown[] };
++type NativeTurn = { id: string; status: string; items: unknown[]; startedAt?: number };
+ 
+ vi.mock('../codexAppServerClient', () => ({
+     CodexAppServerClient: class {
+         initialized = false;
+         thread = { id: 'thread', historyMode: 'legacy', turns: [] as NativeTurn[] };
++        children: Record<string, NativeTurn[]> = {};
++        failReads = false;
++        failChildren = false;
+         settings: Record<string, unknown> = { model: 'mock', collaborationMode: { mode: 'default' } };
+         queue: Array<{ id: string; clientUserMessageId: unknown; input: unknown }> = [];
+         notify?: (method: string, params: unknown) => void;
+@@ -28,8 +31,13 @@ vi.mock('../codexAppServerClient', () => ({
+         async disconnect() { this.initialized = false; }
+         async supportsMethod() { return true; }
+         async request(method: string, params: Record<string, unknown> = {}) {
++            const child = typeof params.threadId === 'string' ? this.children[params.threadId] : undefined;
++            if (method === 'thread/read' && params.includeTurns && this.failReads) throw new Error('read failed');
++            if (method === 'thread/read' && child && params.includeTurns && this.failChildren) throw new Error('child read failed');
++            if (method === 'thread/read' && child) return { thread: { id: params.threadId, parentThreadId: 'thread', turns: structuredClone(child) } };
+             if (method === 'thread/read' || method === 'thread/resume') return { ...this.settings, thread: structuredClone(this.thread) };
+-            if (method === 'thread/list') return { data: [] };
++            if (method === 'thread/list') return { data: Object.keys(this.children).map(id => ({ id, parentThreadId: 'thread' })) };
++            if (method === 'thread/loaded/list') return { data: [] };
+             if (method === 'thread/queue/list') return { data: this.queue };
+             if (method === 'thread/goal/get') return { goal: null };
+             if (method === 'thread/turns/list') return { data: structuredClone(this.thread.turns) };
+@@ -65,10 +73,14 @@ afterEach(async () => {
+     finally { vi.useRealTimers(); }
+ });
+ 
+-async function fixture(opts?: { hubArchived?: boolean; end?: RootHost['end'] }) {
++type NativeSetup = { turns?: NativeTurn[]; children?: Record<string, NativeTurn[]>; failReads?: boolean; failChildren?: boolean };
++// What bootstrapping a pre-shared launcher row produces.
++const legacy = (): Partial<Metadata> => ({ codexSessionId: 'thread', ...legacyHistoryCapture({ path: '/repo', host: 'test', codexSessionId: 'thread' }) });
++
++async function fixture(opts?: { hubArchived?: boolean; end?: RootHost['end']; metadata?: Partial<Metadata>; native?: NativeSetup; bindMayFail?: boolean }) {
+     const directory = await mkdtemp('/tmp/hapi-shared-root-');
+     let state: AgentState = { steeringActive: true };
+-    let metadata: Metadata = { path: directory, host: 'test', flavor: 'codex' };
++    let metadata: Metadata = { path: directory, host: 'test', flavor: 'codex', ...opts?.metadata };
+     let reconnect: (() => void) | null = null;
+     const updateState = vi.fn((fn: (value: AgentState) => AgentState) => { state = fn(state); });
+     const rpc = new Map<string, (raw: unknown) => Promise<unknown>>();
+@@ -90,22 +102,26 @@ async function fixture(opts?: { hubArchived?: boolean; end?: RootHost['end'] })
+         sendSessionDeath() {}, async flush() {}, close() {}
+     } as unknown as ApiSessionClient;
+     const end = opts?.end ?? (async () => { throw new Error('Unexpected root archive'); });
+-    const root = new SharedCodexRoot({ session, workingDirectory: directory } as SessionBootstrapResult, {
++    const root = new SharedCodexRoot({ session, workingDirectory: directory, metadata } as SessionBootstrapResult, {
+         directory, generation: 'test', endpoint: 'mock', settingsFor: () => undefined,
+         create: async () => { throw new Error('Unexpected root creation'); },
+         end
+     } satisfies RootHost);
+     cleanups.push(async () => { await root.close(false); await rm(directory, { recursive: true, force: true }); });
+     await root.prepare();
+-    await root.bind('thread', { model: 'mock', thread: { turns: [] } }, false);
+     const native = root.client as unknown as {
+         initialized: boolean;
+         thread: { id: string; historyMode: string; turns: NativeTurn[] };
++        children: Record<string, NativeTurn[]>;
++        failReads: boolean;
++        failChildren: boolean;
+         queue: Array<{ id: string; clientUserMessageId: string; input: unknown }>;
+         notify(method: string, params: unknown): void;
+         abandoned(): void;
+         serverRequest(request: { id: number; method: string; params: unknown }): void;
+     };
++    native.thread.turns = opts?.native?.turns ?? []; native.children = opts?.native?.children ?? {}; native.failReads = opts?.native?.failReads ?? false; native.failChildren = opts?.native?.failChildren ?? false;
++    await root.bind('thread', { model: 'mock', thread: { turns: [] } }, false).catch(error => { if (!opts?.bindMayFail) throw error; });
+     return {
+         root, native, rpc, send, metadata: () => metadata, state: () => state, updateState,
+         reconnect: () => reconnect?.(),
+@@ -379,6 +395,73 @@ describe('shared plan actions', () => {
+         expect(f.state().codexPlanProposalId).toBeNull();
+     });
+ 
++    it('does not replay history stored before stable ids, then replays new turns (#2086)', async () => {
++        const old = { id: 'old', status: 'completed', items: [{ id: 'a', type: 'agentMessage', text: 'stored without local id' }] };
++        const f = await fixture({ metadata: legacy(), native: { turns: [old] } });
++        expect(f.send).not.toHaveBeenCalled();
++        expect(f.metadata().codexHistoryBaseline).toMatchObject({ turns: ['old'], pending: [] });
++        f.native.thread.turns.push({ id: 'new', status: 'completed', items: [{ id: 'b', type: 'agentMessage', text: 'fresh' }] });
++        await f.root.refresh();
++        expect(f.send.mock.calls.filter(([body]) => body.message).map(([body]) => body.message)).toEqual(['fresh']);
++    });
++
++    it('imports native history into a newly bound session', async () => {
++        const f = await fixture({ native: { turns: [{ id: 'old', status: 'completed', items: [{ id: 'a', type: 'agentMessage', text: 'native only' }] }] } });
++        expect(f.send.mock.calls.filter(([body]) => body.message).map(([body]) => body.message)).toEqual(['native only']);
++        expect(f.metadata().codexHistoryBaseline).toMatchObject({ turns: [], pending: [] });
++    });
++
++    it('keeps stable-id replay for sessions already created by the shared launcher', async () => {
++        expect(legacyHistoryCapture({ path: '/repo', host: 'test', codexSessionId: 'thread', capabilities: { concurrentClients: true } })).toEqual({});
++        const f = await fixture({ metadata: { codexSessionId: 'thread' },
++            native: { turns: [{ id: 'unseen', status: 'completed', items: [{ id: 'a', type: 'agentMessage', text: 'undelivered' }] }] } });
++        expect(f.send.mock.calls.filter(([body]) => body.message).map(([body]) => body.message)).toEqual(['undelivered']);
++        expect(f.metadata().codexHistoryBaseline).toMatchObject({ turns: [], pending: [] });
++    });
++
++    it('records the empty baseline with the thread before an interruptible first import', async () => {
++        const f = await fixture({ native: { failReads: true }, bindMayFail: true });
++        expect(f.metadata()).toMatchObject({ codexSessionId: 'thread', codexHistoryBaseline: { turns: [] } });
++    });
++
++    it('resumes an interrupted first legacy capture after a restart', async () => {
++        const old = { id: 'old', status: 'completed', items: [{ id: 'a', type: 'agentMessage', text: 'stored without local id' }] };
++        const first = await fixture({ metadata: legacy(), native: { turns: [old], failReads: true }, bindMayFail: true });
++        expect(first.metadata().codexHistoryBaseline).toMatchObject({ capture: true });
++        const restarted = await fixture({ metadata: first.metadata(), native: { turns: [old] } });
++        expect(restarted.send).not.toHaveBeenCalled();
++        expect(restarted.metadata().codexHistoryBaseline).toMatchObject({ turns: ['old'], capture: false });
++    });
++
++    it('keeps capturing a legacy child whose history read failed', async () => {
++        const childTurns = [{ id: 'child-turn', status: 'completed', items: [{ id: 'c', type: 'agentMessage', text: 'stored child' }] }];
++        const f = await fixture({ metadata: legacy(), native: { children: { child: childTurns }, failChildren: true } });
++        expect(f.metadata().codexHistoryBaseline).toMatchObject({ turns: [], pending: ['child'] });
++        f.native.failChildren = false; f.native.initialized = false; f.native.abandoned();
++        await vi.waitFor(() => expect(f.metadata().codexHistoryBaseline).toMatchObject({ turns: ['child-turn'], pending: [] }));
++        expect(f.send).not.toHaveBeenCalled();
++    });
++
++    it('never absorbs a child turn started after the bind into a delayed capture', async () => {
++        const childTurns = [{ id: 'child-turn', status: 'completed', items: [{ id: 'c', type: 'agentMessage', text: 'stored child' }] }];
++        const f = await fixture({ metadata: legacy(), native: { children: { child: childTurns }, failChildren: true } });
++        f.native.children.child.push({ id: 'missed', status: 'completed', startedAt: Math.floor(Date.now() / 1000) + 1,
++            items: [{ id: 'm', type: 'agentMessage', text: 'during gap' }] });
++        f.native.failChildren = false; f.native.initialized = false; f.native.abandoned();
++        await vi.waitFor(() => expect(f.metadata().codexHistoryBaseline).toMatchObject({ turns: ['child-turn'], pending: [] }));
++        expect(f.send.mock.calls.filter(([body]) => body.message).map(([body]) => body.message.message)).toEqual(['during gap']);
++    });
++
++    it('keeps the original cutoff and pending children across a restart', async () => {
++        const childTurns: NativeTurn[] = [{ id: 'child-turn', status: 'completed', items: [{ id: 'c', type: 'agentMessage', text: 'stored child' }] }];
++        const first = await fixture({ metadata: legacy(), native: { children: { child: childTurns }, failChildren: true } });
++        const baseline = first.metadata().codexHistoryBaseline!;
++        const restarted = await fixture({ metadata: { codexSessionId: 'thread', codexHistoryBaseline: baseline }, native: { children: { child: [...childTurns,
++            { id: 'missed', status: 'completed', startedAt: baseline.before + 1, items: [{ id: 'm', type: 'agentMessage', text: 'during gap' }] }] } } });
++        expect(restarted.metadata().codexHistoryBaseline).toEqual({ turns: ['child-turn'], before: baseline.before, pending: [], capture: false });
++        expect(restarted.send.mock.calls.filter(([body]) => body.message).map(([body]) => body.message.message)).toEqual(['during gap']);
++    });
++
+     it('uses only the latest root turn when replaying history', async () => {
+         const f = await fixture();
+         const id = await completePlan(f);
+diff --git a/cli/src/codex/shared/root.ts b/cli/src/codex/shared/root.ts
+index 0a41be94a..a1dd00e8a 100644
+--- a/cli/src/codex/shared/root.ts
++++ b/cli/src/codex/shared/root.ts
+@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
+ import { z } from 'zod';
+ import type { SessionBootstrapResult } from '@/agent/sessionFactory';
+ import type { ApiSessionClient } from '@/api/apiSession';
++import type { Metadata } from '@/api/types';
+ import { logger } from '@/ui/logger';
+ import { listSlashCommands } from '@/modules/common/slashCommands';
+ import { normalizeCodexModel } from '@/modules/common/codexModels';
+@@ -17,7 +18,7 @@ import { resolveCodexSlashCommand } from '../utils/slashCommands';
+ import { parseReasoningEffortValue } from '../utils/reasoningEffort';
+ import { SharedCodexPermissions } from './permissions';
+ import { SharedCodexQueue } from './queue';
+-import { SharedCodexProjection, inputText } from './projection';
++import { SharedCodexProjection, inputText, type HistoryBaseline } from './projection';
+ import { CodexSessionTitles } from '../utils/codexSessionTitles';
+ import { record, string } from './gateway';
+ import { initializeSharedClient, type SharedLaunchOptions } from './launch';
+@@ -42,6 +43,15 @@ const SettingsSchema = z.object({
+ });
+ 
+ /** One immutable HAPI identity + independent subscription for one root. */
++/**
++ * The pre-shared launcher stored history without local ids (#2086). Mark the
++ * one-time capture in bootstrap's own write, before it claims concurrentClients.
++ */
++export function legacyHistoryCapture(current: Metadata | null | undefined): Partial<Metadata> {
++    if (current?.codexHistoryBaseline || !current?.codexSessionId || current.capabilities?.concurrentClients) return {};
++    return { codexHistoryBaseline: { turns: [], before: Math.floor(Date.now() / 1000), pending: [], capture: true } };
++}
++
+ export class SharedCodexRoot {
+     readonly client: CodexAppServerClient;
+     readonly session: ApiSessionClient;
+@@ -53,6 +63,9 @@ export class SharedCodexRoot {
+     private queue!: SharedCodexQueue;
+     private projection!: SharedCodexProjection;
+     private readonly children = new Map<string, SharedCodexProjection>();
++    private readonly historyBaseline: HistoryBaseline = { turns: new Set(), capture: false, before: 0 };
++    // Legacy children whose history could not be read yet; captured on a later read.
++    private readonly uncapturedChildren = new Set<string>();
+     private readonly ancestry = new Map<string, string | null>();
+     private heartbeat?: ReturnType<typeof setInterval>;
+     private work: Promise<unknown> = Promise.resolve();
+@@ -228,7 +241,18 @@ export class SharedCodexRoot {
+             ids => this.session.setSteerDeliveryState(ids, 'queued'));
+         await this.queue.load();
+         this.projection = new SharedCodexProjection(this.session, threadId, id => this.queue.committed(id));
+-        this.session.updateMetadata(metadata => ({ ...metadata, codexSessionId: threadId, capabilities: {
++        const bootstrapped = this.bootstrap.metadata;
++        const capturing = bootstrapped?.codexHistoryBaseline?.capture === true && bootstrapped.codexSessionId === threadId;
++        const prior = capturing || !bootstrapped?.codexHistoryBaseline?.capture ? bootstrapped?.codexHistoryBaseline : undefined;
++        for (const turn of prior?.turns ?? []) this.historyBaseline.turns.add(turn);
++        for (const id of prior?.pending ?? []) this.uncapturedChildren.add(id);
++        this.historyBaseline.capture = capturing;
++        // Durable cutoff: a delayed capture never absorbs a turn HAPI has not stored.
++        this.historyBaseline.before = prior?.before ?? Math.floor(Date.now() / 1000);
++        // A fresh binding records its empty baseline atomically with the
++        // thread id, so an interrupted import is never mistaken for legacy.
++        this.session.updateMetadata(metadata => ({ ...metadata, codexSessionId: threadId,
++            ...(!prior && !capturing ? { codexHistoryBaseline: { turns: [], before: this.historyBaseline.before, pending: [] } } : {}), capabilities: {
+             ...metadata.capabilities, concurrentClients: true, terminal: true,
+             conversationHistory: { forkCurrent: true, forkAtMessage: true, rewindToMessage: false }
+         } }));
+@@ -239,9 +263,15 @@ export class SharedCodexRoot {
+         if (subscribe) response = record(await this.client.request('thread/resume', { threadId }));
+         this.acceptSettings(response); this.acceptSettings(this.host.settingsFor(threadId) ?? {});
+         if (!this.rewindBarrier.blocked && this.session.getMetadata()?.conversationHistoryDiverged !== true) {
+-            await this.projection.history(response.thread); await this.refresh(); await this.refreshChildren(true);
++            await this.projection.history(response.thread, this.historyBaseline); await this.refresh(); await this.refreshChildren(true);
++            this.historyBaseline.capture = false;
++            if (capturing) this.persistBaseline();
+         }
+     }
++    private persistBaseline(): void {
++        const baseline = { turns: [...this.historyBaseline.turns], before: this.historyBaseline.before, pending: [...this.uncapturedChildren], capture: false };
++        this.session.updateMetadata(metadata => ({ ...metadata, codexHistoryBaseline: baseline }));
++    }
+     async activate(options: SharedLaunchOptions = {}): Promise<void> {
+         // Restored input cannot run before the cold-resume settings are applied.
+         if (!this.rewindBarrier.blocked) await this.initialSettings(options);
+@@ -361,7 +391,7 @@ export class SharedCodexRoot {
+             const id = string(last?.id);
+             this.latestTurn = id && last ? { id, status: string(last.status) ?? 'unknown', planId: planProposalForTurn(this.threadId, last) } : undefined;
+         }
+-        await this.projection.history(thread); await this.queue.reconcile(); this.alive();
++        await this.projection.history(thread, this.historyBaseline); await this.queue.reconcile(); this.alive();
+     }
+     private async refreshChildren(subscribe: boolean): Promise<void> {
+         if (this.rewindBarrier.blocked) return;
+@@ -388,13 +418,20 @@ export class SharedCodexRoot {
+             for (const id of Array.isArray(page.data) ? page.data : []) if (typeof id === 'string') loaded.add(id);
+             cursor = string(page.nextCursor);
+         } while (cursor);
++        const pending = this.uncapturedChildren.size;
+         for (const [id, projection] of this.children) {
++            const capture = this.historyBaseline.capture || this.uncapturedChildren.has(id);
+             // Replaying a completed/unloaded child must not start its engine.
+             try {
+                 if (subscribe && loaded.has(id)) await this.client.request('thread/resume', { threadId: id });
+-                projection.reset(); await projection.history(await this.readThread(id));
+-            } catch (error) { logger.debug('[Codex shared] child history unavailable', { id, error }); }
++                projection.reset(); await projection.history(await this.readThread(id), { ...this.historyBaseline, capture });
++                this.uncapturedChildren.delete(id);
++            } catch (error) {
++                if (capture) this.uncapturedChildren.add(id);
++                logger.debug('[Codex shared] child history unavailable', { id, error });
++            }
+         }
++        if (pending && pending !== this.uncapturedChildren.size) this.persistBaseline();
+     }
+     nativeQueueDeleted(nativeId: string): Promise<void> { return this.queue.deleted(nativeId); }
+     /** Native terminal operations participate in the same root barrier as Web RPCs. */
+@@ -670,7 +707,7 @@ export class SharedCodexRoot {
+             this.currentTurn = undefined;
+             this.latestTurn = lastId ? { id: lastId, status: string(last.status) ?? 'unknown', planId: planProposalForTurn(this.threadId, last) } : undefined;
+             this.interrupted = last.status === 'interrupted';
+-            await this.projection.history(thread);
++            await this.projection.history(thread, this.historyBaseline);
+             if (await this.session.flush() === false) throw new Error('Hub history reconciliation acknowledgement is unavailable');
+         });
+         this.deferredRequests = [];
+diff --git a/cli/src/codex/shared/runtime.ts b/cli/src/codex/shared/runtime.ts
+index 0a58cefc3..6d83b7dc2 100644
+--- a/cli/src/codex/shared/runtime.ts
++++ b/cli/src/codex/shared/runtime.ts
+@@ -13,7 +13,7 @@ import { CodexAppServerClient, isIndeterminateError } from '../codexAppServerCli
+ import { codexHome, saveRuntime, runtimeDirectory, runtimeAuthHash, findColdBinding, withThreadOwnership, type CodexRuntimeRecord } from './registry';
+ import { startCodexGateway, record, string, type Envelope } from './gateway';
+ import { resolveSharedCodex, sharedLaunchConfig, initializeSharedClient, checkSharedCapabilities, takeReservedSessionId, type SharedLaunchOptions } from './launch';
+-import { SharedCodexRoot } from './root';
++import { SharedCodexRoot, legacyHistoryCapture } from './root';
+ import { isNativeHistoryRead } from './rewind';
+ 
+ export type RuntimeReady = { sessionId: string; runtime: CodexRuntimeRecord };
+@@ -177,7 +177,7 @@ export async function runSharedRuntime(options: SharedLaunchOptions, onReady?: (
+         // create()/fork must mint a fresh row, not re-adopt (#1911 Opus Major).
+         const reservedSessionId = takeReservedSessionId(options);
+         const bootstrap = existingSessionId
+-            ? await bootstrapExistingSession({ ...shared, sessionId: existingSessionId })
++            ? await bootstrapExistingSession({ ...shared, sessionId: existingSessionId, deriveMetadata: legacyHistoryCapture })
+             : await bootstrapSession({
+                 ...shared,
+                 reservedSessionId,
+diff --git a/shared/src/schemas.ts b/shared/src/schemas.ts
+index 39fb0e8a3..5d22d7c65 100644
+--- a/shared/src/schemas.ts
++++ b/shared/src/schemas.ts
+@@ -170,6 +170,11 @@ export const MetadataSchema = z.object({
+     conversationHistoryIndexes: z.record(z.string(), z.number().int().nonnegative()).optional(),
+     // Codex localId → turnId mapping (durable across runner relaunches).
+     conversationHistoryTurns: z.record(z.string(), z.string().min(1)).optional(),
++    // Codex turns stored before stable replay ids; history replay skips them.
++    // `before` (unix seconds) bounds capture; `pending` children are not captured
++    // yet; `capture` marks a legacy session whose first capture has not committed.
++    codexHistoryBaseline: z.object({ turns: z.array(z.string()), before: z.number(), pending: z.array(z.string()),
++        capture: z.boolean().optional() }).optional(),
+     // Pi localId → append-only session entry id mapping. Pi entry ids are the
+     // only stable native boundary accepted by its fork API.
+     conversationHistoryEntryIds: z.record(z.string(), z.string().min(1)).optional(),

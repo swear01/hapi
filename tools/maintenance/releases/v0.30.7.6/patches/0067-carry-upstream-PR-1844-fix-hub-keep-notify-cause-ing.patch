@@ -1,0 +1,328 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Fri, 23 Oct 2026 18:17:57 +0000
+Subject: [PATCH 67/95] carry(upstream): PR #1844 fix(hub): keep notify-cause
+ ingest bounded by advancing the resume watermark
+
+---
+ hub/src/store/messageStore.ts              |   5 +
+ hub/src/store/messages.ts                  |   8 ++
+ hub/src/sync/workGraphNotifyIngest.test.ts | 153 +++++++++++++++++++++
+ hub/src/sync/workGraphNotifyIngest.ts      |  66 ++++++++-
+ 4 files changed, 229 insertions(+), 3 deletions(-)
+
+diff --git a/hub/src/store/messageStore.ts b/hub/src/store/messageStore.ts
+index 9e9841260..4a8460589 100644
+--- a/hub/src/store/messageStore.ts
++++ b/hub/src/store/messageStore.ts
+@@ -41,6 +41,7 @@ import {
+     copyMessagesToSession as copyStoredMessagesToSession,
+     getAllMessages,
+     getMessagesAfterSeq,
++    getMinSeq,
+     getMessageSeqById,
+     truncateMessagesFromLocalId,
+     type CancelQueuedMessageResult,
+@@ -99,6 +100,10 @@ export class MessageStore {
+         return getMessagesAfterSeq(this.db, sessionId, afterSeq)
+     }
+ 
++    getMinSeq(sessionId: string): number | null {
++        return getMinSeq(this.db, sessionId)
++    }
++
+     getSeqById(sessionId: string, messageId: string): number | null {
+         return getMessageSeqById(this.db, sessionId, messageId)
+     }
+diff --git a/hub/src/store/messages.ts b/hub/src/store/messages.ts
+index d52bd6b82..d3e6f27d3 100644
+--- a/hub/src/store/messages.ts
++++ b/hub/src/store/messages.ts
+@@ -753,6 +753,14 @@ export function getMaxSeq(db: Database, sessionId: string): number {
+     return row?.maxSeq ?? 0
+ }
+ 
++/** Lowest seq still stored for the session (null when the session is empty). */
++export function getMinSeq(db: Database, sessionId: string): number | null {
++    const row = db.prepare(
++        'SELECT MIN(seq) AS minSeq FROM messages WHERE session_id = ?'
++    ).get(sessionId) as { minSeq: number | null } | undefined
++    return row?.minSeq ?? null
++}
++
+ export type CancelQueuedMessageResult =
+     | { status: 'cancelled'; localId: string | null }
+     | { status: 'invoked'; message: StoredMessage }
+diff --git a/hub/src/sync/workGraphNotifyIngest.test.ts b/hub/src/sync/workGraphNotifyIngest.test.ts
+index ebf2559b5..81f553656 100644
+--- a/hub/src/sync/workGraphNotifyIngest.test.ts
++++ b/hub/src/sync/workGraphNotifyIngest.test.ts
+@@ -958,3 +958,156 @@ describe('ingestNotifySummaryFromMessage cause stamping', () => {
+             .not.toBe(two.id)
+     })
+ })
++
++describe('notify cause consumption watermark', () => {
++    it('sticky notify advances causeSeq to the assistant seq so the window stays bounded', () => {
++        const store = new Store(':memory:')
++        const session = store.sessions.getOrCreateSession('sess-watermark-sticky', {}, null, 'default')
++
++        const user = store.messages.addMessage(session.id, userInbound('the only prompt'))
++        const firstAssistant = store.messages.addMessage(session.id, assistantOutput(notifyFooter('Turn one')))
++        const first = ingestNotify(store, session.id, 'default', firstAssistant.content, firstAssistant.id)
++        expect(first?.event.payloadJson).toMatchObject({ causeMessageId: user.id, causeSeq: user.seq })
++
++        // Automation-style follow-ups: every turn ends with a notify footer but
++        // no new invoked inbound arrives. The sticky copies must keep the
++        // identity but advance the watermark past each assistant turn —
++        // otherwise the frozen causeSeq makes every later notify re-read the
++        // whole session tail.
++        const secondAssistant = store.messages.addMessage(session.id, assistantOutput(notifyFooter('Auto step')))
++        const second = ingestNotify(store, session.id, 'default', secondAssistant.content, secondAssistant.id)
++        expect(second?.event.payloadJson).toMatchObject({
++            causeMessageId: user.id,
++            causeText: 'the only prompt',
++            causeKind: 'webapp',
++            causeSeq: secondAssistant.seq
++        })
++
++        const thirdAssistant = store.messages.addMessage(session.id, assistantOutput(notifyFooter('Auto step two')))
++        const third = ingestNotify(store, session.id, 'default', thirdAssistant.content, thirdAssistant.id)
++        expect(third?.event.payloadJson).toMatchObject({
++            causeMessageId: user.id,
++            causeText: 'the only prompt',
++            causeSeq: thirdAssistant.seq
++        })
++        expect((third?.event.payloadJson as { causeSeq?: number })?.causeSeq)
++            .toBeGreaterThan((second?.event.payloadJson as { causeSeq?: number })?.causeSeq ?? 0)
++    })
++
++    it('sticky chain resumes each load after the previous watermark, not the original inbound', () => {
++        const store = new Store(':memory:')
++        const session = store.sessions.getOrCreateSession('sess-watermark-resume', {}, null, 'default')
++
++        const user = store.messages.addMessage(session.id, userInbound('prompt'))
++        const firstAssistant = store.messages.addMessage(session.id, assistantOutput(notifyFooter('First')))
++        ingestNotify(store, session.id, 'default', firstAssistant.content, firstAssistant.id)
++
++        // Long agent tail without footers, then a sticky notify.
++        for (let i = 0; i < 20; i += 1) {
++            store.messages.addMessage(session.id, agentToolRow())
++        }
++
++        const loadCalls: string[] = []
++        const messageStore = store.messages as unknown as {
++            getMessagesAfterSeq: (sessionId: string, afterSeq: number) => unknown[]
++            getAllMessages: (sessionId: string) => unknown[]
++        }
++        const realAfterSeq = messageStore.getMessagesAfterSeq.bind(messageStore)
++        const realAll = messageStore.getAllMessages.bind(messageStore)
++        messageStore.getMessagesAfterSeq = (sessionId, afterSeq) => {
++            loadCalls.push(`after:${afterSeq}`)
++            return realAfterSeq(sessionId, afterSeq)
++        }
++        messageStore.getAllMessages = (sessionId) => {
++            loadCalls.push('all')
++            return realAll(sessionId)
++        }
++
++        const stickyAssistant = store.messages.addMessage(session.id, assistantOutput(notifyFooter('Sticky')))
++        ingestNotify(store, session.id, 'default', stickyAssistant.content, stickyAssistant.id)
++        // Sticky notify loads incrementally from the previous cause (the only
++        // stamped resume point so far), never the full session.
++        expect(loadCalls).toEqual([`after:${user.seq}`])
++
++        const stickyTwo = store.messages.addMessage(session.id, assistantOutput(notifyFooter('Sticky two')))
++        ingestNotify(store, session.id, 'default', stickyTwo.content, stickyTwo.id)
++        // The next load resumes after the advanced watermark (the previous
++        // sticky assistant), not after the original frozen inbound seq.
++        expect(loadCalls).toEqual([`after:${user.seq}`, `after:${stickyAssistant.seq}`])
++    })
++
++    it('retention-trimmed cursor row still loads incrementally via causeSeq', () => {
++        const store = new Store(':memory:')
++        const session = store.sessions.getOrCreateSession('sess-watermark-trimmed', {}, null, 'default')
++
++        const user = store.messages.addMessage(session.id, userInbound('prompt'))
++        const firstAssistant = store.messages.addMessage(session.id, assistantOutput(notifyFooter('First')))
++        const first = ingestNotify(store, session.id, 'default', firstAssistant.content, firstAssistant.id)
++        expect(first?.event.payloadJson).toMatchObject({
++            causeMessageId: user.id,
++            causeCursorMessageId: user.id
++        })
++
++        // Retention trims old rows: the cursor message disappears while the
++        // ledger row (and its causeSeq watermark) survives. A dangling cursor
++        // id must not degrade the next notify into a full session read.
++        ;(store as unknown as { db: { run: (sql: string, ...params: unknown[]) => void } }).db.run(
++            'DELETE FROM messages WHERE session_id = ? AND seq <= ?',
++            session.id,
++            user.seq
++        )
++        expect(store.messages.getSeqById(session.id, user.id)).toBeNull()
++
++        const fullReads = { count: 0 }
++        const messageStore = store.messages as unknown as { getAllMessages: (sessionId: string) => unknown[] }
++        const realAll = messageStore.getAllMessages.bind(messageStore)
++        messageStore.getAllMessages = (sessionId) => {
++            fullReads.count += 1
++            return realAll(sessionId)
++        }
++
++        const nextUser = store.messages.addMessage(session.id, userInbound('after trim'))
++        const nextAssistant = store.messages.addMessage(session.id, assistantOutput(notifyFooter('After trim')))
++        const next = ingestNotify(store, session.id, 'default', nextAssistant.content, nextAssistant.id)
++        expect(next?.event.payloadJson).toMatchObject({ causeMessageId: nextUser.id, causeText: 'after trim' })
++
++        const stickyAssistant = store.messages.addMessage(session.id, assistantOutput(notifyFooter('Sticky')))
++        const sticky = ingestNotify(store, session.id, 'default', stickyAssistant.content, stickyAssistant.id)
++        expect(sticky?.event.payloadJson).toMatchObject({
++            causeMessageId: nextUser.id,
++            causeSeq: stickyAssistant.seq
++        })
++        expect(fullReads.count).toBe(0)
++    })
++
++    it('legacy row without causeSeq or cursor still full-reads and consumes correctly', () => {
++        const store = new Store(':memory:')
++        const session = store.sessions.getOrCreateSession('sess-watermark-legacy', {}, null, 'default')
++        const oldUser = store.messages.addMessage(session.id, userInbound('old prompt'))
++        const oldAssistant = store.messages.addMessage(session.id, assistantOutput(notifyFooter('Legacy')))
++        store.workGraph.insertEvent('default', {
++            source_kind: 'session',
++            source_ref: session.id,
++            event_type: 'work_ad',
++            related_session_id: session.id,
++            summary: 'legacy',
++            provenance: 'AGENT_NOTIFY_SUMMARY',
++            payload_json: {
++                status: 'done',
++                messageId: oldAssistant.id,
++                causeMessageId: oldUser.id,
++                causeText: 'old prompt',
++                causeKind: 'webapp'
++            },
++            principal: { kind: 'agent', id: `session:${session.id}`, on_behalf_of: '1' }
++        })
++
++        // No causeSeq and no causeCursorMessageId: the loader must fall back to
++        // the full read and still consume the already-attributed inbound.
++        const nextUser = store.messages.addMessage(session.id, userInbound('new prompt'))
++        const nextAssistant = store.messages.addMessage(session.id, assistantOutput(notifyFooter('Next')))
++        const next = ingestNotify(store, session.id, 'default', nextAssistant.content, nextAssistant.id)
++        expect(next?.event.payloadJson).toMatchObject({ causeMessageId: nextUser.id, causeText: 'new prompt' })
++        expect((next?.event.payloadJson as { causeSeq?: number })?.causeSeq).toBe(nextUser.seq)
++    })
++})
+diff --git a/hub/src/sync/workGraphNotifyIngest.ts b/hub/src/sync/workGraphNotifyIngest.ts
+index 3c6266a01..468e1f71e 100644
+--- a/hub/src/sync/workGraphNotifyIngest.ts
++++ b/hub/src/sync/workGraphNotifyIngest.ts
+@@ -236,6 +236,20 @@ function loadMessagesForCause(
+         if (cursorSeq != null) {
+             return store.messages.getMessagesAfterSeq(sessionId, cursorSeq)
+         }
++        // Retention may trim the cursor row while the ledger row (and its
++        // numeric causeSeq watermark) survives: resume after causeSeq instead
++        // of degrading to a full session read on every later notify. The
++        // watermark is only trustworthy while every remaining row sits above
++        // it — a history move (mergeSessionHistory) empties the session and
++        // restarts its seq space, leaving stale low watermarks that would
++        // skip freshly appended rows.
++        const trimmedSeq = readCauseSeq(previous?.payloadJson)
++        if (trimmedSeq != null) {
++            const minSeq = store.messages.getMinSeq(sessionId)
++            if (minSeq == null || minSeq > trimmedSeq) {
++                return store.messages.getMessagesAfterSeq(sessionId, trimmedSeq)
++            }
++        }
+         return store.messages.getAllMessages(sessionId)
+     }
+     const afterSeq = readCauseSeq(previous?.payloadJson)
+@@ -294,7 +308,9 @@ function consumedInboundIds(
+  * Sequential rule: first unconsumed invoked inbound is the cause identity.
+  * causeSeq advances past other invoked inbounds before this assistant (one
+  * Claude batch can join several same-mode prompts). Uninvoked leftovers wait.
+- * No new invoked inbound → sticky copy of the previous event's cause.
++ * No new invoked inbound → sticky copy of the previous event's cause, with the
++ * resume point (causeSeq + causeCursorMessageId) advanced past this assistant
++ * turn when no waiting inbound below it can still mature into a cause.
+  */
+ function batchCauseCursor(
+     messages: StoredMessage[],
+@@ -314,10 +330,32 @@ function batchCauseCursor(
+     return { causeSeq: maxSeq, causeCursorMessageId: cursorId }
+ }
+ 
++/**
++ * An inbound below the resume watermark that can still mature into a cause
++ * later (queued/not yet invoked, or unmatured scheduled). While any exist, the
++ * resume point must not advance past them or they would never be attributed.
++ * Transcript echoes and already-consumed rows are dead ends.
++ */
++function hasWaitingInbound(
++    messages: StoredMessage[],
++    watermark: number,
++    consumed: Set<string>,
++    now: number = Date.now()
++): boolean {
++    return messages.some((message) => (
++        message.seq < watermark
++        && !consumed.has(message.id)
++        && isInboundUserMessage(message.content)
++        && asRecord(asRecord(message.content)?.meta)?.isTranscriptEcho !== true
++        && (message.invokedAt === null || (message.scheduledAt != null && message.scheduledAt > now))
++    ))
++}
++
+ export function resolveWorkAdCause(params: {
+     messages: StoredMessage[]
+     previousWorkAds: WorkGraphEvent[]
+     assistantSeq?: number | null
++    assistantMessageId?: string | null
+ }): { cause: WorkAdCause | null; previousEventId: string | null } {
+     const previous = params.previousWorkAds.at(-1) ?? null
+     const consumed = consumedInboundIds(params.messages, params.previousWorkAds)
+@@ -349,6 +387,25 @@ export function resolveWorkAdCause(params: {
+     if (previous) {
+         const sticky = readCauseFromPayload(previous.payloadJson)
+         if (sticky) {
++            // Sticky copy keeps the cause identity but should still advance the
++            // resume point past this assistant turn when nothing below it can
++            // mature into a future cause. Automation-style sessions emit many
++            // notifies with no new invoked inbound; without the advance the
++            // resume point stays frozen at the original inbound and every
++            // notify re-reads and re-parses the whole session tail (zstd +
++            // JSON per row), growing without bound as the session grows.
++            const watermark = params.assistantSeq ?? null
++            const resumeMessageId = params.assistantMessageId ?? null
++            const canAdvance = watermark != null
++                && resumeMessageId != null
++                && watermark > (sticky.causeSeq ?? Number.NEGATIVE_INFINITY)
++                && !hasWaitingInbound(params.messages, watermark, consumed)
++            if (canAdvance) {
++                return {
++                    cause: { ...sticky, causeSeq: watermark, causeCursorMessageId: resumeMessageId },
++                    previousEventId: previous.id
++                }
++            }
+             return { cause: sticky, previousEventId: previous.id }
+         }
+     }
+@@ -467,11 +524,14 @@ export function ingestNotifySummaryFromMessage(input: NotifyIngestInput): Notify
+     // Cause is hub-derived from session messages SQL (no REST 200 cap).
+     const previousWorkAds = listPreviousWorkAds(input.store, input.namespace, input.sessionId)
+     const messages = loadMessagesForCause(input.store, input.sessionId, previousWorkAds)
+-    const assistantSeq = messages.find((message) => message.id === input.messageId)?.seq ?? null
++    // Direct seq lookup: the window above is incremental, so the notify-bearing
++    // assistant row (and its seq) is not guaranteed to be inside it.
++    const assistantSeq = input.store.messages.getSeqById(input.sessionId, input.messageId)
+     const { cause, previousEventId } = resolveWorkAdCause({
+         messages,
+         previousWorkAds,
+-        assistantSeq
++        assistantSeq,
++        assistantMessageId: input.messageId
+     })
+ 
+     const create = buildWorkAdFromNotify({

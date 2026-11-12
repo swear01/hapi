@@ -1,0 +1,621 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Mon, 19 Oct 2026 15:37:04 +0000
+Subject: [PATCH 29/51] carry(upstream): PR #1943 fix(runner): adopt untracked
+ runner webhooks only from the reporting process generation
+
+Upstream-head: 3a8368b89bf3cbf42fffcb30c2c7eb58485369c0
+---
+ cli/src/agent/sessionFactory.test.ts          |  62 +++++++-
+ cli/src/agent/sessionFactory.ts               |   8 +
+ .../codex/shared/runtime.integration.test.ts  |  25 ++-
+ cli/src/codex/shared/runtime.ts               |   6 +-
+ .../lateRunnerWebhook.integration.test.ts     | 147 ++++++++++++++++++
+ cli/src/runner/lateRunnerWebhook.test.ts      |  59 +++++++
+ cli/src/runner/lateRunnerWebhook.ts           |  32 +++-
+ cli/src/runner/run.ts                         |  18 ++-
+ cli/vitest.config.ts                          |   1 +
+ cli/vitest.integration.config.ts              |  20 ++-
+ shared/src/schemas.ts                         |   4 +
+ 11 files changed, 361 insertions(+), 21 deletions(-)
+ create mode 100644 cli/src/runner/lateRunnerWebhook.integration.test.ts
+
+diff --git a/cli/src/agent/sessionFactory.test.ts b/cli/src/agent/sessionFactory.test.ts
+index 8337ced30..7071698ba 100644
+--- a/cli/src/agent/sessionFactory.test.ts
++++ b/cli/src/agent/sessionFactory.test.ts
+@@ -9,7 +9,8 @@ const {
+     notifyRunnerSessionStartedMock,
+     readSettingsMock,
+     ensureSkillMock,
+-    apiCreateMock
++    apiCreateMock,
++    getProcessStartMarkerMock
+ } = vi.hoisted(() => ({
+     getSessionMock: vi.fn(),
+     getOrCreateSessionMock: vi.fn(),
+@@ -18,7 +19,13 @@ const {
+     notifyRunnerSessionStartedMock: vi.fn(async () => ({})),
+     readSettingsMock: vi.fn(),
+     ensureSkillMock: vi.fn(async () => '/tmp/skill/SKILL.md'),
+-    apiCreateMock: vi.fn()
++    apiCreateMock: vi.fn(),
++    getProcessStartMarkerMock: vi.fn<(pid: number) => string | null>(() => null)
++}))
++
++vi.mock('@/utils/process', async (importOriginal) => ({
++    ...(await importOriginal<typeof import('@/utils/process')>()),
++    getProcessStartMarker: getProcessStartMarkerMock
+ }))
+ 
+ vi.mock('@/api/api', () => ({
+@@ -114,6 +121,7 @@ describe('bootstrapExistingSession', () => {
+         sessionSyncClientMock.mockReset()
+         notifyRunnerSessionStartedMock.mockClear()
+         readSettingsMock.mockReset()
++        getProcessStartMarkerMock.mockClear()
+         delete process.env[HAPI_SESSION_ID_ENV]
+         delete process.env[HAPI_RUNNER_SESSION_TYPE_ENV]
+         delete process.env[HAPI_RUNNER_WORKTREE_NAME_ENV]
+@@ -366,6 +374,56 @@ describe('bootstrapExistingSession', () => {
+             delete process.env[HAPI_RUNNER_WORKTREE_NAME_ENV]
+         }
+     })
++
++    it('reports the start marker of its own process next to hostPid', () => {
++        // The runner compares this against the live PID before adopting an
++        // untracked webhook, so a reused PID is never pinned to this session.
++        getProcessStartMarkerMock.mockReturnValueOnce('Mon Sep 28 10:00:00 2026')
++
++        const metadata = buildSessionMetadata({
++            flavor: 'claude',
++            startedBy: 'runner',
++            workingDirectory: '/tmp/project',
++            machineId: 'machine-1',
++            now: 123
++        })
++
++        expect(getProcessStartMarkerMock).toHaveBeenCalledWith(process.pid)
++        expect(metadata.hostPid).toBe(process.pid)
++        expect(metadata.hostStartMarker).toBe('Mon Sep 28 10:00:00 2026')
++    })
++
++    it('omits the start marker when the platform probe fails', () => {
++        // null from the probe must not reach the hub as a null string.
++        getProcessStartMarkerMock.mockReturnValueOnce(null)
++
++        const metadata = buildSessionMetadata({
++            flavor: 'claude',
++            startedBy: 'runner',
++            workingDirectory: '/tmp/project',
++            machineId: 'machine-1',
++            now: 123
++        })
++
++        expect(metadata.hostStartMarker).toBeUndefined()
++    })
++
++    it('does not probe the start marker for terminal sessions', () => {
++        // The runner only reads the marker of runner-started sessions; the
++        // probe is a synchronous process spawn (PowerShell on Windows) that a
++        // terminal start must not pay for.
++        const metadata = buildSessionMetadata({
++            flavor: 'cursor',
++            startedBy: 'terminal',
++            workingDirectory: '/tmp/project',
++            machineId: 'machine-1',
++            now: 123
++        })
++
++        expect(getProcessStartMarkerMock).not.toHaveBeenCalled()
++        expect(metadata.hostPid).toBe(process.pid)
++        expect(metadata).not.toHaveProperty('hostStartMarker')
++    })
+ })
+ 
+ describe('bootstrapLazySession', () => {
+diff --git a/cli/src/agent/sessionFactory.ts b/cli/src/agent/sessionFactory.ts
+index e6dcef387..f5e1513c0 100644
+--- a/cli/src/agent/sessionFactory.ts
++++ b/cli/src/agent/sessionFactory.ts
+@@ -12,6 +12,7 @@ import { configuration } from '@/configuration'
+ import { logger } from '@/ui/logger'
+ import { runtimePath } from '@/projectPath'
+ import { getInvokedCwd } from '@/utils/invokedCwd'
++import { getProcessStartMarker } from '@/utils/process'
+ import { readWorktreeEnv } from '@/utils/worktreeEnv'
+ import { CURRENT_MACHINE_CAPABILITIES } from '@hapi/protocol/runnerCapabilities'
+ import { exportHapiSessionEnv } from '@/agent/hapiSessionEnv'
+@@ -140,6 +141,13 @@ export function buildSessionMetadata(options: {
+         happyToolsDir: resolve(happyLibDir, 'tools', 'unpacked'),
+         startedFromRunner: options.startedBy === 'runner',
+         hostPid: process.pid,
++        // Proves which process generation owns hostPid: the runner adopts an
++        // untracked runner-started webhook only when this matches the live
++        // PID. It never reads the marker of a terminal session, so skip the
++        // probe there (on Windows it is a synchronous PowerShell spawn).
++        ...(options.startedBy === 'runner'
++            ? { hostStartMarker: getProcessStartMarker(process.pid) ?? undefined }
++            : {}),
+         startedBy: options.startedBy,
+         lifecycleState: 'running',
+         lifecycleStateSince: now,
+diff --git a/cli/src/codex/shared/runtime.integration.test.ts b/cli/src/codex/shared/runtime.integration.test.ts
+index b52da9ff9..c69df380d 100644
+--- a/cli/src/codex/shared/runtime.integration.test.ts
++++ b/cli/src/codex/shared/runtime.integration.test.ts
+@@ -10,8 +10,10 @@ import { CodexAppServerClient } from '../codexAppServerClient';
+ import { initializeSharedClient } from './launch';
+ import { record } from './gateway';
+ import { isProcessAlive } from '@/utils/process';
++import { notifyRunnerSessionStarted } from '@/runner/controlClient';
+ 
+ const state = vi.hoisted(() => ({ home: '', sessions: new Map<string, MockSession>(), beforeBootstrap: undefined as (() => Promise<void>) | undefined }));
++const BOOTSTRAP_START_MARKER = vi.hoisted(() => 'Tue Sep 29 09:00:00 2026');
+ class MockSession extends EventEmitter {
+     readonly sessionId = randomUUID();
+     state: AgentState = { requests: { 'old-worker': { tool: 'request_user_input', arguments: {}, createdAt: 0 } } }; metadata: Metadata;
+@@ -40,7 +42,9 @@ vi.mock('@/agent/sessionFactory', () => ({ bootstrapSession: async (options: { w
+     await state.beforeBootstrap?.();
+     const session = new MockSession(options.workingDirectory); session.metadata = { ...session.metadata, ...options.metadataOverrides };
+     state.sessions.set(session.sessionId, session);
+-    return { session: session as unknown as ApiSessionClient, sessionInfo: { id: session.sessionId, namespace: 'test' }, metadata: session.metadata,
++    // session.getMetadata() is the hub's view; a hub without the field strips
++    // hostStartMarker, so only the local bootstrap metadata still carries it.
++    return { session: session as unknown as ApiSessionClient, sessionInfo: { id: session.sessionId, namespace: 'test' }, metadata: { ...session.metadata, hostStartMarker: BOOTSTRAP_START_MARKER },
+         workingDirectory: options.workingDirectory, machineId: 'test', startedBy: 'terminal', api: {} };
+ }, bootstrapExistingSession: async (options: { sessionId: string; workingDirectory: string; metadataOverrides: Partial<Metadata> }) => {
+     const session = state.sessions.get(options.sessionId)!;
+@@ -103,6 +107,25 @@ describe.skipIf(process.env.HAPI_RUN_SHARED_CODEX_TESTS !== '1')('installed Code
+             }
+         } finally { release(); abort.abort(); await running.catch(() => {}); await rm(home, { recursive: true, force: true }); }
+     }, 30_000);
++    it('reports the bootstrap start marker to the runner although the hub view of the metadata lacks it', async () => {
++        const home = await mkdtemp('/tmp/hapi-shared-marker-'); state.home = home;
++        const ch = join(home, 'codex'); const cwd = join(home, 'work'); await mkdir(ch); await mkdir(cwd);
++        await writeFile(join(ch, 'config.toml'), `model = "mock-model"\nmodel_provider = "mock"\n[model_providers.mock]\nname = "No model calls"\nbase_url = "http://127.0.0.1:1/v1"\nwire_api = "responses"\nrequires_openai_auth = false\n[analytics]\nenabled = false\n[feedback]\nenabled = false\n[projects."${cwd}"]\ntrust_level = "trusted"\n`);
++        vi.stubEnv('CODEX_HOME', ch); vi.stubEnv('HOME', home);
++        const { runSharedRuntime } = await import('./runtime');
++        let ready!: (value: import('./runtime').RuntimeReady) => void;
++        const readiness = new Promise<import('./runtime').RuntimeReady>(resolve => { ready = resolve; });
++        const abort = new AbortController();
++        const running = runSharedRuntime({ workingDirectory: cwd }, ready, abort.signal);
++        try {
++            const { runtime, sessionId } = await Promise.race([readiness, running.then(() => { throw new Error('Runtime stopped before ready'); })]);
++            // The runner adopts an untracked runner-started webhook only when the
++            // marker proves the process generation (decideUntrackedRunnerWebhook),
++            // so the webhook must not depend on the hub echoing the field back.
++            expect(vi.mocked(notifyRunnerSessionStarted)).toHaveBeenCalledWith(sessionId,
++                expect.objectContaining({ codexSessionId: runtime.sessions[sessionId].threadId, hostStartMarker: BOOTSTRAP_START_MARKER }));
++        } finally { abort.abort(); await running.catch(() => {}); await rm(home, { recursive: true, force: true, maxRetries: 3 }); }
++    }, 30_000);
+     it.each([false, true])('binds empty roots, exchanges messages, isolates /new, and archives only the selected root (reserved remit: %s)', async reservedRemit => {
+         const home = await mkdtemp('/tmp/hapi-shared-test-'); state.home = home;
+         const ch = join(home, 'codex'); const cwd = join(home, 'work'); await mkdir(ch); await mkdir(cwd);
+diff --git a/cli/src/codex/shared/runtime.ts b/cli/src/codex/shared/runtime.ts
+index 6b0d68d7d..5d59b2006 100644
+--- a/cli/src/codex/shared/runtime.ts
++++ b/cli/src/codex/shared/runtime.ts
+@@ -216,7 +216,11 @@ export async function runSharedRuntime(options: SharedLaunchOptions, onReady?: (
+         await root.activate(initialOptions);
+         await root.session.flush();
+         await persist();
+-        await notifyRunnerSessionStarted(root.session.sessionId, root.session.getMetadata() ?? root.bootstrap.metadata);
++        // The hub's view of the metadata is what the hub kept of it: a hub
++        // without the field strips hostStartMarker, and the runner ignores an
++        // untracked runner-started webhook that cannot prove its process
++        // generation. The marker therefore comes from the local bootstrap.
++        await notifyRunnerSessionStarted(root.session.sessionId, { ...(root.session.getMetadata() ?? root.bootstrap.metadata), hostStartMarker: root.bootstrap.metadata.hostStartMarker });
+     };
+     const create = (method: 'thread/start' | 'thread/fork', params: Record<string, unknown>, parent?: SharedCodexRoot, initialOptions?: SharedLaunchOptions): Promise<SharedCodexRoot> => operation(async () => {
+         const root = await prepare(string(params.cwd) ?? launch.cwd, initialOptions?.existingSessionId, parent);
+diff --git a/cli/src/runner/lateRunnerWebhook.integration.test.ts b/cli/src/runner/lateRunnerWebhook.integration.test.ts
+new file mode 100644
+index 000000000..56cba9dfb
+--- /dev/null
++++ b/cli/src/runner/lateRunnerWebhook.integration.test.ts
+@@ -0,0 +1,147 @@
++import { describe, expect, it } from 'vitest'
++import { spawn, type ChildProcess } from 'node:child_process'
++import { randomUUID } from 'node:crypto'
++import { mkdtemp, readFile, rm } from 'node:fs/promises'
++import { tmpdir } from 'node:os'
++import { join, resolve } from 'node:path'
++import { getProcessStartMarker } from '@/utils/process'
++import { TEST_OWNED_MARKER_KEY } from '@/test/integrationEnv'
++
++/**
++ * Drives a real runner over its control server with a synthetic child that
++ * stands in for a CLI whose webhook arrives while the runner has no tracking
++ * entry for its PID (runner restart, or a webhook that outlived its sender).
++ * Adoption persists the PID's start marker for the stopSession generation
++ * check, so the webhook must prove it comes from the process that owns the
++ * PID right now (decideUntrackedRunnerWebhook). Start markers come from
++ * `ps`, so the suite is POSIX only, like the shared Codex full stack test.
++ */
++
++type RunnerState = { pid: number; httpPort: number }
++type ResumeRecord = { requestedSessionId: string; confirmedSessionId?: string; pid: number; processStartMarker: string }
++
++async function until<T>(probe: () => Promise<T | undefined>, label: string, timeoutMs = 20_000): Promise<T> {
++    const deadline = Date.now() + timeoutMs
++    while (Date.now() < deadline) {
++        const value = await probe()
++        if (value !== undefined) return value
++        await new Promise(resolve => setTimeout(resolve, 100))
++    }
++    throw new Error(`Timed out: ${label}`)
++}
++
++function exited(child: ChildProcess): boolean {
++    return child.exitCode !== null || child.signalCode !== null
++}
++
++async function stop(child: ChildProcess | undefined): Promise<void> {
++    if (!child || exited(child)) return
++    child.kill('SIGTERM')
++    try {
++        await until(async () => exited(child) ? true : undefined, `PID ${child.pid} shutdown`, 5_000)
++    } catch {
++        child.kill('SIGKILL')
++    }
++}
++
++/** Every process carries the run marker so the globalSetup sweep reaps leaks. */
++function testEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
++    return { ...process.env, [TEST_OWNED_MARKER_KEY]: process.env.HAPI_HOME, ...overrides }
++}
++
++/** Long-lived stand-in for a CLI process; its own group so tree kills stay local. */
++function spawnIdleChild(): ChildProcess {
++    const child = spawn(process.env.HAPI_BUN_EXEC!, ['--eval', 'setInterval(() => {}, 1000)'], {
++        env: testEnv(), stdio: 'ignore', detached: true,
++    })
++    expect(child.pid).toBeDefined()
++    return child
++}
++
++/** Isolated HAPI_HOME: own state file, lock and resume records; same temp hub. */
++function startRunner(home: string): ChildProcess {
++    return spawn(process.env.HAPI_BUN_EXEC!, ['--cwd', resolve('.'), resolve('src/index.ts'), 'runner', 'start-sync'], {
++        env: testEnv({ HAPI_HOME: home, HAPI_DISABLE_VERSION_HANDOFF: '1' }), stdio: 'ignore',
++    })
++}
++
++async function runnerReady(home: string, runner: ChildProcess): Promise<RunnerState> {
++    return until(async () => {
++        try {
++            const state = JSON.parse(await readFile(join(home, 'runner.state.json'), 'utf8')) as Partial<RunnerState>
++            return state.pid === runner.pid && state.httpPort ? state as RunnerState : undefined
++        } catch {
++            return undefined
++        }
++    }, 'isolated runner ready')
++}
++
++function control(state: RunnerState) {
++    return async (path: string, body: unknown = {}): Promise<Record<string, unknown>> => {
++        const response = await fetch(`http://127.0.0.1:${state.httpPort}${path}`, {
++            method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
++        })
++        expect(response.status).toBe(200)
++        return await response.json() as Record<string, unknown>
++    }
++}
++
++async function readResumeRecords(home: string): Promise<ResumeRecord[]> {
++    return JSON.parse(await readFile(join(home, 'runner.state.json.resume-processes.json'), 'utf8')) as ResumeRecord[]
++}
++
++describe.skipIf(process.platform === 'win32')('untracked runner webhook adoption', () => {
++    it('adopts a webhook that carries the live process start marker, so the child is listed and stoppable', async () => {
++        const sessionId = randomUUID()
++        const home = await mkdtemp(join(tmpdir(), 'hapi-late-webhook-adopt-'))
++        // A child of the previous runner generation: nothing on disk names it.
++        const child = spawnIdleChild()
++        const runner = startRunner(home)
++        try {
++            const post = control(await runnerReady(home, runner))
++            const hostStartMarker = getProcessStartMarker(child.pid!)
++            expect(hostStartMarker).not.toBeNull()
++            await post('/session-started', { sessionId, metadata: { hostPid: child.pid, hostStartMarker, startedBy: 'runner' } })
++            expect(exited(child)).toBe(false)
++            expect(await post('/list')).toMatchObject({ children: [{ happySessionId: sessionId, pid: child.pid, startedBy: 'runner' }] })
++            expect(await readResumeRecords(home)).toMatchObject([
++                { pid: child.pid, requestedSessionId: sessionId, confirmedSessionId: sessionId, processStartMarker: hostStartMarker },
++            ])
++            expect(await post('/stop-session', { sessionId })).toMatchObject({ status: 'stopped' })
++            await until(async () => exited(child) ? true : undefined, 'adopted child stopped')
++        } finally {
++            await stop(runner)
++            await stop(child)
++            await rm(home, { recursive: true, force: true })
++        }
++    }, 30_000)
++
++    it('leaves a webhook alone that cannot prove the process generation, and never kills the PID', async () => {
++        const sessionId = randomUUID()
++        const home = await mkdtemp(join(tmpdir(), 'hapi-late-webhook-reused-pid-'))
++        // Stands in for the process the OS handed the PID to after the
++        // reporting CLI exited: the webhook names a generation that is gone,
++        // or (older CLI) no generation at all.
++        const bystander = spawnIdleChild()
++        const runner = startRunner(home)
++        try {
++            const post = control(await runnerReady(home, runner))
++            for (const metadata of [
++                { hostPid: bystander.pid, hostStartMarker: 'Thu Jan  1 00:00:00 1970', startedBy: 'runner' },
++                { hostPid: bystander.pid, startedBy: 'runner' },
++            ]) {
++                await post('/session-started', { sessionId, metadata })
++                expect(await post('/list')).toMatchObject({ children: [] })
++                expect(await readResumeRecords(home)).toEqual([])
++                expect(await post('/stop-session', { sessionId })).toMatchObject({ status: 'unknown' })
++                // Killing is escalated asynchronously; give a wrongful kill time to land.
++                await new Promise(resolve => setTimeout(resolve, 300))
++                expect(exited(bystander)).toBe(false)
++            }
++        } finally {
++            await stop(runner)
++            await stop(bystander)
++            await rm(home, { recursive: true, force: true })
++        }
++    }, 30_000)
++})
+diff --git a/cli/src/runner/lateRunnerWebhook.test.ts b/cli/src/runner/lateRunnerWebhook.test.ts
+index c8d993d08..e01c4e7d8 100644
+--- a/cli/src/runner/lateRunnerWebhook.test.ts
++++ b/cli/src/runner/lateRunnerWebhook.test.ts
+@@ -1,15 +1,21 @@
+ import { describe, expect, it } from 'vitest'
+ import { decideUntrackedRunnerWebhook } from './lateRunnerWebhook'
+ 
++const marker = 'Mon Sep 28 10:00:00 2026'
++const otherGeneration = 'Mon Sep 28 10:05:00 2026'
++const proven = { reportedStartMarker: marker, currentStartMarker: marker }
++
+ describe('decideUntrackedRunnerWebhook', () => {
+     it('adopts shared Codex roots instead of killing (siblings)', () => {
+         expect(decideUntrackedRunnerWebhook({
+             concurrentClients: true,
+             timedOutByThisRunner: false,
++            ...proven,
+         })).toBe('adopt')
+         expect(decideUntrackedRunnerWebhook({
+             concurrentClients: true,
+             timedOutByThisRunner: true,
++            ...proven,
+         })).toBe('adopt')
+     })
+ 
+@@ -17,6 +23,7 @@ describe('decideUntrackedRunnerWebhook', () => {
+         expect(decideUntrackedRunnerWebhook({
+             concurrentClients: false,
+             timedOutByThisRunner: true,
++            ...proven,
+         })).toBe('kill')
+     })
+ 
+@@ -26,6 +33,58 @@ describe('decideUntrackedRunnerWebhook', () => {
+         expect(decideUntrackedRunnerWebhook({
+             concurrentClients: false,
+             timedOutByThisRunner: false,
++            ...proven,
+         })).toBe('adopt')
+     })
++
++    it('ignores a webhook whose marker names a generation that no longer owns the PID', () => {
++        // Late webhook, PID reused since: adopting would persist the foreign
++        // process's marker and let a later stopSession tree-kill it.
++        for (const concurrentClients of [false, true]) {
++            expect(decideUntrackedRunnerWebhook({
++                concurrentClients,
++                timedOutByThisRunner: false,
++                reportedStartMarker: marker,
++                currentStartMarker: otherGeneration,
++            })).toBe('ignore')
++        }
++    })
++
++    it('never kills a PID the webhook proves belongs to another generation', () => {
++        expect(decideUntrackedRunnerWebhook({
++            concurrentClients: false,
++            timedOutByThisRunner: true,
++            reportedStartMarker: marker,
++            currentStartMarker: otherGeneration,
++        })).toBe('ignore')
++    })
++
++    it('ignores a webhook when the live generation cannot be probed', () => {
++        expect(decideUntrackedRunnerWebhook({
++            concurrentClients: false,
++            timedOutByThisRunner: false,
++            reportedStartMarker: marker,
++            currentStartMarker: null,
++        })).toBe('ignore')
++    })
++
++    it('ignores a webhook without a marker instead of adopting blindly', () => {
++        // Older CLI: nothing proves the generation, so leave the PID untracked
++        // rather than pin whatever owns it now to this session.
++        for (const concurrentClients of [false, true]) {
++            expect(decideUntrackedRunnerWebhook({
++                concurrentClients,
++                timedOutByThisRunner: false,
++                reportedStartMarker: undefined,
++                currentStartMarker: marker,
++            })).toBe('ignore')
++        }
++        // The timeout ghost kill for such CLIs is unchanged.
++        expect(decideUntrackedRunnerWebhook({
++            concurrentClients: false,
++            timedOutByThisRunner: true,
++            reportedStartMarker: undefined,
++            currentStartMarker: marker,
++        })).toBe('kill')
++    })
+ })
+diff --git a/cli/src/runner/lateRunnerWebhook.ts b/cli/src/runner/lateRunnerWebhook.ts
+index 311fffbc7..eb66c308e 100644
+--- a/cli/src/runner/lateRunnerWebhook.ts
++++ b/cli/src/runner/lateRunnerWebhook.ts
+@@ -2,25 +2,43 @@
+  * Decision for a runner-spawned session webhook whose PID is not in this
+  * runner's in-memory TrackedSession map.
+  *
+- * - Shared Codex: never kill (siblings); adopt so StopSession can find the PID.
+  * - Nonshared + timed out by this runner generation: terminate (ghost after
+  *   webhook timeout).
+- * - Nonshared + not timed out (typical after runner restart mid-bootstrap):
+- *   durably adopt — Claude often has no HAPI id on argv yet, so ignoring the
++ * - Otherwise adopt so StopSession can find the PID: shared Codex roots are
++ *   siblings and must never be killed here; nonshared CLIs after a runner
++ *   restart mid-bootstrap often have no HAPI id on argv yet, so ignoring the
+  *   webhook leaves an unreapable detached CLI (#1910 / #1911).
++ * - Either way the webhook must prove it comes from the process that owns
++ *   the PID right now. Adoption persists the PID's current start marker as
++ *   the generation a later stopSession may tree-kill; a late webhook whose
++ *   PID the OS has since handed to another process (even another
++ *   runner-spawned CLI) would pin that foreign process to the session. The
++ *   reporting CLI sends its own marker as metadata.hostStartMarker:
++ *     - marker matches the live PID: adopt (or kill, if timed out);
++ *     - marker names another generation, or the probe failed: ignore — the
++ *       PID is not this session's process, leave it untracked, never kill;
++ *     - no marker (older CLI): nothing proves the generation, so ignore
++ *       instead of adopting blindly; the timeout ghost kill is unchanged.
+  */
+ 
+-export type UntrackedRunnerWebhookDecision = 'kill' | 'adopt'
++export type UntrackedRunnerWebhookDecision = 'kill' | 'adopt' | 'ignore'
+ 
+ export function decideUntrackedRunnerWebhook(opts: {
+     concurrentClients: boolean
+     timedOutByThisRunner: boolean
++    /** metadata.hostStartMarker as sent by the CLI; undefined from older CLIs. */
++    reportedStartMarker: string | undefined
++    /** getProcessStartMarker(pid) probed on receipt; null when the probe failed. */
++    currentStartMarker: string | null
+ }): UntrackedRunnerWebhookDecision {
+-    if (opts.concurrentClients) {
+-        return 'adopt'
++    if (opts.reportedStartMarker && opts.reportedStartMarker !== opts.currentStartMarker) {
++        return 'ignore'
+     }
+-    if (opts.timedOutByThisRunner) {
++    if (!opts.concurrentClients && opts.timedOutByThisRunner) {
+         return 'kill'
+     }
++    if (!opts.reportedStartMarker) {
++        return 'ignore'
++    }
+     return 'adopt'
+ }
+diff --git a/cli/src/runner/run.ts b/cli/src/runner/run.ts
+index a59d842bc..16cb278c8 100644
+--- a/cli/src/runner/run.ts
++++ b/cli/src/runner/run.ts
+@@ -558,11 +558,26 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+           // post-restart CLIs must be adopted so StopSession can find them —
+           // Claude often has no HAPI id on argv yet (#1910 / #1911).
+           const timedOutByThisRunner = webhookTimeoutOrphanPids.has(pid);
+-          webhookTimeoutOrphanPids.delete(pid);
++          // Adoption persists this marker as the generation a later stopSession
++          // may tree-kill, so the webhook must prove it still owns the PID
++          // (metadata.hostStartMarker). A late webhook after PID reuse would
++          // otherwise pin a foreign process to the session.
++          const processStartMarker = getProcessStartMarker(pid);
+           const decision = decideUntrackedRunnerWebhook({
+             concurrentClients: Boolean(sessionMetadata.capabilities?.concurrentClients),
+             timedOutByThisRunner,
++            reportedStartMarker: sessionMetadata.hostStartMarker,
++            currentStartMarker: processStartMarker,
+           });
++          if (decision === 'ignore') {
++            // Keep the timeout stamp: a transient probe failure must not turn
++            // the ghost's next webhook into an adoption.
++            logger.debug(
++              `[RUNNER RUN] Untracked runner-spawned PID ${pid} (session ${sessionId}) did not prove its process generation (reported ${sessionMetadata.hostStartMarker ?? 'none'}, live ${processStartMarker ?? 'none'}); leaving it alone`
++            );
++            return;
++          }
++          webhookTimeoutOrphanPids.delete(pid);
+           if (decision === 'kill') {
+             logger.debug(
+               `[RUNNER RUN] Ignoring late webhook from orphaned runner-spawned PID ${pid} (session ${sessionId}). Terminating child.`
+@@ -578,7 +593,6 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+             return;
+           }
+ 
+-          const processStartMarker = getProcessStartMarker(pid);
+           const adopted: TrackedSession = {
+             ...(sessionMetadata.capabilities?.concurrentClients
+               ? { sharedSessions: { [sessionId]: sessionMetadata } }
+diff --git a/cli/vitest.config.ts b/cli/vitest.config.ts
+index 489daf46f..5d32cf238 100644
+--- a/cli/vitest.config.ts
++++ b/cli/vitest.config.ts
+@@ -13,6 +13,7 @@ export default defineConfig({
+             // vitest.integration.config.ts), not inside the parallel
+             // unit-test suite.
+             '**/runner.integration.test.ts',
++            '**/lateRunnerWebhook.integration.test.ts',
+         ],
+         globalSetup: './src/test/globalSetup.ts',
+         setupFiles: './src/test/setup.ts',
+diff --git a/cli/vitest.integration.config.ts b/cli/vitest.integration.config.ts
+index 59806a387..bfad25430 100644
+--- a/cli/vitest.integration.config.ts
++++ b/cli/vitest.integration.config.ts
+@@ -1,17 +1,18 @@
+ /**
+  * Dedicated, serial project for the runner integration suite.
+  *
+- * `runner.integration.test.ts` starts real detached runner/session process
+- * trees against the isolated temporary hub. It must never run inside the
+- * default parallel unit-test suite (see the exclude in `vitest.config.ts`);
+- * run it explicitly with:
++ * `runner.integration.test.ts` and `lateRunnerWebhook.integration.test.ts`
++ * start real detached runner/session process trees against the isolated
++ * temporary hub. They must never run inside the default parallel unit-test
++ * suite (see the exclude in `vitest.config.ts`); run them explicitly with:
+  *
+  *   bun run test:integration            # serial runner lifecycle coverage
+  *   bun run test:integration:stress     # + the 20-session stress test
+  *
+- * The whole file runs in a single worker (`fileParallelism: false`) so
+- * resource ownership stays unambiguous and the suite-level registry cleanup
+- * (see `src/test/processRegistry.ts`) is authoritative.
++ * The files run one after another in a single worker
++ * (`fileParallelism: false`) so resource ownership stays unambiguous and the
++ * suite-level registry cleanup (see `src/test/processRegistry.ts`) is
++ * authoritative.
+  */
+ import { defineConfig } from 'vitest/config'
+ import { resolve } from 'node:path'
+@@ -20,7 +21,10 @@ export default defineConfig({
+     test: {
+         globals: false,
+         environment: 'node',
+-        include: ['src/runner/runner.integration.test.ts'],
++        include: [
++            'src/runner/runner.integration.test.ts',
++            'src/runner/lateRunnerWebhook.integration.test.ts',
++        ],
+         globalSetup: './src/test/globalSetup.ts',
+         setupFiles: './src/test/setup.ts',
+         // Real detached process trees: never parallelize this suite.
+diff --git a/shared/src/schemas.ts b/shared/src/schemas.ts
+index 88ba410d0..39fb0e8a3 100644
+--- a/shared/src/schemas.ts
++++ b/shared/src/schemas.ts
+@@ -131,6 +131,10 @@ export const MetadataSchema = z.object({
+     happyToolsDir: z.string().optional(),
+     startedFromRunner: z.boolean().optional(),
+     hostPid: z.number().optional(),
++    // Start marker of the reporting CLI process (cli getProcessStartMarker):
++    // lets the runner refuse to adopt a late webhook whose PID has since been
++    // reused by another process.
++    hostStartMarker: z.string().optional(),
+     hapiMcpUrl: z.string().url().optional(),
+     startedBy: z.enum(['runner', 'terminal']).optional(),
+     // 'running' | 'idle' | 'archived' (see shared/src/sessionLifecycle.ts).

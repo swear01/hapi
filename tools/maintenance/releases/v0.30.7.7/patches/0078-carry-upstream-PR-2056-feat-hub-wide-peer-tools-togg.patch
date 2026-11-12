@@ -1,0 +1,3068 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Fri, 23 Oct 2026 19:20:28 +0000
+Subject: [PATCH 78/94] carry(upstream): PR #2056 feat: hub-wide peer-tools
+ toggle in web Settings (stacked on #2052)
+
+---
+ .../agy/headless/agyHeadlessDriver.test.ts    |  45 ++++++-
+ cli/src/agy/headless/agyHeadlessDriver.ts     |  11 +-
+ cli/src/api/api.ts                            |  38 +++++-
+ cli/src/api/apiSession.test.ts                |  83 +++++++++++-
+ cli/src/api/apiSession.ts                     |  19 +++
+ cli/src/claude/claudeLocal.test.ts            |  46 ++++++-
+ cli/src/claude/claudeLocal.ts                 |   9 ++
+ cli/src/claude/claudeLocalLauncher.ts         |   1 +
+ cli/src/claude/claudeRemote.ts                |  11 ++
+ cli/src/claude/claudeRemoteLauncher.ts        |   1 +
+ cli/src/claude/sdk/query.ts                   |   3 +-
+ cli/src/claude/sdk/types.ts                   |   7 +
+ cli/src/claude/session.ts                     |   4 +
+ cli/src/claude/utils/startHappyServer.test.ts |  52 ++++++++
+ cli/src/claude/utils/startHappyServer.ts      |  15 ++-
+ cli/src/codex/codexAppServerClient.ts         |  11 +-
+ cli/src/codex/codexLocal.test.ts              |  63 +++++++++
+ cli/src/codex/codexLocal.ts                   |   8 +-
+ cli/src/codex/codexLocalLauncher.ts           |   2 +
+ cli/src/codex/codexRemoteLauncher.ts          |   8 +-
+ cli/src/codex/shared/root.test.ts             |  46 ++++++-
+ cli/src/codex/shared/root.ts                  |  16 ++-
+ cli/src/codex/utils/buildHapiMcpBridge.ts     |   6 +-
+ cli/src/copilot/copilotLocal.test.ts          |  61 ++++++++-
+ cli/src/copilot/copilotLocal.ts               |   7 +-
+ cli/src/copilot/copilotLocalLauncher.ts       |   3 +-
+ cli/src/copilot/copilotRemoteLauncher.ts      |   3 +-
+ cli/src/copilot/utils/copilotBackend.ts       |   4 +-
+ cli/src/cursor/cursorAcpRemoteLauncher.ts     |  10 +-
+ .../cursor/cursorLegacyRemoteLauncher.test.ts |  55 ++++++++
+ cli/src/cursor/cursorLegacyRemoteLauncher.ts  |   6 +-
+ cli/src/cursor/cursorLocal.test.ts            |  66 +++++++++
+ cli/src/cursor/cursorLocal.ts                 |   7 +-
+ cli/src/cursor/cursorLocalLauncher.ts         |   1 +
+ cli/src/cursor/utils/cursorAcpBackend.ts      |   4 +-
+ cli/src/dsh/dshRemoteLauncher.ts              |   3 +-
+ cli/src/grok/grokLocal.test.ts                |  82 +++++++++++-
+ cli/src/grok/grokLocal.ts                     |   7 +-
+ cli/src/grok/grokLocalLauncher.ts             |   3 +-
+ cli/src/grok/grokRemoteLauncher.ts            |   2 +
+ cli/src/grok/utils/grokBackend.ts             |   4 +-
+ cli/src/kimi/kimiLocal.test.ts                |  59 +++++++++
+ cli/src/kimi/kimiLocal.ts                     |  11 +-
+ cli/src/kimi/kimiLocalLauncher.test.ts        |  41 ++++++
+ cli/src/kimi/kimiLocalLauncher.ts             |   3 +-
+ cli/src/kimi/kimiRemoteLauncher.ts            |   3 +-
+ cli/src/kimi/utils/kimiBackend.ts             |   4 +-
+ cli/src/modules/common/peerTools.test.ts      | 125 +++++++++++++++++-
+ cli/src/modules/common/peerTools.ts           |  75 +++++++++--
+ cli/src/modules/pingPeer/pingPeer.test.ts     |  35 +++++
+ cli/src/modules/pingPeer/pingPeer.ts          |  27 ++--
+ cli/src/modules/spawnPeer/spawnPeer.test.ts   |  15 +++
+ cli/src/modules/spawnPeer/spawnPeer.ts        |   9 +-
+ cli/src/opencode/opencodeLocalLauncher.ts     |   4 +
+ cli/src/opencode/opencodeRemoteLauncher.ts    |   6 +-
+ cli/src/opencode/utils/opencodeBackend.ts     |   8 ++
+ cli/src/pi/runPi.test.ts                      |  27 +++-
+ cli/src/pi/runPi.ts                           |   5 +-
+ docs/guide/how-it-works.md                    |   2 +-
+ docs/guide/installation.md                    |   8 +-
+ hub/src/config/disablePeerTools.test.ts       |  84 ++++++++++++
+ hub/src/config/disablePeerTools.ts            |  37 ++++++
+ hub/src/config/settings.ts                    |   6 +
+ hub/src/web/routes/cli.ts                     |  11 +-
+ hub/src/web/routes/hubSettings.test.ts        |  18 ++-
+ hub/src/web/routes/hubSettings.ts             |   6 +-
+ shared/src/apiTypes.test.ts                   |  42 +++++-
+ shared/src/apiTypes.ts                        |  15 ++-
+ web/src/lib/locales/en.ts                     |   4 +
+ web/src/lib/locales/zh-CN.ts                  |   4 +
+ web/src/routes/settings/general.tsx           |  20 ++-
+ web/src/routes/settings/index.test.tsx        |  28 +++-
+ 72 files changed, 1479 insertions(+), 96 deletions(-)
+ create mode 100644 cli/src/cursor/cursorLocal.test.ts
+ create mode 100644 cli/src/kimi/kimiLocal.test.ts
+ create mode 100644 hub/src/config/disablePeerTools.test.ts
+ create mode 100644 hub/src/config/disablePeerTools.ts
+
+diff --git a/cli/src/agy/headless/agyHeadlessDriver.test.ts b/cli/src/agy/headless/agyHeadlessDriver.test.ts
+index 45dbdac36..e32e673fe 100644
+--- a/cli/src/agy/headless/agyHeadlessDriver.test.ts
++++ b/cli/src/agy/headless/agyHeadlessDriver.test.ts
+@@ -1,10 +1,11 @@
+-import { describe, expect, it, vi } from 'vitest';
++import { afterEach, describe, expect, it, vi } from 'vitest';
+ import { EventEmitter } from 'node:events';
+ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+ import { logger } from '@/ui/logger';
+-import { buildAgyHeadlessArgs, AgyHeadlessDriver } from './agyHeadlessDriver';
++import { buildAgyHeadlessArgs, buildAgySpawnEnv, AgyHeadlessDriver } from './agyHeadlessDriver';
+ import { AgySession } from '../session';
+ import { MessageQueue2 } from '@/utils/MessageQueue2';
++import { resetPeerToolsForTests } from '@/modules/common/peerTools';
+ import type { AgyMode, PermissionMode } from '../types';
+ 
+ // A fake agy binary: emits a fixed NDJSON stream for one turn, then exits 0.
+@@ -1416,3 +1417,43 @@ describe('AgyHeadlessDriver', () => {
+         expect(String(errorEvents[0][0].message)).toContain('exited with code 2');
+     }, 15000);
+ });
++
++describe('buildAgySpawnEnv peer-tools pinning (#2056)', () => {
++    const original = process.env.HAPI_DISABLE_PEER_TOOLS;
++    const originalSshClient = process.env.SSH_CLIENT;
++
++    afterEach(() => {
++        if (original === undefined) {
++            delete process.env.HAPI_DISABLE_PEER_TOOLS;
++        } else {
++            process.env.HAPI_DISABLE_PEER_TOOLS = original;
++        }
++        if (originalSshClient === undefined) {
++            delete process.env.SSH_CLIENT;
++        } else {
++            process.env.SSH_CLIENT = originalSshClient;
++        }
++        resetPeerToolsForTests();
++    });
++
++    it('pins the session snapshot and keeps the agy hardening vars', () => {
++        delete process.env.HAPI_DISABLE_PEER_TOOLS;
++        process.env.SSH_CLIENT = '1.2.3.4 55555 22';
++        const env = buildAgySpawnEnv(true);
++        expect(env.HAPI_DISABLE_PEER_TOOLS).toBe('1');
++        expect(env.GEMINI_FORCE_FILE_STORAGE).toBe('true');
++        expect(env.SSH_CLIENT).toBeUndefined();
++    });
++
++    it('pins an explicit enabled snapshot', () => {
++        delete process.env.HAPI_DISABLE_PEER_TOOLS;
++        expect(buildAgySpawnEnv(false).HAPI_DISABLE_PEER_TOOLS).toBe('0');
++    });
++
++    it('keeps a machine-level deploy override authoritative and does not mutate process.env', () => {
++        process.env.HAPI_DISABLE_PEER_TOOLS = '1';
++        const env = buildAgySpawnEnv(false);
++        expect(env.HAPI_DISABLE_PEER_TOOLS).toBe('1');
++        expect(process.env.GEMINI_FORCE_FILE_STORAGE).toBeUndefined();
++    });
++});
+diff --git a/cli/src/agy/headless/agyHeadlessDriver.ts b/cli/src/agy/headless/agyHeadlessDriver.ts
+index 2b62452d8..8557095e5 100644
+--- a/cli/src/agy/headless/agyHeadlessDriver.ts
++++ b/cli/src/agy/headless/agyHeadlessDriver.ts
+@@ -17,6 +17,7 @@ import { resolveAgyTurnModels } from '../utils/agyConversationModel';
+ import { killProcessByChildProcess } from '@/utils/process';
+ import { AGY_MODEL_LABELS } from '@hapi/protocol';
+ import { getAgentLaunchCommand } from '@/agent/agentLaunchCommand';
++import { isPeerToolsDisabled, withPeerToolsPreference } from '@/modules/common/peerTools';
+ 
+ const AGY_PRINT_TIMEOUT = '30m';
+ 
+@@ -76,13 +77,17 @@ export function buildAgyHeadlessArgs(opts: {
+  * the forwarded SSH agent. Only the session markers are removed (so agy does not
+  * classify the run as an SSH session and switch auth paths); SSH_AUTH_SOCK and
+  * SSH_AGENT_PID are kept for tool subprocesses.
++ *
++ * The session's peer-tools preference is pinned on top (#2056) so an agy agent
++ * shelling `hapi ping-peer` resolves it in the fresh child process; a non-empty
++ * machine-level HAPI_DISABLE_PEER_TOOLS stays authoritative (no overlay).
+  */
+-function buildAgySpawnEnv(): NodeJS.ProcessEnv {
++export function buildAgySpawnEnv(peerToolsDisabled?: boolean): NodeJS.ProcessEnv {
+     const env: NodeJS.ProcessEnv = { ...process.env, GEMINI_FORCE_FILE_STORAGE: 'true' }
+     for (const key of ['SSH_CLIENT', 'SSH_CONNECTION', 'SSH_TTY']) {
+         delete env[key]
+     }
+-    return env
++    return withPeerToolsPreference(peerToolsDisabled ?? isPeerToolsDisabled(), env)
+ }
+ 
+ export type AgyHeadlessDriverOptions = {
+@@ -121,7 +126,7 @@ export class AgyHeadlessDriver extends RemoteLauncherBase {
+             const child = spawn(getAgentLaunchCommand('agy'), args, {
+                 cwd,
+                 stdio: ['pipe', 'pipe', 'pipe'],
+-                env: buildAgySpawnEnv(),
++                env: buildAgySpawnEnv(this.session.client.peerToolsDisabled),
+             }) as ChildProcessWithoutNullStreams;
+             return child;
+         });
+diff --git a/cli/src/api/api.ts b/cli/src/api/api.ts
+index b1af703e6..3a89ea370 100644
+--- a/cli/src/api/api.ts
++++ b/cli/src/api/api.ts
+@@ -1,5 +1,6 @@
+ import axios from 'axios'
+ import type { AgentState, ClearOpencodeSessionCallbackRequest, ClearOpencodeSessionResponse, CreateMachineResponse, CreateSessionResponse, RunnerState, Machine, MachineMetadata, Metadata, Session } from '@/api/types'
++import { applyHubPeerToolsDisabled } from '@/modules/common/peerTools'
+ import type { LocalResumeTarget, ResumableSession } from '@hapi/protocol'
+ import {
+     AgentStateSchema,
+@@ -21,6 +22,15 @@ import { ApiMachineClient } from './apiMachine'
+ import { ApiSessionClient, type ApiSessionClientOptions } from './apiSession'
+ import { buildHubRequestHeaders } from './hubExtraHeaders'
+ 
++/**
++ * Session row plus the hub-level peer-tools preference captured from this
++ * session's own create/fetch response. The bootstrap-time snapshot is
++ * authoritative for everything derived from this session (tool registration,
++ * prompts, wrapped-agent child env); absent when an older hub does not send
++ * it.
++ */
++export type SessionBootstrapInfo = Session & { peerToolsDisabled?: boolean }
++
+ export class ApiClient {
+     static async create(): Promise<ApiClient> {
+         return new ApiClient(getAuthToken())
+@@ -52,7 +62,7 @@ export class ApiClient {
+         }
+         timeoutMs?: number
+         signal?: AbortSignal
+-    }): Promise<Session> {
++    }): Promise<SessionBootstrapInfo> {
+         const response = await axios.post<CreateSessionResponse>(
+             `${configuration.apiUrl}/cli/sessions`,
+             {
+@@ -87,6 +97,10 @@ export class ApiClient {
+             throw apiValidationError('Invalid /cli/sessions response', response)
+         }
+ 
++        if (typeof parsed.data.disablePeerTools === 'boolean') {
++            applyHubPeerToolsDisabled(parsed.data.disablePeerTools)
++        }
++
+         const raw = parsed.data.session
+ 
+         const metadata = (() => {
+@@ -121,11 +135,17 @@ export class ApiClient {
+             effort: raw.effort,
+             serviceTier: raw.serviceTier,
+             permissionMode: raw.permissionMode,
+-            collaborationMode: raw.collaborationMode
++            collaborationMode: raw.collaborationMode,
++            // Create-time peer-tools snapshot rides the row so downstream
++            // session state (ApiSessionClient) captures its own preference
++            // instead of the process-wide module value.
++            ...(typeof parsed.data.disablePeerTools === 'boolean'
++                ? { peerToolsDisabled: parsed.data.disablePeerTools }
++                : {})
+         }
+     }
+ 
+-    async getSession(sessionId: string): Promise<Session> {
++    async getSession(sessionId: string): Promise<SessionBootstrapInfo> {
+         const response = await axios.get(
+             `${configuration.apiUrl}/cli/sessions/${encodeURIComponent(sessionId)}`,
+             {
+@@ -139,6 +159,10 @@ export class ApiClient {
+             throw apiValidationError('Invalid /cli/sessions/:id response', response)
+         }
+ 
++        if (typeof parsed.data.disablePeerTools === 'boolean') {
++            applyHubPeerToolsDisabled(parsed.data.disablePeerTools)
++        }
++
+         const raw = parsed.data.session
+         const metadata = (() => {
+             if (raw.metadata == null) return null
+@@ -171,7 +195,13 @@ export class ApiClient {
+             effort: raw.effort,
+             serviceTier: raw.serviceTier,
+             permissionMode: raw.permissionMode,
+-            collaborationMode: raw.collaborationMode
++            collaborationMode: raw.collaborationMode,
++            // Bootstrap-time peer-tools snapshot rides the row so existing-
++            // session bootstraps (cold resume) capture their own preference
++            // instead of racing the process-wide module value.
++            ...(typeof parsed.data.disablePeerTools === 'boolean'
++                ? { peerToolsDisabled: parsed.data.disablePeerTools }
++                : {})
+         }
+     }
+ 
+diff --git a/cli/src/api/apiSession.test.ts b/cli/src/api/apiSession.test.ts
+index 063ff71f3..6274ae302 100644
+--- a/cli/src/api/apiSession.test.ts
++++ b/cli/src/api/apiSession.test.ts
+@@ -1,5 +1,7 @@
+-import { describe, expect, it, vi } from 'vitest'
++import { afterEach, describe, expect, it, vi } from 'vitest'
+ import type { Session } from './types'
++import type { SessionBootstrapInfo } from './api'
++import { resetPeerToolsForTests } from '@/modules/common/peerTools'
+ 
+ const socketHarness = vi.hoisted(() => ({
+     connectImmediately: true,
+@@ -326,6 +328,85 @@ describe('ApiSessionClient initial runtime heartbeat', () => {
+     })
+ })
+ 
++describe('ApiSessionClient peer-tools snapshot (#2056)', () => {
++    const originalEnv = process.env.HAPI_DISABLE_PEER_TOOLS
++
++    afterEach(() => {
++        if (originalEnv === undefined) {
++            delete process.env.HAPI_DISABLE_PEER_TOOLS
++        } else {
++            process.env.HAPI_DISABLE_PEER_TOOLS = originalEnv
++        }
++        resetPeerToolsForTests()
++    })
++
++    it('captures the create-time preference from the bootstrap row', () => {
++        socketHarness.sockets.length = 0
++        const client = new ApiSessionClient('token', { ...createSession(), peerToolsDisabled: true } as SessionBootstrapInfo)
++        expect(client.peerToolsDisabled).toBe(true)
++        client.close()
++    })
++
++    it('stays undefined when an older hub does not send the preference', () => {
++        socketHarness.sockets.length = 0
++        const client = new ApiSessionClient('token', createSession())
++        expect(client.peerToolsDisabled).toBeUndefined()
++        client.close()
++    })
++
++    it('adopts the snapshot when a pending session lazy-materializes', async () => {
++        socketHarness.sockets.length = 0
++        const materialize = vi.fn(async () => createSession({ namespace: 'default' }))
++        const client = new ApiSessionClient('token', createSession(), { materialize })
++        client.sendUserMessage('hello')
++        expect(await client.materialize()).toBe(true)
++        expect(client.peerToolsDisabled).toBeUndefined()
++        client.close()
++
++        socketHarness.sockets.length = 0
++        const materializeDisabled = vi.fn(async () => ({ ...createSession({ namespace: 'default' }), peerToolsDisabled: true } as SessionBootstrapInfo))
++        const adopted = new ApiSessionClient('token', createSession(), { materialize: materializeDisabled })
++        adopted.sendUserMessage('hello')
++        expect(await adopted.materialize()).toBe(true)
++        expect(adopted.peerToolsDisabled).toBe(true)
++        adopted.close()
++    })
++
++    it('resolves the snapshot through the machine env at capture time (both directions)', () => {
++        socketHarness.sockets.length = 0
++        delete process.env.HAPI_DISABLE_PEER_TOOLS
++        const faithful = new ApiSessionClient('token', { ...createSession(), peerToolsDisabled: true } as SessionBootstrapInfo)
++        expect(faithful.peerToolsDisabled).toBe(true)
++        faithful.close()
++
++        socketHarness.sockets.length = 0
++        // A non-empty deploy override must beat the hub value in BOTH
++        // directions at capture, so the stored snapshot never flips later
++        // with the process-wide module value (#2056 round 2).
++        process.env.HAPI_DISABLE_PEER_TOOLS = '1'
++        const machineWinsDisable = new ApiSessionClient('token', { ...createSession(), peerToolsDisabled: false } as SessionBootstrapInfo)
++        expect(machineWinsDisable.peerToolsDisabled).toBe(true)
++        machineWinsDisable.close()
++
++        socketHarness.sockets.length = 0
++        process.env.HAPI_DISABLE_PEER_TOOLS = '0'
++        const machineWinsEnable = new ApiSessionClient('token', { ...createSession(), peerToolsDisabled: true } as SessionBootstrapInfo)
++        expect(machineWinsEnable.peerToolsDisabled).toBe(false)
++        machineWinsEnable.close()
++    })
++
++    it('resolves the adopted snapshot through the machine env too (lazy materialization)', async () => {
++        socketHarness.sockets.length = 0
++        process.env.HAPI_DISABLE_PEER_TOOLS = '0'
++        const materializeDisabled = vi.fn(async () => ({ ...createSession({ namespace: 'default' }), peerToolsDisabled: true } as SessionBootstrapInfo))
++        const adopted = new ApiSessionClient('token', createSession(), { materialize: materializeDisabled })
++        adopted.sendUserMessage('hello')
++        expect(await adopted.materialize()).toBe(true)
++        expect(adopted.peerToolsDisabled).toBe(false)
++        adopted.close()
++    })
++})
++
+ describe('ApiSessionClient lazy materialization', () => {
+     it('does not connect or materialize without a real user message', async () => {
+         socketHarness.sockets.length = 0
+diff --git a/cli/src/api/apiSession.ts b/cli/src/api/apiSession.ts
+index dea7bab40..ed89db1b7 100644
+--- a/cli/src/api/apiSession.ts
++++ b/cli/src/api/apiSession.ts
+@@ -7,6 +7,8 @@ import type { ZodType } from 'zod'
+ import { logger } from '@/ui/logger'
+ import { backoff } from '@/utils/time'
+ import { apiValidationError } from '@/utils/errorUtils'
++import type { SessionBootstrapInfo } from './api'
++import { resolveSessionPeerToolsDisabled } from '@/modules/common/peerTools'
+ import { AsyncLock } from '@/utils/lock'
+ import type { RawJSONLines } from '@/claude/types'
+ import { configuration } from '@/configuration'
+@@ -243,6 +245,17 @@ export class ApiSessionClient extends EventEmitter {
+      * the handler must read this synchronously at registration.
+      */
+     hubArchived = false
++    /**
++     * Peer-tools kill switch captured from THIS session's create/fetch
++     * response and resolved through the machine-level deploy override at
++     * capture time (a non-empty HAPI_DISABLE_PEER_TOOLS beats the hub value in
++     * both directions; undefined when an older hub does not send it, or until
++     * a lazy pending session materializes). Authoritative for tool
++     * registration and wrapped-agent child env derived from this
++     * session; the module-wide preference only serves as fallback (#2056
++     * review: keep the resolved preference scoped per session/root).
++     */
++    peerToolsDisabled?: boolean
+     private readonly token: string
+     readonly sessionId: string
+     private metadata: Metadata | null
+@@ -300,6 +313,8 @@ export class ApiSessionClient extends EventEmitter {
+         this.metadataVersion = session.metadataVersion
+         this.agentState = session.agentState
+         this.agentStateVersion = session.agentStateVersion
++        const bootstrapSnapshot = (session as SessionBootstrapInfo).peerToolsDisabled
++        this.peerToolsDisabled = bootstrapSnapshot === undefined ? undefined : resolveSessionPeerToolsDisabled(bootstrapSnapshot)
+         this.materializer = options.materialize
+         this.onMaterialized = options.onMaterialized
+         this.state = this.materializer ? 'pending' : 'active'
+@@ -612,6 +627,10 @@ export class ApiSessionClient extends EventEmitter {
+                 this.metadataVersion = materialized.metadataVersion
+                 this.agentState = materialized.agentState
+                 this.agentStateVersion = materialized.agentStateVersion
++                const materializedSnapshot = (materialized as SessionBootstrapInfo).peerToolsDisabled
++                this.peerToolsDisabled = materializedSnapshot === undefined
++                    ? this.peerToolsDisabled
++                    : resolveSessionPeerToolsDisabled(materializedSnapshot)
+                 this.state = 'active'
+ 
+                 if (shouldSyncMetadata && latestMetadata) {
+diff --git a/cli/src/claude/claudeLocal.test.ts b/cli/src/claude/claudeLocal.test.ts
+index 760d3ed1a..b0342cb7f 100644
+--- a/cli/src/claude/claudeLocal.test.ts
++++ b/cli/src/claude/claudeLocal.test.ts
+@@ -1,4 +1,4 @@
+-import { beforeEach, describe, expect, it, vi } from 'vitest'
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+ 
+ const harness = vi.hoisted(() => ({
+     spawn: vi.fn(async (_opts: unknown) => {})
+@@ -41,6 +41,7 @@ vi.mock('./sdk/utils', () => ({
+ }))
+ 
+ import { claudeLocal } from './claudeLocal'
++import { resetPeerToolsForTests } from '@/modules/common/peerTools'
+ 
+ function getSpawnArgs(): string[] {
+     const call = harness.spawn.mock.calls[0]
+@@ -104,3 +105,46 @@ describe('claudeLocal model arguments', () => {
+         expect(args).toContain('--verbose')
+     })
+ })
++
++describe('claudeLocal peer-tools child env (#2056)', () => {
++    const original = process.env.HAPI_DISABLE_PEER_TOOLS
++
++    beforeEach(() => {
++        harness.spawn.mockClear()
++    })
++
++    afterEach(() => {
++        if (original === undefined) delete process.env.HAPI_DISABLE_PEER_TOOLS
++        else process.env.HAPI_DISABLE_PEER_TOOLS = original
++        resetPeerToolsForTests()
++    })
++
++    async function spawnEnv(peerToolsDisabled?: boolean): Promise<Record<string, string | undefined>> {
++        await claudeLocal({
++            abort: new AbortController().signal,
++            sessionId: null,
++            path: '/workspace',
++            hookSettingsPath: '/tmp/hooks.json',
++            ...(peerToolsDisabled === undefined ? {} : { peerToolsDisabled })
++        })
++        const call = harness.spawn.mock.calls[0]
++        expect(call).toBeDefined()
++        return (call[0] as { env: Record<string, string | undefined> }).env
++    }
++
++    it('pins a disabled session snapshot as an explicit env value', async () => {
++        delete process.env.HAPI_DISABLE_PEER_TOOLS
++        expect((await spawnEnv(true)).HAPI_DISABLE_PEER_TOOLS).toBe('1')
++    })
++
++    it('pins an enabled session explicitly so a later hub flip cannot rewrite the child', async () => {
++        delete process.env.HAPI_DISABLE_PEER_TOOLS
++        expect((await spawnEnv(false)).HAPI_DISABLE_PEER_TOOLS).toBe('0')
++    })
++
++    it('keeps a machine-level override authoritative (no session overlay)', async () => {
++        process.env.HAPI_DISABLE_PEER_TOOLS = '1'
++        const env = await spawnEnv(false)
++        expect(env.HAPI_DISABLE_PEER_TOOLS).toBe('1')
++    })
++})
+diff --git a/cli/src/claude/claudeLocal.ts b/cli/src/claude/claudeLocal.ts
+index 2d7a8f5fb..c51552e03 100644
+--- a/cli/src/claude/claudeLocal.ts
++++ b/cli/src/claude/claudeLocal.ts
+@@ -3,6 +3,7 @@ import { logger } from "@/ui/logger";
+ import { claudeCheckSession } from "./utils/claudeCheckSession";
+ import { getProjectPath } from "./utils/path";
+ import { appendMcpConfigArg } from "./utils/mcpConfig";
++import { isPeerToolsDisabled, peerToolsEnvOverlay } from '@/modules/common/peerTools';
+ import { withBunRuntimeEnv } from "@/utils/bunRuntime";
+ import { spawnWithTerminalGuard } from "@/utils/spawnWithTerminalGuard";
+ import { getHapiBlobsDir } from "@/constants/uploadPaths";
+@@ -35,6 +36,7 @@ export async function claudeLocal(opts: {
+     mcpServers?: Record<string, any>,
+     path: string,
+     claudeEnvVars?: Record<string, string>,
++    peerToolsDisabled?: boolean
+     claudeArgs?: string[]
+     model?: SessionModel
+     allowedTools?: string[]
+@@ -107,9 +109,16 @@ export async function claudeLocal(opts: {
+     // excludes the session from `claude --resume`. Destructure it out
+     // so the child uses its own default entrypoint.
+     const { CLAUDE_CODE_ENTRYPOINT: _, ...cleanEnv } = process.env
++    const peerToolsDisabled = opts.peerToolsDisabled ?? isPeerToolsDisabled();
+     const env = {
+         ...cleanEnv,
+         DISABLE_AUTOUPDATER: '1',
++        // Propagate the resolved peer-tools switch into the wrapped-agent env:
++        // shells spawning `hapi ping-peer` lose the wrapper's module memory,
++        // so the preference must travel as an explicit env value. Explicit
++        // claudeEnvVars still win; machine-level HAPI_DISABLE_PEER_TOOLS stays
++        // authoritative inside peerToolsEnvOverlay.
++        ...peerToolsEnvOverlay(peerToolsDisabled),
+         ...opts.claudeEnvVars
+     }
+ 
+diff --git a/cli/src/claude/claudeLocalLauncher.ts b/cli/src/claude/claudeLocalLauncher.ts
+index 13e99cd55..d1f2f8438 100644
+--- a/cli/src/claude/claudeLocalLauncher.ts
++++ b/cli/src/claude/claudeLocalLauncher.ts
+@@ -82,6 +82,7 @@ export async function claudeLocalLauncher(session: Session): Promise<'switch' |
+                     sessionId: session.sessionId,
+                     abort: abortSignal,
+                     claudeEnvVars: session.claudeEnvVars,
++                    peerToolsDisabled: session.peerToolsDisabled,
+                     claudeArgs: session.claudeArgs,
+                     model: session.getModel(),
+                     mcpServers: session.mcpServers,
+diff --git a/cli/src/claude/claudeRemote.ts b/cli/src/claude/claudeRemote.ts
+index 0e091ebb7..e4b972f07 100644
+--- a/cli/src/claude/claudeRemote.ts
++++ b/cli/src/claude/claudeRemote.ts
+@@ -8,6 +8,7 @@ import { logger } from "@/lib";
+ import { PushableAsyncIterable } from "@/utils/PushableAsyncIterable";
+ import { getProjectPath } from "./utils/path";
+ import { awaitFileExist } from "@/modules/watcher/awaitFileExist";
++import { isPeerToolsDisabled, withPeerToolsPreference } from '@/modules/common/peerTools';
+ import { PermissionResult } from "./sdk/types";
+ import { getHapiBlobsDir } from "@/constants/uploadPaths";
+ import { getDefaultClaudeCodePath } from "./sdk/utils";
+@@ -30,6 +31,7 @@ export async function claudeRemote(opts: {
+     path: string,
+     mcpServers?: Record<string, any>,
+     claudeEnvVars?: Record<string, string>,
++    peerToolsDisabled?: boolean,
+     claudeArgs?: string[],
+     allowedTools: string[],
+     hookSettingsPath: string,
+@@ -262,7 +264,16 @@ export async function claudeRemote(opts: {
+ 
+     // Prepare SDK options. For --fork-session, start query() before waiting for the
+     // first child prompt so the native fork materializes at the clicked source state.
++    // Snapshot (env > this session's bootstrap): must not flip when a later
++    // session in this process bootstraps with another preference.
++    const peerToolsDisabled = opts.peerToolsDisabled ?? isPeerToolsDisabled();
+     const sdkOptions: Options = {
++        // Propagate the resolved peer-tools switch onto the spawned Claude
++        // process so shells running `hapi ping-peer` resolve it without the
++        // wrapper's module memory. Machine-level env overrides stay
++        // authoritative inside peerToolsEnvOverlay; claudeEnvVars (applied to
++        // this process below) may still win explicitly.
++        env: withPeerToolsPreference(peerToolsDisabled),
+         additionalArgs: filterCatalogAffectingClaudeArgs(opts.claudeArgs),
+         cwd: opts.path,
+         resume: startFrom ?? undefined,
+diff --git a/cli/src/claude/claudeRemoteLauncher.ts b/cli/src/claude/claudeRemoteLauncher.ts
+index f2c5be0fd..73bdee17b 100644
+--- a/cli/src/claude/claudeRemoteLauncher.ts
++++ b/cli/src/claude/claudeRemoteLauncher.ts
+@@ -555,6 +555,7 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
+                         },
+                         onThinkingChange: session.onThinkingChange,
+                         claudeEnvVars: session.claudeEnvVars,
++                        peerToolsDisabled: session.peerToolsDisabled,
+                         claudeArgs: session.claudeArgs,
+                         onMessage,
+                         onFirstResult: (initialMessage) => {
+diff --git a/cli/src/claude/sdk/query.ts b/cli/src/claude/sdk/query.ts
+index 7181406d4..5777a1931 100644
+--- a/cli/src/claude/sdk/query.ts
++++ b/cli/src/claude/sdk/query.ts
+@@ -304,6 +304,7 @@ export function query(config: {
+         options: {
+             additionalArgs = [],
+             additionalDirectories = [],
++            env,
+             allowedTools = [],
+             appendSystemPrompt,
+             customSystemPrompt,
+@@ -387,7 +388,7 @@ export function query(config: {
+     cleanupMcpConfig = appendMcpConfigArg(spawnArgs, mcpServers)
+ 
+     // Spawn Claude Code process
+-    const spawnEnv = withBunRuntimeEnv(process.env, { allowBunBeBun: false })
++    const spawnEnv = withBunRuntimeEnv(env ?? process.env, { allowBunBeBun: false })
+     logDebug(`Spawning Claude Code process: ${spawnCommand} ${spawnArgs.join(' ')}`)
+ 
+     const child = spawn(spawnCommand, spawnArgs, {
+diff --git a/cli/src/claude/sdk/types.ts b/cli/src/claude/sdk/types.ts
+index 57d05fd90..b79fc9e68 100644
+--- a/cli/src/claude/sdk/types.ts
++++ b/cli/src/claude/sdk/types.ts
+@@ -199,6 +199,13 @@ export interface CanCallToolCallback {
+ export interface QueryOptions {
+     abort?: AbortSignal
+     additionalArgs?: string[]
++    /**
++     * Base environment for the spawned Claude process (defaults to
++     * process.env). Lets a wrapped session pin env values — e.g. the resolved
++     * peer-tools switch — onto its own child without mutating the runner's
++     * process-wide env.
++     */
++    env?: Record<string, string | undefined>
+     additionalDirectories?: string[]
+     allowedTools?: string[]
+     appendSystemPrompt?: string
+diff --git a/cli/src/claude/session.ts b/cli/src/claude/session.ts
+index e8178d7b2..07a4a39a0 100644
+--- a/cli/src/claude/session.ts
++++ b/cli/src/claude/session.ts
+@@ -1,4 +1,5 @@
+ import { LocalPermissionBridge } from './utils/localPermissionBridge';
++import { isPeerToolsDisabled } from '@/modules/common/peerTools';
+ import { ApiClient, ApiSessionClient } from '@/lib';
+ import { MessageQueue2 } from '@/utils/MessageQueue2';
+ import { logger } from '@/ui/logger';
+@@ -15,6 +16,8 @@ type LocalLaunchFailure = {
+ 
+ export class Session extends AgentSessionBase<EnhancedMode> {
+     readonly claudeEnvVars?: Record<string, string>;
++    /** Peer-tools switch captured from this session's bootstrap (env > hub). */
++    readonly peerToolsDisabled: boolean;
+     claudeArgs?: string[];
+     readonly mcpServers: Record<string, any>;
+     readonly allowedTools?: string[];
+@@ -71,6 +74,7 @@ export class Session extends AgentSessionBase<EnhancedMode> {
+         });
+ 
+         this.claudeEnvVars = opts.claudeEnvVars;
++        this.peerToolsDisabled = opts.client.peerToolsDisabled ?? isPeerToolsDisabled();
+         this.claudeArgs = opts.claudeArgs;
+         this.mcpServers = opts.mcpServers;
+         this.allowedTools = opts.allowedTools;
+diff --git a/cli/src/claude/utils/startHappyServer.test.ts b/cli/src/claude/utils/startHappyServer.test.ts
+index 3013ebad4..cefa8420e 100644
+--- a/cli/src/claude/utils/startHappyServer.test.ts
++++ b/cli/src/claude/utils/startHappyServer.test.ts
+@@ -27,6 +27,7 @@ vi.mock('@/modules/spawnPeer/spawnPeer', async () => {
+ import type { ApiSessionClient } from '@/api/apiSession'
+ import { PingPeerError } from '@/modules/pingPeer/pingPeer'
+ import { SpawnPeerError } from '@/modules/spawnPeer/spawnPeer'
++import { applyHubPeerToolsDisabled, resetPeerToolsForTests } from '@/modules/common/peerTools'
+ import { startHappyServer, toClaudeAllowedHapiMcpTools } from './startHappyServer'
+ 
+ type ToolResult = {
+@@ -418,6 +419,7 @@ describe('startHappyServer peer tools kill switch', () => {
+         } else {
+             process.env.HAPI_DISABLE_PEER_TOOLS = originalFlag
+         }
++        resetPeerToolsForTests()
+     })
+ 
+     async function startServer(): Promise<{ url: string; toolNames: string[] }> {
+@@ -456,4 +458,54 @@ describe('startHappyServer peer tools kill switch', () => {
+         expect(names).not.toContain('spawn_peer')
+         expect(names).toEqual(expect.arrayContaining(['display_image', 'display_video', 'display_media']))
+     })
++
++    it('omits peer tools from registration and toolNames when the hub preference disables them', async () => {
++        delete process.env.HAPI_DISABLE_PEER_TOOLS
++        applyHubPeerToolsDisabled(true)
++        const { toolNames } = await startServer()
++        expect(toolNames).toEqual(['change_title', 'display_image', 'display_video', 'display_media'])
++        const tools = await client!.listTools()
++        const names = tools.tools.map((tool) => tool.name)
++        expect(names).not.toContain('ping_peer')
++        expect(names).not.toContain('inspect_peer')
++        expect(names).not.toContain('spawn_peer')
++    })
++
++    it('keeps handlers registered by an enabled session working after a later session flips the global switch (#2056)', async () => {
++        delete process.env.HAPI_DISABLE_PEER_TOOLS
++        const { pingPeer } = await import('@/modules/pingPeer/pingPeer')
++        vi.mocked(pingPeer).mockRejectedValueOnce(new Error('offline in test'))
++
++        // Session A bootstraps with peer tools enabled (create-time snapshot).
++        const sessionClient = {
++            peerToolsDisabled: false,
++            updateMetadata: vi.fn(),
++            sendAgentMessage: vi.fn(),
++            sendClaudeSessionMessage: vi.fn()
++        } as unknown as ApiSessionClient
++        const server = await startHappyServer(sessionClient, {})
++        stopServer = server.stop
++        client = new Client(
++            { name: 'hapi-peer-flip-test', version: '1.0.0' },
++            { capabilities: {} }
++        )
++        await client.connect(new StreamableHTTPClientTransport(new URL(server.url)))
++
++        // Session B bootstraps elsewhere in the same process and flips the
++        // module-wide preference. A's registered handlers must keep working.
++        applyHubPeerToolsDisabled(true)
++
++        const result = await client.callTool({
++            name: 'ping_peer',
++            arguments: { sessionId: '05d9f0f2-9273-4137-933c-07459a1146a2', message: 'hello' }
++        }) as ToolResult
++        expect(result.isError).toBe(true)
++        expect(JSON.stringify(result.content)).not.toContain('peer session tools are disabled')
++        // The handler resolved the guard from A's captured snapshot, not the
++        // flipped module state.
++        expect(pingPeer).toHaveBeenCalledWith(expect.objectContaining({
++            sessionId: '05d9f0f2-9273-4137-933c-07459a1146a2',
++            peerToolsDisabled: false
++        }))
++    })
+ })
+diff --git a/cli/src/claude/utils/startHappyServer.ts b/cli/src/claude/utils/startHappyServer.ts
+index b1e384718..9c726a7df 100644
+--- a/cli/src/claude/utils/startHappyServer.ts
++++ b/cli/src/claude/utils/startHappyServer.ts
+@@ -144,9 +144,12 @@ function createHapiMcpServer(
+ 
+     const maxInlineMediaBytes = 25 * 1024 * 1024;
+ 
+-    // HAPI_DISABLE_PEER_TOOLS=1: peer tools are neither registered nor
+-    // advertised, so wrapped agents cannot browse or message other sessions.
+-    const peerToolsDisabled = isPeerToolsDisabled();
++    // HAPI_DISABLE_PEER_TOOLS=1 (or the hub toggle): peer tools are neither
++    // registered nor advertised, so wrapped agents cannot browse or message
++    // other sessions. Prefer this session's create-time snapshot over the
++    // module-wide preference: one runner process hosts many sessions, and a
++    // later bootstrap must not flip an already-running session (new-session-only).
++    const peerToolsDisabled = client.peerToolsDisabled ?? isPeerToolsDisabled();
+ 
+     const inspectPeerInputSchema: z.ZodTypeAny = z.object({
+         sessionId: z.string().uuid().describe(SESSION_ID_PARAM_DESCRIPTION),
+@@ -331,6 +334,7 @@ function createHapiMcpServer(
+                     sessionId: args.sessionId,
+                     message: args.message,
+                     remitId: args.remitId,
++                    peerToolsDisabled,
+                 });
+                 return {
+                     content: [
+@@ -393,6 +397,7 @@ function createHapiMcpServer(
+                     sessionType: args.sessionType,
+                     permissionMode: args.permissionMode as Parameters<typeof spawnPeer>[0]['permissionMode'],
+                     remitId: args.remitId,
++                    peerToolsDisabled,
+                 });
+                 return {
+                     content: [
+@@ -434,6 +439,7 @@ function createHapiMcpServer(
+                 const result = await inspectPeer({
+                     sessionId: args.sessionId,
+                     messageLimit: args.messageLimit,
++                    peerToolsDisabled,
+                 });
+                 return {
+                     content: [
+@@ -583,12 +589,13 @@ export async function startHappyServer(client: ApiSessionClient, options: StartH
+         hapiMcpUrl: mcpUrl,
+     }));
+ 
++    const peerToolsDisabled = client.peerToolsDisabled ?? isPeerToolsDisabled();
+     const toolNames = [
+         ...(enableChangeTitle ? ['change_title'] : []),
+         'display_image',
+         'display_video',
+         'display_media',
+-        ...(isPeerToolsDisabled() ? [] : PEER_TOOL_NAMES),
++        ...(peerToolsDisabled ? [] : PEER_TOOL_NAMES),
+     ];
+     if (options.skillLookup) {
+         toolNames.push('skill_lookup');
+diff --git a/cli/src/codex/codexAppServerClient.ts b/cli/src/codex/codexAppServerClient.ts
+index 2ed5ee34c..d9d91b408 100644
+--- a/cli/src/codex/codexAppServerClient.ts
++++ b/cli/src/codex/codexAppServerClient.ts
+@@ -82,6 +82,12 @@ export function isIndeterminateError(error: unknown): boolean {
+ 
+ type CodexAppServerClientOptions = {
+     cwd?: string;
++    /**
++     * Base env for the spawned `codex app-server` child; defaults to
++     * process.env. Callers pass the session-pinned peer-tools overlay so
++     * shell commands inside the app-server resolve the switch consistently.
++     */
++    env?: NodeJS.ProcessEnv;
+     /** An independently owned shared server. Disconnect only detaches this client. */
+     endpoint?: string;
+     token?: string;
+@@ -256,10 +262,11 @@ export class CodexAppServerClient extends JsonLineParser {
+ 
+         const codexCommand = resolveCodexAppServerCommand();
+         logger.debug(`[CodexAppServer] Starting ${codexCommand} app-server`);
++        const spawnEnv = this.options.env ?? process.env;
+         const child = spawn(codexCommand, ['app-server'], {
+             cwd: this.options.cwd,
+-            env: Object.keys(process.env).reduce((acc, key) => {
+-                const value = process.env[key];
++            env: Object.keys(spawnEnv).reduce((acc, key) => {
++                const value = spawnEnv[key];
+                 if (typeof value === 'string') acc[key] = value;
+                 return acc;
+             }, {} as Record<string, string>),
+diff --git a/cli/src/codex/codexLocal.test.ts b/cli/src/codex/codexLocal.test.ts
+index 7e0f99eb3..6abe1dfb7 100644
+--- a/cli/src/codex/codexLocal.test.ts
++++ b/cli/src/codex/codexLocal.test.ts
+@@ -149,6 +149,69 @@ describe('codexLocal', () => {
+         expect(args.some((arg) => arg.includes('developer_instructions'))).toBe(false);
+     });
+ 
++    it('pins the session peer-tools snapshot into the child env (#2056)', async () => {
++        const controller = new AbortController();
++
++        await codexLocal({
++            abort: controller.signal,
++            sessionId: null,
++            path: workspacePath,
++            onSessionFound: vi.fn(),
++            peerToolsDisabled: true
++        });
++
++        expect(spawnWithTerminalGuardMock).toHaveBeenCalledOnce();
++        const spawnOptions = spawnWithTerminalGuardMock.mock.calls[0][0] as {
++            env: Record<string, string | undefined>;
++            args: string[];
++        };
++        // A fresh `hapi ping-peer` in the agent's shell resolves the pinned
++        // value, not the wrapper process's module memory.
++        expect(spawnOptions.env.HAPI_DISABLE_PEER_TOOLS).toBe('1');
++    });
++
++    it('pins enabled sessions explicitly so a later global flip cannot rewrite their child (#2056)', async () => {
++        const controller = new AbortController();
++
++        await codexLocal({
++            abort: controller.signal,
++            sessionId: null,
++            path: workspacePath,
++            onSessionFound: vi.fn(),
++            peerToolsDisabled: false
++        });
++
++        const spawnOptions = spawnWithTerminalGuardMock.mock.calls[0][0] as {
++            env: Record<string, string | undefined>;
++            args: string[];
++        };
++        expect(spawnOptions.env.HAPI_DISABLE_PEER_TOOLS).toBe('0');
++    });
++
++    it('keeps a machine-level env override authoritative over the session snapshot (#2056)', async () => {
++        const original = process.env.HAPI_DISABLE_PEER_TOOLS;
++        process.env.HAPI_DISABLE_PEER_TOOLS = '1';
++        try {
++            const controller = new AbortController();
++            await codexLocal({
++                abort: controller.signal,
++                sessionId: null,
++                path: workspacePath,
++                onSessionFound: vi.fn(),
++                peerToolsDisabled: false
++            });
++            const spawnOptions = spawnWithTerminalGuardMock.mock.calls[0][0] as {
++                env: Record<string, string | undefined>;
++                args: string[];
++            };
++            // No session overlay: the deploy-time env inherits unchanged.
++            expect(spawnOptions.env.HAPI_DISABLE_PEER_TOOLS).toBe('1');
++        } finally {
++            if (original === undefined) delete process.env.HAPI_DISABLE_PEER_TOOLS;
++            else process.env.HAPI_DISABLE_PEER_TOOLS = original;
++        }
++    });
++
+     it('passes reasoning effort through Codex config instead of an unsupported CLI flag', async () => {
+         const controller = new AbortController();
+ 
+diff --git a/cli/src/codex/codexLocal.ts b/cli/src/codex/codexLocal.ts
+index 7d453564f..6bcf4d998 100644
+--- a/cli/src/codex/codexLocal.ts
++++ b/cli/src/codex/codexLocal.ts
+@@ -1,5 +1,6 @@
+ import { logger } from '@/ui/logger';
+ import { spawnWithTerminalGuard } from '@/utils/spawnWithTerminalGuard';
++import { isPeerToolsDisabled, withPeerToolsPreference } from '@/modules/common/peerTools';
+ import {
+     buildMcpServerConfigArgs,
+     buildCodexHookConfigArgs,
+@@ -116,6 +117,8 @@ export async function codexLocal(opts: {
+     sandbox?: 'read-only' | 'workspace-write' | 'danger-full-access';
+     onSessionFound: (id: string) => void;
+     codexArgs?: string[];
++    /** Session peer-tools snapshot; pins the spawned Codex env. */
++    peerToolsDisabled?: boolean;
+     mcpServers?: McpServersConfig;
+     sessionHook?: {
+         port: number;
+@@ -168,12 +171,15 @@ export async function codexLocal(opts: {
+     }
+ 
+     const codexCommand = resolveCodexCommand();
++    // Pin the session snapshot (env > this session's bootstrap) into the child
++    // env so a later bootstrap in the same runner process cannot flip it.
++    const peerEnv = withPeerToolsPreference(opts.peerToolsDisabled ?? isPeerToolsDisabled());
+ 
+     await spawnWithTerminalGuard({
+         command: codexCommand.command,
+         args: [...codexCommand.args, ...args],
+         cwd: opts.path,
+-        env: process.env,
++        env: peerEnv,
+         signal: opts.abort,
+         logLabel: 'CodexLocal',
+         spawnName: 'codex',
+diff --git a/cli/src/codex/codexLocalLauncher.ts b/cli/src/codex/codexLocalLauncher.ts
+index af8726c05..c8714fb98 100644
+--- a/cli/src/codex/codexLocalLauncher.ts
++++ b/cli/src/codex/codexLocalLauncher.ts
+@@ -3,6 +3,7 @@ import { logger } from '@/ui/logger';
+ import { resolve } from 'node:path';
+ import { startHookServer } from '@/claude/utils/startHookServer';
+ import { codexLocal } from './codexLocal';
++import { isPeerToolsDisabled, withPeerToolsPreference } from '@/modules/common/peerTools';
+ import type { ReasoningEffort } from './appServerTypes';
+ import { CodexSession } from './session';
+ import { createCodexSessionScanner, type CodexSessionScanner } from './utils/codexSessionScanner';
+@@ -466,6 +467,7 @@ export async function codexLocalLauncher(session: CodexSession): Promise<'switch
+             await codexLocal({
+                 path: session.path,
+                 sessionId: resumeSessionId,
++                peerToolsDisabled: session.client.peerToolsDisabled ?? isPeerToolsDisabled(),
+                 modelReasoningEffort: (session.getModelReasoningEffort() ?? undefined) as ReasoningEffort | undefined,
+                 onSessionFound: handleSessionFound,
+                 abort: abortSignal,
+diff --git a/cli/src/codex/codexRemoteLauncher.ts b/cli/src/codex/codexRemoteLauncher.ts
+index cee4967f4..4e47c4f29 100644
+--- a/cli/src/codex/codexRemoteLauncher.ts
++++ b/cli/src/codex/codexRemoteLauncher.ts
+@@ -17,6 +17,7 @@ import type { QueueReservation } from '@/utils/MessageQueue2';
+ import { hasCodexCliOverrides } from './utils/codexCliOverrides';
+ import { AppServerEventConverter } from './utils/appServerEventConverter';
+ import { registerGeneratedImageFromPath } from '@/modules/common/generatedImages';
++import { isPeerToolsDisabled, withPeerToolsPreference } from '@/modules/common/peerTools';
+ import { registerAppServerPermissionHandlers } from './utils/appServerPermissionAdapter';
+ import {
+     buildThreadStartParams,
+@@ -253,7 +254,12 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+     constructor(session: CodexSession) {
+         super(process.env.DEBUG ? session.logPath : undefined);
+         this.session = session;
+-        this.appServerClient = new CodexAppServerClient();
++        this.appServerClient = new CodexAppServerClient({
++            // Session-pinned peer-tools overlay: the app-server child resolves
++            // the switch from this session's create-time snapshot, not the
++            // runner process's latest module state.
++            env: withPeerToolsPreference(session.client.peerToolsDisabled ?? isPeerToolsDisabled())
++        });
+     }
+ 
+     protected createDisplay(context: RemoteLauncherDisplayContext): React.ReactElement {
+diff --git a/cli/src/codex/shared/root.test.ts b/cli/src/codex/shared/root.test.ts
+index 46a62dd88..b062bde2a 100644
+--- a/cli/src/codex/shared/root.test.ts
++++ b/cli/src/codex/shared/root.test.ts
+@@ -7,6 +7,7 @@ import { SharedCodexRoot, legacyHistoryCapture, type RootHost } from './root';
+ import { codexPlanProposalId } from './plan';
+ import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
+ import { SharedRewindBarrier } from './rewind';
++import { applyHubPeerToolsDisabled, resetPeerToolsForTests } from '@/modules/common/peerTools';
+ 
+ type NativeTurn = { id: string; status: string; items: unknown[]; startedAt?: number };
+ 
+@@ -77,7 +78,7 @@ type NativeSetup = { turns?: NativeTurn[]; children?: Record<string, NativeTurn[
+ // What bootstrapping a pre-shared launcher row produces.
+ const legacy = (): Partial<Metadata> => ({ codexSessionId: 'thread', ...legacyHistoryCapture({ path: '/repo', host: 'test', codexSessionId: 'thread' }) });
+ 
+-async function fixture(opts?: { hubArchived?: boolean; end?: RootHost['end']; metadata?: Partial<Metadata>; native?: NativeSetup; bindMayFail?: boolean }) {
++async function fixture(opts?: { hubArchived?: boolean; end?: RootHost['end']; metadata?: Partial<Metadata>; native?: NativeSetup; bindMayFail?: boolean; peerToolsDisabled?: boolean }) {
+     const directory = await mkdtemp('/tmp/hapi-shared-root-');
+     let state: AgentState = { steeringActive: true };
+     let metadata: Metadata = { path: directory, host: 'test', flavor: 'codex', ...opts?.metadata };
+@@ -91,6 +92,7 @@ async function fixture(opts?: { hubArchived?: boolean; end?: RootHost['end']; me
+     const session = {
+         sessionId: 'sid', getMetadata: () => metadata,
+         hubArchived: opts?.hubArchived ?? false,
++        peerToolsDisabled: opts?.peerToolsDisabled,
+         updateMetadata: (fn: (value: Metadata) => Metadata) => { metadata = fn(metadata); },
+         updateAgentState: updateState, keepAlive() {},
+         onUserMessage() {}, onCancelQueuedMessage() {}, onRetryQueuedMessage() {},
+@@ -727,3 +729,45 @@ describe('shared steering availability', () => {
+         await vi.waitFor(() => expect(end).toHaveBeenCalledTimes(1));
+     });
+ });
++
++describe('shared root peer-tools snapshot (create-time capture wins)', () => {
++    const originalEnv = process.env.HAPI_DISABLE_PEER_TOOLS;
++
++    afterEach(() => {
++        if (originalEnv === undefined) delete process.env.HAPI_DISABLE_PEER_TOOLS;
++        else process.env.HAPI_DISABLE_PEER_TOOLS = originalEnv;
++        resetPeerToolsForTests();
++    });
++
++    it('keeps a root created before a toggle flip advertising peer tools', async () => {
++        const enabled = await fixture({ peerToolsDisabled: false });
++        const before = enabled.root.config({}) as Record<string, unknown>;
++        expect((before.config as Record<string, unknown>)['shell_environment_policy.set.HAPI_DISABLE_PEER_TOOLS']).toBe('0');
++
++        // Another session bootstraps with the switch on: the module global
++        // flips, but this root's shell env stays pinned to its own
++        // create-time snapshot.
++        applyHubPeerToolsDisabled(true);
++        const after = enabled.root.config({}) as Record<string, unknown>;
++        expect((after.config as Record<string, unknown>)['shell_environment_policy.set.HAPI_DISABLE_PEER_TOOLS']).toBe('0');
++    });
++
++    it('pins a root created after the flip to disabled even when the switch turns back off', async () => {
++        applyHubPeerToolsDisabled(true);
++        const disabled = await fixture();
++        const before = disabled.root.config({}) as Record<string, unknown>;
++        expect((before.config as Record<string, unknown>)['shell_environment_policy.set.HAPI_DISABLE_PEER_TOOLS']).toBe('1');
++
++        applyHubPeerToolsDisabled(false);
++        const after = disabled.root.config({}) as Record<string, unknown>;
++        expect((after.config as Record<string, unknown>)['shell_environment_policy.set.HAPI_DISABLE_PEER_TOOLS']).toBe('1');
++    });
++
++    it('keeps a machine-level env override authoritative over the session snapshot', async () => {
++        process.env.HAPI_DISABLE_PEER_TOOLS = '1';
++        const enabled = await fixture({ peerToolsDisabled: false });
++        const config = enabled.root.config({}) as Record<string, unknown>;
++        // No overlay key: the deploy-time env inherits into children as-is.
++        expect((config.config as Record<string, unknown>)).not.toHaveProperty('shell_environment_policy.set.HAPI_DISABLE_PEER_TOOLS');
++    });
++});
+diff --git a/cli/src/codex/shared/root.ts b/cli/src/codex/shared/root.ts
+index c1d817293..414c5bd73 100644
+--- a/cli/src/codex/shared/root.ts
++++ b/cli/src/codex/shared/root.ts
+@@ -20,6 +20,7 @@ import { SharedCodexPermissions } from './permissions';
+ import { SharedCodexQueue } from './queue';
+ import { SharedCodexProjection, inputText, type HistoryBaseline } from './projection';
+ import { CodexSessionTitles } from '../utils/codexSessionTitles';
++import { isPeerToolsDisabled, peerToolsEnvOverlay } from '@/modules/common/peerTools';
+ import { record, string } from './gateway';
+ import { initializeSharedClient, type SharedLaunchOptions } from './launch';
+ import { inheritedSandbox, settingsMatch } from './settings';
+@@ -89,6 +90,8 @@ export class SharedCodexRoot {
+     private closing?: Promise<void>;
+     private readonly controls = new Set<Promise<unknown>>();
+     private reconnecting = false;
++    /** Peer-tools switch captured from this root's own bootstrap (env > hub). */
++    private readonly peerToolsDisabled: boolean;
+     private settings: RuntimeSettings = {};
+     private settingsNative: Record<string, unknown> = {};
+     private settingsNotification?: Record<string, unknown>;
+@@ -105,6 +108,9 @@ export class SharedCodexRoot {
+         this.titles = new CodexSessionTitles(this.session, bootstrap.workingDirectory, () => this.threadId || null,
+             { endpoint: host.endpoint, token: host.token });
+         this.rewindBarrier = new SharedRewindBarrier(join(host.directory, `${this.session.sessionId}.rewind.json`));
++        // Frozen at construction (right after this root's bootstrap): later
++        // roots in the same process must not flip this root's tools or shell env.
++        this.peerToolsDisabled = bootstrap.session.peerToolsDisabled ?? isPeerToolsDisabled();
+         this.client = new CodexAppServerClient({ endpoint: host.endpoint, token: host.token, cwd: bootstrap.workingDirectory });
+         this.client.setNotificationHandler((method, params) => {
+             if (method === 'serverRequest/resolved') {
+@@ -231,10 +237,18 @@ export class SharedCodexRoot {
+         return false;
+     }
+     config(params: Record<string, unknown>): Record<string, unknown> {
++        // Propagate the resolved peer-tools switch into this root's shell env:
++        // `hapi ping-peer` spawned by the agent resolves the captured value
++        // instead of the wrapper process's module memory. Machine-level env
++        // overrides stay authoritative (peerToolsEnvOverlay yields none), and
++        // the operator terminal never runs through a shared root.
++        const peerShellEnv = Object.fromEntries(Object.entries(peerToolsEnvOverlay(this.peerToolsDisabled))
++            .map(([name, value]) => [`shell_environment_policy.set.${name}`, value]));
+         return { ...params, cwd: params.cwd ?? this.bootstrap.workingDirectory,
+             config: {
+             ...record(params.config), 'mcp_servers.hapi': this.bridge.mcpServers.hapi,
+-            'shell_environment_policy.set.HAPI_SESSION_ID': this.session.sessionId
++            'shell_environment_policy.set.HAPI_SESSION_ID': this.session.sessionId,
++            ...peerShellEnv
+         } };
+     }
+     async bind(threadId: string, response: Record<string, unknown>, subscribe: boolean): Promise<void> {
+diff --git a/cli/src/codex/utils/buildHapiMcpBridge.ts b/cli/src/codex/utils/buildHapiMcpBridge.ts
+index cff9b4afa..1fe83cff6 100644
+--- a/cli/src/codex/utils/buildHapiMcpBridge.ts
++++ b/cli/src/codex/utils/buildHapiMcpBridge.ts
+@@ -107,8 +107,10 @@ export async function buildHapiMcpBridge(
+             approval_mode: 'prompt'
+         }
+     };
+-    // Skipped under HAPI_DISABLE_PEER_TOOLS (tool is not registered then).
+-    if (!isPeerToolsDisabled()) {
++    // Skipped when this session's peer tools are disabled (create-time
++    // snapshot first: later bootstraps in the same process must not flip an
++    // already-built bridge).
++    if (!(client.peerToolsDisabled ?? isPeerToolsDisabled())) {
+         tools.spawn_peer = {
+             approval_mode: 'prompt'
+         };
+diff --git a/cli/src/copilot/copilotLocal.test.ts b/cli/src/copilot/copilotLocal.test.ts
+index c487d2179..1f45a38e8 100644
+--- a/cli/src/copilot/copilotLocal.test.ts
++++ b/cli/src/copilot/copilotLocal.test.ts
+@@ -1,5 +1,16 @@
+-import { afterEach, describe, expect, it } from 'vitest';
+-import { buildCopilotLocalArgs } from './copilotLocal';
++import { afterEach, describe, expect, it, vi } from 'vitest';
++import { buildCopilotLocalArgs, copilotLocal } from './copilotLocal';
++import { spawnWithTerminalGuard } from '@/utils/spawnWithTerminalGuard';
++import { getAgentLaunchCommand } from '@/agent/agentLaunchCommand';
++import { resetPeerToolsForTests } from '@/modules/common/peerTools';
++
++vi.mock('@/utils/spawnWithTerminalGuard', () => ({
++    spawnWithTerminalGuard: vi.fn(async () => {})
++}));
++
++vi.mock('@/agent/agentLaunchCommand', () => ({
++    getAgentLaunchCommand: vi.fn(() => 'copilot')
++}));
+ 
+ const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
+ 
+@@ -25,3 +36,49 @@ describe('buildCopilotLocalArgs', () => {
+         expect(() => buildCopilotLocalArgs({ sessionId: 'session-1', model: 'gpt|whoami' })).toThrow('Invalid model');
+     });
+ });
++
++describe('copilotLocal peer-tools child env (#2056)', () => {
++    const original = process.env.HAPI_DISABLE_PEER_TOOLS;
++
++    afterEach(() => {
++        if (original === undefined) {
++            delete process.env.HAPI_DISABLE_PEER_TOOLS;
++        } else {
++            process.env.HAPI_DISABLE_PEER_TOOLS = original;
++        }
++        resetPeerToolsForTests();
++        vi.mocked(spawnWithTerminalGuard).mockClear();
++    });
++
++    async function spawnedEnv(peerToolsDisabled?: boolean): Promise<NodeJS.ProcessEnv> {
++        await copilotLocal({
++            path: '/work',
++            sessionId: 'copilot-session-1',
++            abort: new AbortController().signal,
++            ...(peerToolsDisabled === undefined ? {} : { peerToolsDisabled })
++        });
++        const call = vi.mocked(spawnWithTerminalGuard).mock.calls.at(-1);
++        expect(call).toBeDefined();
++        return call![0].env ?? {};
++    }
++
++    it('pins the disabled session snapshot into the child env', async () => {
++        delete process.env.HAPI_DISABLE_PEER_TOOLS;
++        expect((await spawnedEnv(true)).HAPI_DISABLE_PEER_TOOLS).toBe('1');
++    });
++
++    it('pins an explicit enabled snapshot', async () => {
++        delete process.env.HAPI_DISABLE_PEER_TOOLS;
++        expect((await spawnedEnv(false)).HAPI_DISABLE_PEER_TOOLS).toBe('0');
++    });
++
++    it('keeps a machine-level deploy override authoritative over the snapshot', async () => {
++        process.env.HAPI_DISABLE_PEER_TOOLS = '1';
++        expect((await spawnedEnv(false)).HAPI_DISABLE_PEER_TOOLS).toBe('1');
++    });
++
++    it('falls back to the module state when no snapshot was captured', async () => {
++        delete process.env.HAPI_DISABLE_PEER_TOOLS;
++        expect((await spawnedEnv()).HAPI_DISABLE_PEER_TOOLS).toBe('0');
++    });
++});
+diff --git a/cli/src/copilot/copilotLocal.ts b/cli/src/copilot/copilotLocal.ts
+index ae74ff018..0815065f3 100644
+--- a/cli/src/copilot/copilotLocal.ts
++++ b/cli/src/copilot/copilotLocal.ts
+@@ -1,6 +1,7 @@
+ import { logger } from '@/ui/logger';
+ import { spawnWithTerminalGuard } from '@/utils/spawnWithTerminalGuard';
+ import { getAgentLaunchCommand } from '@/agent/agentLaunchCommand';
++import { isPeerToolsDisabled, withPeerToolsPreference } from '@/modules/common/peerTools';
+ 
+ import type { CopilotAgentMode } from '@hapi/protocol';
+ import { assertSafeWindowsShellArg } from '@/grok/utils/windowsShellArgs';
+@@ -33,6 +34,8 @@ export async function copilotLocal(opts: {
+     effort?: string | null;
+     yolo?: boolean;
+     agentMode?: CopilotAgentMode;
++    /** Session peer-tools snapshot; resolved preference pins the child env. */
++    peerToolsDisabled?: boolean;
+ }): Promise<void> {
+     const args = buildCopilotLocalArgs(opts);
+ 
+@@ -42,7 +45,9 @@ export async function copilotLocal(opts: {
+         command: getAgentLaunchCommand('copilot'),
+         args,
+         cwd: opts.path,
+-        env: process.env,
++        // Pin the session's peer-tools preference so a Copilot agent shelling
++        // `hapi ping-peer` resolves it in the fresh child process (#2056).
++        env: withPeerToolsPreference(opts.peerToolsDisabled ?? isPeerToolsDisabled()),
+         signal: opts.abort,
+         shell: process.platform === 'win32',
+         logLabel: 'CopilotLocal',
+diff --git a/cli/src/copilot/copilotLocalLauncher.ts b/cli/src/copilot/copilotLocalLauncher.ts
+index 7873ec7bf..06dae97d5 100644
+--- a/cli/src/copilot/copilotLocalLauncher.ts
++++ b/cli/src/copilot/copilotLocalLauncher.ts
+@@ -57,7 +57,8 @@ export async function copilotLocalLauncher(
+                 model: opts.model,
+                 effort: opts.effort,
+                 yolo: approval.yolo,
+-                agentMode: session.getAgentMode()
++                agentMode: session.getAgentMode(),
++                peerToolsDisabled: session.client.peerToolsDisabled
+             });
+         },
+         sendFailureMessage: (message) => {
+diff --git a/cli/src/copilot/copilotRemoteLauncher.ts b/cli/src/copilot/copilotRemoteLauncher.ts
+index ad3597a49..a22a1e369 100644
+--- a/cli/src/copilot/copilotRemoteLauncher.ts
++++ b/cli/src/copilot/copilotRemoteLauncher.ts
+@@ -14,6 +14,7 @@ import { resolveCopilotRuntimeConfig } from './utils/config';
+ import { getCopilotAgentModeLabel, type CopilotAgentMode } from '@hapi/protocol';
+ import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
+ import { buildCopilotModelsResponseFromBackend } from '@/modules/common/copilotModels';
++import { isPeerToolsDisabled, withPeerToolsPreference } from '@/modules/common/peerTools';
+ 
+ export class CopilotRemoteLauncher extends RemoteLauncherBase {
+     private readonly session: CopilotSession;
+@@ -75,7 +76,7 @@ export class CopilotRemoteLauncher extends RemoteLauncherBase {
+         const runtimeConfig = resolveCopilotRuntimeConfig({ model: this.model });
+ 
+         this.currentAgentMode = session.getAgentMode();
+-        const backend = createCopilotBackend({ agentMode: this.currentAgentMode });
++        const backend = createCopilotBackend({ agentMode: this.currentAgentMode, env: withPeerToolsPreference(session.client.peerToolsDisabled ?? isPeerToolsDisabled()) });
+         this.backend = backend;
+         registerAcpSessionTitleSync(backend, session.client);
+ 
+diff --git a/cli/src/copilot/utils/copilotBackend.ts b/cli/src/copilot/utils/copilotBackend.ts
+index d67f76c71..13a7abfca 100644
+--- a/cli/src/copilot/utils/copilotBackend.ts
++++ b/cli/src/copilot/utils/copilotBackend.ts
+@@ -21,10 +21,10 @@ export function buildCopilotAcpArgs(opts?: { agentMode?: CopilotAgentMode }): st
+     return args;
+ }
+ 
+-export function createCopilotBackend(opts?: { agentMode?: CopilotAgentMode }): AcpSdkBackend {
++export function createCopilotBackend(opts?: { agentMode?: CopilotAgentMode; env?: NodeJS.ProcessEnv }): AcpSdkBackend {
+     return new AcpSdkBackend({
+         command: getAgentLaunchCommand('copilot'),
+         args: buildCopilotAcpArgs(opts),
+-        env: filterEnv(process.env)
++        env: filterEnv(opts?.env ?? process.env)
+     });
+ }
+diff --git a/cli/src/cursor/cursorAcpRemoteLauncher.ts b/cli/src/cursor/cursorAcpRemoteLauncher.ts
+index 5b290189c..16207753c 100644
+--- a/cli/src/cursor/cursorAcpRemoteLauncher.ts
++++ b/cli/src/cursor/cursorAcpRemoteLauncher.ts
+@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
+ import { logger } from '@/ui/logger';
+ import { AsyncLock } from '@/utils/lock';
+ import { buildHapiMcpBridge } from '@/codex/utils/buildHapiMcpBridge';
++import { isPeerToolsDisabled, withPeerToolsPreference } from '@/modules/common/peerTools';
+ import { convertAgentMessage } from '@/agent/messageConverter';
+ import { PermissionAdapter } from '@/agent/permissionAdapter';
+ import type { AgentMessage, McpServerStdio, PromptContent } from '@/agent/types';
+@@ -155,7 +156,8 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
+                 model: spawnModel,
+                 autoReview,
+                 worktree: session.cursorWorktree,
+-                addDirs: session.cursorAddDirs
++                addDirs: session.cursorAddDirs,
++                env: withPeerToolsPreference(session.client.peerToolsDisabled ?? isPeerToolsDisabled())
+             });
+             this.backend = backend;
+             registerAcpSessionTitleSync(backend, session.client);
+@@ -271,7 +273,8 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
+                             model: spawnModel,
+                             autoReview,
+                             worktree: session.cursorWorktree,
+-                            addDirs: session.cursorAddDirs
++                            addDirs: session.cursorAddDirs,
++                            env: withPeerToolsPreference(session.client.peerToolsDisabled ?? isPeerToolsDisabled())
+                         });
+                         this.backend = backend;
+                         registerAcpSessionTitleSync(backend, session.client);
+@@ -332,7 +335,8 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
+                             model: spawnModel,
+                             autoReview,
+                             worktree: session.cursorWorktree,
+-                            addDirs: session.cursorAddDirs
++                            addDirs: session.cursorAddDirs,
++                            env: withPeerToolsPreference(session.client.peerToolsDisabled ?? isPeerToolsDisabled())
+                         });
+                         this.backend = backend;
+                         registerAcpSessionTitleSync(backend, session.client);
+diff --git a/cli/src/cursor/cursorLegacyRemoteLauncher.test.ts b/cli/src/cursor/cursorLegacyRemoteLauncher.test.ts
+index 9b18c6c62..296ad0911 100644
+--- a/cli/src/cursor/cursorLegacyRemoteLauncher.test.ts
++++ b/cli/src/cursor/cursorLegacyRemoteLauncher.test.ts
+@@ -126,6 +126,61 @@ describe('cursorLegacyRemoteLauncher', () => {
+         expect(args).not.toContain('acp');
+     });
+ 
++    it('pins the session peer-tools preference into the legacy agent env (#2056)', async () => {
++        const original = process.env.HAPI_DISABLE_PEER_TOOLS;
++        try {
++            delete process.env.HAPI_DISABLE_PEER_TOOLS;
++            const child = makeChild();
++            spawnMock.mockReturnValue(child);
++
++            const queue = new MessageQueue2<EnhancedMode>(() => 'm');
++            queue.push('hello', { permissionMode: 'default' });
++            queue.close();
++
++            const client = { ...makeClient(), peerToolsDisabled: true };
++            const session = makeSession(queue, client);
++
++            const { cursorLegacyRemoteLauncher } = await import('./cursorLegacyRemoteLauncher');
++            await cursorLegacyRemoteLauncher(session);
++
++            expect(spawnMock).toHaveBeenCalledTimes(1);
++            expect((spawnMock.mock.calls[0]?.[2] as { env: NodeJS.ProcessEnv }).env.HAPI_DISABLE_PEER_TOOLS).toBe('1');
++        } finally {
++            if (original === undefined) {
++                delete process.env.HAPI_DISABLE_PEER_TOOLS;
++            } else {
++                process.env.HAPI_DISABLE_PEER_TOOLS = original;
++            }
++        }
++    });
++
++    it('keeps a machine-level deploy override authoritative over the snapshot (#2056)', async () => {
++        const original = process.env.HAPI_DISABLE_PEER_TOOLS;
++        try {
++            process.env.HAPI_DISABLE_PEER_TOOLS = '1';
++            const child = makeChild();
++            spawnMock.mockReturnValue(child);
++
++            const queue = new MessageQueue2<EnhancedMode>(() => 'm');
++            queue.push('hello', { permissionMode: 'default' });
++            queue.close();
++
++            const client = { ...makeClient(), peerToolsDisabled: false };
++            const session = makeSession(queue, client);
++
++            const { cursorLegacyRemoteLauncher } = await import('./cursorLegacyRemoteLauncher');
++            await cursorLegacyRemoteLauncher(session);
++
++            expect((spawnMock.mock.calls[0]?.[2] as { env: NodeJS.ProcessEnv }).env.HAPI_DISABLE_PEER_TOOLS).toBe('1');
++        } finally {
++            if (original === undefined) {
++                delete process.env.HAPI_DISABLE_PEER_TOOLS;
++            } else {
++                process.env.HAPI_DISABLE_PEER_TOOLS = original;
++            }
++        }
++    });
++
+     it('requeues the user message and surfaces an auth banner when agent exits with auth-required stderr', async () => {
+         const queue = new MessageQueue2<EnhancedMode>(() => 'm');
+         queue.push('do thing', { permissionMode: 'default' });
+diff --git a/cli/src/cursor/cursorLegacyRemoteLauncher.ts b/cli/src/cursor/cursorLegacyRemoteLauncher.ts
+index 89eca09f1..23691a5ab 100644
+--- a/cli/src/cursor/cursorLegacyRemoteLauncher.ts
++++ b/cli/src/cursor/cursorLegacyRemoteLauncher.ts
+@@ -14,6 +14,7 @@ import type { CursorSession } from './session';
+ import type { EnhancedMode } from './loop';
+ import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
+ import { getAgentLaunchCommand } from '@/agent/agentLaunchCommand';
++import { isPeerToolsDisabled, withPeerToolsPreference } from '@/modules/common/peerTools';
+ // TODO(cursor-acp): remove legacy stream-json resume path after migration window.
+ // New Cursor sessions use ACP only. This path exists because pre-ACP Cursor
+ // session_id values are not loadable via ACP session/load.
+@@ -269,7 +270,10 @@ class CursorRemoteLauncher extends RemoteLauncherBase {
+         return new Promise((resolve, reject) => {
+             const child = spawn(getAgentLaunchCommand('cursor'), args, {
+                 cwd,
+-                env: process.env,
++                // Pin the session's peer-tools preference so a legacy Cursor
++                // agent shelling `hapi ping-peer` resolves it in the fresh
++                // child process (#2056).
++                env: withPeerToolsPreference(this.session.client.peerToolsDisabled ?? isPeerToolsDisabled()),
+                 stdio: ['ignore', 'pipe', 'pipe'],
+                 shell: process.platform === 'win32',
+                 windowsHide: process.platform === 'win32'
+diff --git a/cli/src/cursor/cursorLocal.test.ts b/cli/src/cursor/cursorLocal.test.ts
+new file mode 100644
+index 000000000..864546b98
+--- /dev/null
++++ b/cli/src/cursor/cursorLocal.test.ts
+@@ -0,0 +1,66 @@
++import { afterEach, describe, expect, it, vi } from 'vitest';
++import { cursorLocal } from './cursorLocal';
++import { spawnWithTerminalGuard } from '@/utils/spawnWithTerminalGuard';
++import { getAgentLaunchCommand } from '@/agent/agentLaunchCommand';
++import { resetPeerToolsForTests } from '@/modules/common/peerTools';
++
++vi.mock('@/utils/spawnWithTerminalGuard', () => ({
++    spawnWithTerminalGuard: vi.fn(async () => {})
++}));
++
++vi.mock('@/agent/agentLaunchCommand', () => ({
++    getAgentLaunchCommand: vi.fn(() => 'cursor-agent')
++}));
++
++describe('cursorLocal peer-tools child env (#2056)', () => {
++    const original = process.env.HAPI_DISABLE_PEER_TOOLS;
++
++    afterEach(() => {
++        if (original === undefined) {
++            delete process.env.HAPI_DISABLE_PEER_TOOLS;
++        } else {
++            process.env.HAPI_DISABLE_PEER_TOOLS = original;
++        }
++        resetPeerToolsForTests();
++        vi.mocked(spawnWithTerminalGuard).mockClear();
++    });
++
++    async function spawnedEnv(): Promise<NodeJS.ProcessEnv> {
++        const call = vi.mocked(spawnWithTerminalGuard).mock.calls.at(-1);
++        expect(call).toBeDefined();
++        return call![0].env ?? {};
++    }
++
++    async function launchWith(peerToolsDisabled?: boolean): Promise<void> {
++        await cursorLocal({
++            abort: new AbortController().signal,
++            chatId: null,
++            path: '/work',
++            ...(peerToolsDisabled === undefined ? {} : { peerToolsDisabled })
++        });
++    }
++
++    it('pins the disabled session snapshot into the child env', async () => {
++        delete process.env.HAPI_DISABLE_PEER_TOOLS;
++        await launchWith(true);
++        expect((await spawnedEnv()).HAPI_DISABLE_PEER_TOOLS).toBe('1');
++    });
++
++    it('pins an explicit enabled snapshot so later global flips cannot rewrite the child', async () => {
++        delete process.env.HAPI_DISABLE_PEER_TOOLS;
++        await launchWith(false);
++        expect((await spawnedEnv()).HAPI_DISABLE_PEER_TOOLS).toBe('0');
++    });
++
++    it('keeps a machine-level deploy override authoritative over the snapshot', async () => {
++        process.env.HAPI_DISABLE_PEER_TOOLS = '1';
++        await launchWith(false);
++        expect((await spawnedEnv()).HAPI_DISABLE_PEER_TOOLS).toBe('1');
++    });
++
++    it('falls back to the module state when no snapshot was captured', async () => {
++        delete process.env.HAPI_DISABLE_PEER_TOOLS;
++        await launchWith();
++        expect((await spawnedEnv()).HAPI_DISABLE_PEER_TOOLS).toBe('0');
++    });
++});
+diff --git a/cli/src/cursor/cursorLocal.ts b/cli/src/cursor/cursorLocal.ts
+index 8ef116de7..7fa2d49e7 100644
+--- a/cli/src/cursor/cursorLocal.ts
++++ b/cli/src/cursor/cursorLocal.ts
+@@ -1,6 +1,7 @@
+ import { logger } from '@/ui/logger';
+ import { spawnWithTerminalGuard } from '@/utils/spawnWithTerminalGuard';
+ import { getAgentLaunchCommand } from '@/agent/agentLaunchCommand';
++import { isPeerToolsDisabled, withPeerToolsPreference } from '@/modules/common/peerTools';
+ 
+ /**
+  * Filter out 'resume' subcommand which is managed internally by hapi.
+@@ -32,6 +33,8 @@ export async function cursorLocal(opts: {
+     addDirs?: readonly string[];
+     onChatFound?: (chatId: string) => void;
+     cursorArgs?: string[];
++    /** Session peer-tools snapshot; resolved preference pins the child env. */
++    peerToolsDisabled?: boolean;
+ }): Promise<void> {
+     const args: string[] = [];
+ 
+@@ -86,7 +89,9 @@ export async function cursorLocal(opts: {
+         command: getAgentLaunchCommand('cursor'),
+         args,
+         cwd: opts.path,
+-        env: process.env,
++        // Pin the session's peer-tools preference so a Cursor agent shelling
++        // `hapi ping-peer` resolves it in the fresh child process (#2056).
++        env: withPeerToolsPreference(opts.peerToolsDisabled ?? isPeerToolsDisabled()),
+         signal: opts.abort,
+         logLabel: 'CursorLocal',
+         spawnName: 'agent',
+diff --git a/cli/src/cursor/cursorLocalLauncher.ts b/cli/src/cursor/cursorLocalLauncher.ts
+index 4e971b104..46e55c5bf 100644
+--- a/cli/src/cursor/cursorLocalLauncher.ts
++++ b/cli/src/cursor/cursorLocalLauncher.ts
+@@ -53,6 +53,7 @@ export async function cursorLocalLauncher(session: CursorSession): Promise<'swit
+                 autoReview,
+                 worktree: session.cursorWorktree,
+                 addDirs: session.cursorAddDirs,
++                peerToolsDisabled: session.client.peerToolsDisabled,
+                 onChatFound: (chatId) => session.onSessionFound(chatId)
+             });
+         },
+diff --git a/cli/src/cursor/utils/cursorAcpBackend.ts b/cli/src/cursor/utils/cursorAcpBackend.ts
+index e3955bba5..16b4463f2 100644
+--- a/cli/src/cursor/utils/cursorAcpBackend.ts
++++ b/cli/src/cursor/utils/cursorAcpBackend.ts
+@@ -26,6 +26,8 @@ export type CursorAcpBackendOptions = {
+     worktree?: boolean | string;
+     /** Extra workspace roots (`--add-dir`, repeatable). */
+     addDirs?: readonly string[];
++    /** Base env for the ACP child; defaults to process.env. */
++    env?: NodeJS.ProcessEnv;
+ };
+ 
+ /** Build `agent … acp` argv (global flags before the `acp` subcommand). */
+@@ -78,7 +80,7 @@ export function createCursorAcpBackend(opts: CursorAcpBackendOptions): AcpSdkBac
+     return new AcpSdkBackend({
+         command: getAgentLaunchCommand('cursor'),
+         args: buildCursorAcpArgs(opts),
+-        env: filterEnv(process.env),
++        env: filterEnv(opts.env ?? process.env),
+         flavor: 'cursor',
+     });
+ }
+diff --git a/cli/src/dsh/dshRemoteLauncher.ts b/cli/src/dsh/dshRemoteLauncher.ts
+index bb38a1115..dfe71a66b 100644
+--- a/cli/src/dsh/dshRemoteLauncher.ts
++++ b/cli/src/dsh/dshRemoteLauncher.ts
+@@ -10,6 +10,7 @@ import {
+ import { RemoteModeDisplay } from '@/ui/ink/RemoteModeDisplay'
+ import { AcpPermissionHandler } from '@/modules/common/permission/AcpPermissionHandler'
+ import { createDshBackend } from './utils/dshBackend'
++import { isPeerToolsDisabled, withPeerToolsPreference } from '@/modules/common/peerTools'
+ import type { DshSession } from './session'
+ 
+ export class DshRemoteLauncher extends RemoteLauncherBase {
+@@ -45,7 +46,7 @@ export class DshRemoteLauncher extends RemoteLauncherBase {
+     }
+ 
+     protected async runMainLoop(): Promise<void> {
+-        const backend = createDshBackend()
++        const backend = createDshBackend(withPeerToolsPreference(this.session.client.peerToolsDisabled ?? isPeerToolsDisabled()))
+         this.backend = backend
+         backend.onStderrError((error) => {
+             logger.debug('[dsh-acp] stderr error', error)
+diff --git a/cli/src/grok/grokLocal.test.ts b/cli/src/grok/grokLocal.test.ts
+index 7fa71a632..cc9a8d5ad 100644
+--- a/cli/src/grok/grokLocal.test.ts
++++ b/cli/src/grok/grokLocal.test.ts
+@@ -1,5 +1,16 @@
+-import { afterEach, describe, expect, it } from 'vitest'
+-import { buildGrokLocalArgs } from './grokLocal'
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import { buildGrokLocalArgs, grokLocal } from './grokLocal'
++import { spawnWithTerminalGuard } from '@/utils/spawnWithTerminalGuard'
++import { getAgentLaunchCommand } from '@/agent/agentLaunchCommand'
++import { resetPeerToolsForTests } from '@/modules/common/peerTools'
++
++vi.mock('@/utils/spawnWithTerminalGuard', () => ({
++    spawnWithTerminalGuard: vi.fn(async () => {})
++}))
++
++vi.mock('@/agent/agentLaunchCommand', () => ({
++    getAgentLaunchCommand: vi.fn(() => 'grok')
++}))
+ 
+ const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')
+ 
+@@ -57,3 +68,70 @@ describe('buildGrokLocalArgs', () => {
+         })).toThrow('Invalid effort')
+     })
+ })
++
++describe('grokLocal peer-tools child env (#2056)', () => {
++    const original = process.env.HAPI_DISABLE_PEER_TOOLS
++
++    afterEach(() => {
++        if (original === undefined) {
++            delete process.env.HAPI_DISABLE_PEER_TOOLS
++        } else {
++            process.env.HAPI_DISABLE_PEER_TOOLS = original
++        }
++        resetPeerToolsForTests()
++        vi.mocked(spawnWithTerminalGuard).mockClear()
++    })
++
++    async function spawnedEnv(): Promise<NodeJS.ProcessEnv> {
++        const call = vi.mocked(spawnWithTerminalGuard).mock.calls.at(-1)
++        expect(call).toBeDefined()
++        return call![0].env ?? {}
++    }
++
++    it('pins the disabled session snapshot into the child env', async () => {
++        delete process.env.HAPI_DISABLE_PEER_TOOLS
++        await grokLocal({
++            sessionId: 'grok-session-1',
++            resume: false,
++            path: '/work',
++            abort: new AbortController().signal,
++            peerToolsDisabled: true
++        })
++        expect((await spawnedEnv()).HAPI_DISABLE_PEER_TOOLS).toBe('1')
++    })
++
++    it('pins an explicit enabled snapshot so later global flips cannot rewrite the child', async () => {
++        delete process.env.HAPI_DISABLE_PEER_TOOLS
++        await grokLocal({
++            sessionId: 'grok-session-1',
++            resume: false,
++            path: '/work',
++            abort: new AbortController().signal,
++            peerToolsDisabled: false
++        })
++        expect((await spawnedEnv()).HAPI_DISABLE_PEER_TOOLS).toBe('0')
++    })
++
++    it('keeps a machine-level deploy override authoritative over the snapshot', async () => {
++        process.env.HAPI_DISABLE_PEER_TOOLS = '1'
++        await grokLocal({
++            sessionId: 'grok-session-1',
++            resume: false,
++            path: '/work',
++            abort: new AbortController().signal,
++            peerToolsDisabled: false
++        })
++        expect((await spawnedEnv()).HAPI_DISABLE_PEER_TOOLS).toBe('1')
++    })
++
++    it('falls back to the module state when no snapshot was captured', async () => {
++        delete process.env.HAPI_DISABLE_PEER_TOOLS
++        await grokLocal({
++            sessionId: 'grok-session-1',
++            resume: false,
++            path: '/work',
++            abort: new AbortController().signal
++        })
++        expect((await spawnedEnv()).HAPI_DISABLE_PEER_TOOLS).toBe('0')
++    })
++})
+diff --git a/cli/src/grok/grokLocal.ts b/cli/src/grok/grokLocal.ts
+index 4310a42e7..cc652db97 100644
+--- a/cli/src/grok/grokLocal.ts
++++ b/cli/src/grok/grokLocal.ts
+@@ -3,6 +3,7 @@ import { spawnWithTerminalGuard } from '@/utils/spawnWithTerminalGuard'
+ import { getAgentLaunchCommand } from '@/agent/agentLaunchCommand'
+ import type { PermissionMode } from './types'
+ import { assertSafeWindowsShellArg } from './utils/windowsShellArgs'
++import { isPeerToolsDisabled, withPeerToolsPreference } from '@/modules/common/peerTools'
+ 
+ type GrokLocalOptions = {
+     sessionId: string
+@@ -10,6 +11,8 @@ type GrokLocalOptions = {
+     model?: string
+     effort?: string
+     permissionMode?: PermissionMode
++    /** Session peer-tools snapshot; resolved preference pins the child env. */
++    peerToolsDisabled?: boolean
+ }
+ 
+ export function buildGrokLocalArgs(opts: GrokLocalOptions): string[] {
+@@ -48,7 +51,9 @@ export async function grokLocal(opts: GrokLocalOptions & {
+         command: getAgentLaunchCommand('grok'),
+         args,
+         cwd: opts.path,
+-        env: process.env,
++        // Pin the session's peer-tools preference so a Grok agent shelling
++        // `hapi ping-peer` resolves it in the fresh child process (#2056).
++        env: withPeerToolsPreference(opts.peerToolsDisabled ?? isPeerToolsDisabled()),
+         signal: opts.abort,
+         shell: process.platform === 'win32',
+         logLabel: 'GrokLocal',
+diff --git a/cli/src/grok/grokLocalLauncher.ts b/cli/src/grok/grokLocalLauncher.ts
+index c2b27fab2..f13dde02e 100644
+--- a/cli/src/grok/grokLocalLauncher.ts
++++ b/cli/src/grok/grokLocalLauncher.ts
+@@ -27,7 +27,8 @@ export async function grokLocalLauncher(
+                 abort: abortSignal,
+                 model: opts.model,
+                 effort: opts.effort,
+-                permissionMode: session.getPermissionMode() as PermissionMode | undefined
++                permissionMode: session.getPermissionMode() as PermissionMode | undefined,
++                peerToolsDisabled: session.client.peerToolsDisabled
+             })
+         },
+         sendFailureMessage: (message) => {
+diff --git a/cli/src/grok/grokRemoteLauncher.ts b/cli/src/grok/grokRemoteLauncher.ts
+index 94725fb1f..5b06b2007 100644
+--- a/cli/src/grok/grokRemoteLauncher.ts
++++ b/cli/src/grok/grokRemoteLauncher.ts
+@@ -21,6 +21,7 @@ import { GrokPermissionHandler } from './utils/permissionHandler'
+ import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
+ import { GrokConversationHistory } from './conversationHistory'
+ import { isObject } from '@hapi/protocol'
++import { isPeerToolsDisabled, withPeerToolsPreference } from '@/modules/common/peerTools'
+ 
+ type GrokRemoteLauncherOptions = {
+     model?: string
+@@ -70,6 +71,7 @@ class GrokRemoteLauncher extends RemoteLauncherBase {
+ 
+         const backend = createGrokBackend({
+             cwd: session.path,
++            env: withPeerToolsPreference(session.client.peerToolsDisabled ?? isPeerToolsDisabled()),
+             ...this.opts
+         })
+         this.backend = backend
+diff --git a/cli/src/grok/utils/grokBackend.ts b/cli/src/grok/utils/grokBackend.ts
+index 2bbf02f20..cd322328d 100644
+--- a/cli/src/grok/utils/grokBackend.ts
++++ b/cli/src/grok/utils/grokBackend.ts
+@@ -41,11 +41,13 @@ export function createGrokBackend(opts: {
+     cwd: string
+     model?: string
+     effort?: string
++    /** Base env for the ACP child; defaults to process.env. */
++    env?: NodeJS.ProcessEnv
+ }): AcpSdkBackend {
+     return new AcpSdkBackend({
+         command: getAgentLaunchCommand('grok'),
+         args: buildGrokAgentArgs(opts),
+-        env: filterEnv(process.env),
++        env: filterEnv(opts.env ?? process.env),
+         // Grok ACP emits true agent_message_chunk deltas. Default overlap
+         // dedupe treats a later "0" after "300" as an already-buffered suffix
+         // and drops it, so the hub stores 300 instead of 3000.
+diff --git a/cli/src/kimi/kimiLocal.test.ts b/cli/src/kimi/kimiLocal.test.ts
+new file mode 100644
+index 000000000..f138c0d16
+--- /dev/null
++++ b/cli/src/kimi/kimiLocal.test.ts
+@@ -0,0 +1,59 @@
++import { afterEach, describe, expect, it, vi } from 'vitest';
++import { kimiLocal } from './kimiLocal';
++import { spawnWithTerminalGuard } from '@/utils/spawnWithTerminalGuard';
++import { getAgentLaunchCommand } from '@/agent/agentLaunchCommand';
++import { resetPeerToolsForTests } from '@/modules/common/peerTools';
++
++vi.mock('@/utils/spawnWithTerminalGuard', () => ({
++    spawnWithTerminalGuard: vi.fn(async () => {})
++}));
++
++vi.mock('@/agent/agentLaunchCommand', () => ({
++    getAgentLaunchCommand: vi.fn(() => 'kimi')
++}));
++
++describe('kimiLocal peer-tools child env (#2056)', () => {
++    const original = process.env.HAPI_DISABLE_PEER_TOOLS;
++
++    afterEach(() => {
++        if (original === undefined) {
++            delete process.env.HAPI_DISABLE_PEER_TOOLS;
++        } else {
++            process.env.HAPI_DISABLE_PEER_TOOLS = original;
++        }
++        resetPeerToolsForTests();
++        vi.mocked(spawnWithTerminalGuard).mockClear();
++    });
++
++    async function spawnedEnv(peerToolsDisabled?: boolean): Promise<NodeJS.ProcessEnv> {
++        await kimiLocal({
++            path: '/work',
++            sessionId: 'kimi-session-1',
++            abort: new AbortController().signal,
++            ...(peerToolsDisabled === undefined ? {} : { peerToolsDisabled })
++        });
++        const call = vi.mocked(spawnWithTerminalGuard).mock.calls.at(-1);
++        expect(call).toBeDefined();
++        return call![0].env ?? {};
++    }
++
++    it('pins the disabled session snapshot into the child env', async () => {
++        delete process.env.HAPI_DISABLE_PEER_TOOLS;
++        expect((await spawnedEnv(true)).HAPI_DISABLE_PEER_TOOLS).toBe('1');
++    });
++
++    it('pins an explicit enabled snapshot', async () => {
++        delete process.env.HAPI_DISABLE_PEER_TOOLS;
++        expect((await spawnedEnv(false)).HAPI_DISABLE_PEER_TOOLS).toBe('0');
++    });
++
++    it('keeps a machine-level deploy override authoritative over the snapshot', async () => {
++        process.env.HAPI_DISABLE_PEER_TOOLS = '1';
++        expect((await spawnedEnv(false)).HAPI_DISABLE_PEER_TOOLS).toBe('1');
++    });
++
++    it('falls back to the module state when no snapshot was captured', async () => {
++        delete process.env.HAPI_DISABLE_PEER_TOOLS;
++        expect((await spawnedEnv()).HAPI_DISABLE_PEER_TOOLS).toBe('0');
++    });
++});
+diff --git a/cli/src/kimi/kimiLocal.ts b/cli/src/kimi/kimiLocal.ts
+index 44ad2db21..b89849580 100644
+--- a/cli/src/kimi/kimiLocal.ts
++++ b/cli/src/kimi/kimiLocal.ts
+@@ -1,6 +1,7 @@
+ import { logger } from '@/ui/logger';
+ import { spawnWithTerminalGuard } from '@/utils/spawnWithTerminalGuard';
+ import { getAgentLaunchCommand } from '@/agent/agentLaunchCommand';
++import { isPeerToolsDisabled, withPeerToolsPreference } from '@/modules/common/peerTools';
+ 
+ export async function kimiLocal(opts: {
+     path: string;
+@@ -9,6 +10,8 @@ export async function kimiLocal(opts: {
+     model?: string;
+     yolo?: boolean;
+     plan?: boolean;
++    /** Session peer-tools snapshot; resolved preference pins the child env. */
++    peerToolsDisabled?: boolean;
+ }): Promise<void> {
+     const args: string[] = [];
+ 
+@@ -25,17 +28,15 @@ export async function kimiLocal(opts: {
+         args.push('--plan');
+     }
+ 
+-    const env: NodeJS.ProcessEnv = {
+-        ...process.env
+-    };
+-
+     logger.debug(`[KimiLocal] Spawning kimi with args: ${JSON.stringify(args)}`);
+ 
+     await spawnWithTerminalGuard({
+         command: getAgentLaunchCommand('kimi'),
+         args,
+         cwd: opts.path,
+-        env,
++        // Pin the session's peer-tools preference so a Kimi agent shelling
++        // `hapi ping-peer` resolves it in the fresh child process (#2056).
++        env: withPeerToolsPreference(opts.peerToolsDisabled ?? isPeerToolsDisabled()),
+         signal: opts.abort,
+         shell: process.platform === 'win32',
+         logLabel: 'KimiLocal',
+diff --git a/cli/src/kimi/kimiLocalLauncher.test.ts b/cli/src/kimi/kimiLocalLauncher.test.ts
+index 4f1b7e13e..8f5e3406c 100644
+--- a/cli/src/kimi/kimiLocalLauncher.test.ts
++++ b/cli/src/kimi/kimiLocalLauncher.test.ts
+@@ -2,6 +2,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
+ import type { Metadata } from '@/api/types';
+ 
+ const harness = vi.hoisted(() => ({
++    launcherOptions: null as null | {
++        launch: (abortSignal: AbortSignal) => Promise<void>;
++    },
+     locatorOptions: null as null | {
+         onLocated: (located: { sessionId: string; wirePath: string; statePath: string }) => void;
+     },
+@@ -42,6 +45,11 @@ vi.mock('./utils/kimiSessionTitleWatcher', () => ({
+ 
+ vi.mock('@/modules/common/launcher/BaseLocalLauncher', () => ({
+     BaseLocalLauncher: class {
++        constructor(options: Record<string, unknown>) {
++            harness.launcherOptions = options as {
++                launch: (abortSignal: AbortSignal) => Promise<void>;
++            };
++        }
+         async run(): Promise<'exit'> {
+             harness.locatorOptions?.onLocated({
+                 sessionId: 'session_native',
+@@ -54,16 +62,23 @@ vi.mock('@/modules/common/launcher/BaseLocalLauncher', () => ({
+     }
+ }));
+ 
++vi.mock('./kimiLocal', () => ({
++    kimiLocal: vi.fn(async () => {})
++}));
++
+ import { kimiLocalLauncher } from './kimiLocalLauncher';
++import { kimiLocal } from './kimiLocal';
+ 
+ describe('kimiLocalLauncher title sync', () => {
+     afterEach(() => {
++        harness.launcherOptions = null;
+         harness.locatorOptions = null;
+         harness.titleWatcherOptions = null;
+         harness.titlesToEmit = [];
+         harness.locatorCleanup.mockClear();
+         harness.scannerCleanup.mockClear();
+         harness.titleWatcherCleanup.mockClear();
++        vi.mocked(kimiLocal).mockClear();
+     });
+ 
+     it('syncs the native state title and cleans up both session watchers', async () => {
+@@ -148,3 +163,29 @@ describe('kimiLocalLauncher title sync', () => {
+         expect(sendClaudeSessionMessage).not.toHaveBeenCalled();
+     });
+ });
++
++    it('threads the session peer-tools snapshot into kimiLocal (#2056)', async () => {
++        const session = {
++            path: '/tmp/workspace',
++            sessionId: null,
++            startedBy: 'terminal' as const,
++            startingMode: 'local' as const,
++            queue: {},
++            client: {
++                rpcHandlerManager: {},
++                peerToolsDisabled: true
++            },
++            getPermissionMode: () => 'default',
++            onSessionFound: () => {},
++            sendUserMessage: () => {},
++            sendAgentMessage: () => {},
++            sendSessionEvent: () => {},
++            recordLocalLaunchFailure: () => {}
++        };
++
++        await expect(kimiLocalLauncher(session as never, {})).resolves.toBe('exit');
++        expect(harness.launcherOptions?.launch).toBeTypeOf('function');
++        await harness.launcherOptions!.launch(new AbortController().signal);
++
++        expect(kimiLocal).toHaveBeenCalledWith(expect.objectContaining({ peerToolsDisabled: true }));
++    });
+diff --git a/cli/src/kimi/kimiLocalLauncher.ts b/cli/src/kimi/kimiLocalLauncher.ts
+index bcd6d8f2e..41b4da254 100644
+--- a/cli/src/kimi/kimiLocalLauncher.ts
++++ b/cli/src/kimi/kimiLocalLauncher.ts
+@@ -122,7 +122,8 @@ export async function kimiLocalLauncher(
+                 abort: abortSignal,
+                 model: opts.model,
+                 yolo: approval.yolo,
+-                plan: approval.plan
++                plan: approval.plan,
++                peerToolsDisabled: session.client.peerToolsDisabled
+             });
+         },
+         sendFailureMessage: (message) => {
+diff --git a/cli/src/kimi/kimiRemoteLauncher.ts b/cli/src/kimi/kimiRemoteLauncher.ts
+index 454f1fd5d..502fd3af6 100644
+--- a/cli/src/kimi/kimiRemoteLauncher.ts
++++ b/cli/src/kimi/kimiRemoteLauncher.ts
+@@ -2,6 +2,7 @@ import React from 'react';
+ import { registerAcpSessionTitleSync } from '@/agent/acpSessionTitle';
+ import { logger } from '@/ui/logger';
+ import { buildHapiMcpBridge } from '@/codex/utils/buildHapiMcpBridge';
++import { isPeerToolsDisabled, withPeerToolsPreference } from '@/modules/common/peerTools';
+ import { convertAgentMessage } from '@/agent/messageConverter';
+ import type { AgentMessage, McpServerStdio, PromptContent } from '@/agent/types';
+ import { RemoteLauncherBase, type RemoteLauncherDisplayContext, type RemoteLauncherExitReason } from '@/modules/common/remote/RemoteLauncherBase';
+@@ -66,7 +67,7 @@ export class KimiRemoteLauncher extends RemoteLauncherBase {
+ 
+         const runtimeConfig = resolveKimiRuntimeConfig({ model: this.model });
+ 
+-        const backend = createKimiBackend();
++        const backend = createKimiBackend(withPeerToolsPreference(session.client.peerToolsDisabled ?? isPeerToolsDisabled()));
+         this.backend = backend;
+         registerAcpSessionTitleSync(backend, session.client);
+ 
+diff --git a/cli/src/kimi/utils/kimiBackend.ts b/cli/src/kimi/utils/kimiBackend.ts
+index 8dd681eaf..e57a5395b 100644
+--- a/cli/src/kimi/utils/kimiBackend.ts
++++ b/cli/src/kimi/utils/kimiBackend.ts
+@@ -18,11 +18,11 @@ function filterEnv(env: NodeJS.ProcessEnv): Record<string, string> {
+  * is applied over ACP (`session/set_model` / `session/set_config_option`)
+  * after session creation — see kimiRemoteLauncher.
+  */
+-export function createKimiBackend(): AcpSdkBackend {
++export function createKimiBackend(env: NodeJS.ProcessEnv = process.env): AcpSdkBackend {
+     return new AcpSdkBackend({
+         command: getAgentLaunchCommand('kimi'),
+         args: ['acp'],
+-        env: filterEnv(process.env),
++        env: filterEnv(env),
+         flavor: 'kimi',
+     });
+ }
+diff --git a/cli/src/modules/common/peerTools.test.ts b/cli/src/modules/common/peerTools.test.ts
+index ed4fea379..23be829a4 100644
+--- a/cli/src/modules/common/peerTools.test.ts
++++ b/cli/src/modules/common/peerTools.test.ts
+@@ -1,5 +1,12 @@
+ import { afterEach, describe, expect, it } from 'vitest'
+-import { isPeerToolsDisabled } from './peerTools'
++import {
++    applyHubPeerToolsDisabled,
++    isPeerToolsDisabled,
++    peerToolsEnvOverlay,
++    resetPeerToolsForTests,
++    resolveSessionPeerToolsDisabled,
++    withPeerToolsPreference
++} from './peerTools'
+ 
+ describe('isPeerToolsDisabled', () => {
+     const original = process.env.HAPI_DISABLE_PEER_TOOLS
+@@ -10,6 +17,7 @@ describe('isPeerToolsDisabled', () => {
+         } else {
+             process.env.HAPI_DISABLE_PEER_TOOLS = original
+         }
++        resetPeerToolsForTests()
+     })
+ 
+     it('defaults to enabled (peer tools visible)', () => {
+@@ -22,13 +30,124 @@ describe('isPeerToolsDisabled', () => {
+         expect(isPeerToolsDisabled()).toBe(true)
+     })
+ 
+-    it('stays enabled for unrelated values', () => {
+-        process.env.HAPI_DISABLE_PEER_TOOLS = '0'
++    it.each(['0', 'false', 'off', 'no'])('keeps peer tools for explicit off spelling %s', (value) => {
++        process.env.HAPI_DISABLE_PEER_TOOLS = value
+         expect(isPeerToolsDisabled()).toBe(false)
+     })
+ 
++    it('disables peer tools for unrecognized values (fail-safe for a kill switch)', () => {
++        process.env.HAPI_DISABLE_PEER_TOOLS = 'banana'
++        expect(isPeerToolsDisabled()).toBe(true)
++    })
++
+     it('reads from an explicit env object', () => {
+         expect(isPeerToolsDisabled({ HAPI_DISABLE_PEER_TOOLS: '1' } as NodeJS.ProcessEnv)).toBe(true)
++        expect(isPeerToolsDisabled({ HAPI_DISABLE_PEER_TOOLS: '0' } as NodeJS.ProcessEnv)).toBe(false)
+         expect(isPeerToolsDisabled({} as NodeJS.ProcessEnv)).toBe(false)
+     })
++
++    it('applies the hub preference when env is unset or empty', () => {
++        delete process.env.HAPI_DISABLE_PEER_TOOLS
++        applyHubPeerToolsDisabled(true)
++        expect(isPeerToolsDisabled()).toBe(true)
++        applyHubPeerToolsDisabled(false)
++        expect(isPeerToolsDisabled()).toBe(false)
++
++        process.env.HAPI_DISABLE_PEER_TOOLS = ''
++        applyHubPeerToolsDisabled(true)
++        expect(isPeerToolsDisabled()).toBe(true)
++    })
++
++    it('lets an explicit env value override the hub preference in both directions', () => {
++        process.env.HAPI_DISABLE_PEER_TOOLS = '1'
++        applyHubPeerToolsDisabled(false)
++        expect(isPeerToolsDisabled()).toBe(true)
++
++        process.env.HAPI_DISABLE_PEER_TOOLS = '0'
++        applyHubPeerToolsDisabled(true)
++        expect(isPeerToolsDisabled()).toBe(false)
++    })
++})
++
++describe('peerToolsEnvOverlay', () => {
++    it('pins the session preference as an explicit env value when the machine env is unset', () => {
++        expect(peerToolsEnvOverlay(true, {} as NodeJS.ProcessEnv)).toEqual({ HAPI_DISABLE_PEER_TOOLS: '1' })
++        expect(peerToolsEnvOverlay(false, {} as NodeJS.ProcessEnv)).toEqual({ HAPI_DISABLE_PEER_TOOLS: '0' })
++    })
++
++    it('treats an empty machine env as unset (session preference still pins)', () => {
++        expect(peerToolsEnvOverlay(true, { HAPI_DISABLE_PEER_TOOLS: '' } as NodeJS.ProcessEnv))
++            .toEqual({ HAPI_DISABLE_PEER_TOOLS: '1' })
++    })
++
++    it('keeps a non-empty machine env authoritative (deploy-time override inherits, no overlay)', () => {
++        for (const machineValue of ['1', '0', 'banana']) {
++            expect(peerToolsEnvOverlay(true, { HAPI_DISABLE_PEER_TOOLS: machineValue } as NodeJS.ProcessEnv))
++                .toEqual({})
++            expect(peerToolsEnvOverlay(false, { HAPI_DISABLE_PEER_TOOLS: machineValue } as NodeJS.ProcessEnv))
++                .toEqual({})
++        }
++    })
++})
++
++describe('withPeerToolsPreference', () => {
++    it('produces an env that resolves to the session preference from a fresh process', () => {
++        // A wrapped agent shelling `hapi ping-peer` starts with no module
++        // memory; the pinned env alone must carry the resolution.
++        expect(isPeerToolsDisabled(withPeerToolsPreference(true, {} as NodeJS.ProcessEnv))).toBe(true)
++        expect(isPeerToolsDisabled(withPeerToolsPreference(false, {} as NodeJS.ProcessEnv))).toBe(false)
++    })
++
++    it('pins enabled sessions so a later global flip cannot rewrite their children', () => {
++        const childEnv = withPeerToolsPreference(false, {} as NodeJS.ProcessEnv)
++        applyHubPeerToolsDisabled(true)
++        expect(isPeerToolsDisabled(childEnv)).toBe(false)
++    })
++
++    it('lets a machine-level override beat the session snapshot (explicit env wins)', () => {
++        expect(isPeerToolsDisabled(withPeerToolsPreference(true, { HAPI_DISABLE_PEER_TOOLS: '0' } as NodeJS.ProcessEnv))).toBe(false)
++        expect(isPeerToolsDisabled(withPeerToolsPreference(false, { HAPI_DISABLE_PEER_TOOLS: '1' } as NodeJS.ProcessEnv))).toBe(true)
++    })
++
++    it('merges the overlay without mutating the source env', () => {
++        const source: NodeJS.ProcessEnv = { PATH: '/usr/bin' }
++        const merged = withPeerToolsPreference(true, source)
++        expect(merged).toEqual({ PATH: '/usr/bin', HAPI_DISABLE_PEER_TOOLS: '1' })
++        expect(source).toEqual({ PATH: '/usr/bin' })
++    })
++})
++
++describe('resolveSessionPeerToolsDisabled', () => {
++    const original = process.env.HAPI_DISABLE_PEER_TOOLS
++
++    afterEach(() => {
++        if (original === undefined) {
++            delete process.env.HAPI_DISABLE_PEER_TOOLS
++        } else {
++            process.env.HAPI_DISABLE_PEER_TOOLS = original
++        }
++        resetPeerToolsForTests()
++    })
++
++    it('honors the hub snapshot in both directions when env is unset', () => {
++        delete process.env.HAPI_DISABLE_PEER_TOOLS
++        expect(resolveSessionPeerToolsDisabled(true)).toBe(true)
++        expect(resolveSessionPeerToolsDisabled(false)).toBe(false)
++    })
++
++    it('lets a machine-level env beat the hub snapshot at capture time (both directions)', () => {
++        // The snapshot must land already env-resolved, otherwise a session
++        // captured while the deploy override stands would later flip with
++        // the process-wide module value (#2056 round 2).
++        process.env.HAPI_DISABLE_PEER_TOOLS = '1'
++        expect(resolveSessionPeerToolsDisabled(false)).toBe(true)
++
++        process.env.HAPI_DISABLE_PEER_TOOLS = '0'
++        expect(resolveSessionPeerToolsDisabled(true)).toBe(false)
++    })
++
++    it('treats an unrecognized env value as disabled (fail-safe kill switch)', () => {
++        process.env.HAPI_DISABLE_PEER_TOOLS = 'banana'
++        expect(resolveSessionPeerToolsDisabled(false)).toBe(true)
++    })
+ })
+diff --git a/cli/src/modules/common/peerTools.ts b/cli/src/modules/common/peerTools.ts
+index c4052bb52..2b3846cfc 100644
+--- a/cli/src/modules/common/peerTools.ts
++++ b/cli/src/modules/common/peerTools.ts
+@@ -2,17 +2,76 @@
+  * Kill switch for the peer-session MCP tools (`ping_peer` / `inspect_peer` /
+  * `spawn_peer`).
+  *
+- * Set `HAPI_DISABLE_PEER_TOOLS=1` in the runner environment to stop wrapped
+- * agents from reading or messaging other HAPI sessions: the tools are not
+- * registered on the session MCP server and not advertised via
+- * `--allowedTools` / `--tools`. The ping/inspect core refuses as defense in
+- * depth, so `hapi ping-peer` / `inspect-peer` from inside a wrapped agent
+- * shell fails loudly. Operators who keep the variable unset in their
+- * interactive shell keep full CLI access.
++ * Wrapped agents with these tools can read and message other sessions,
++ * polluting peer contexts on busy runners. When the switch is
++ * on, the tools are not registered on the session MCP server, not advertised
++ * via `--allowedTools` / `--tools`. The ping/inspect core refuses as defense in depth, so
++ * `hapi ping-peer` / `inspect-peer` from inside a wrapped agent shell fails
++ * loudly instead of silently bypassing the switch. Operators who keep the
++ * switch off in their interactive terminal keep full CLI access.
++ *
++ * Resolution order (mirrors sessionSummaryContract):
++ * 1. Explicit HAPI_DISABLE_PEER_TOOLS env (0|false|off|no → off; anything else → on)
++ * 2. Hub preference applied via `applyHubPeerToolsDisabled` (from session bootstrap)
++ * 3. Default: off (tools available)
+  */
+ 
+ export const PEER_TOOL_NAMES = ['ping_peer', 'inspect_peer', 'spawn_peer'] as const;
+ 
++let hubPreference: boolean | undefined
++
++/** Apply the hub-resolved toggle from session create/get bootstrap. */
++export function applyHubPeerToolsDisabled(disabled: boolean): void {
++    hubPreference = disabled
++}
++
++/** Test-only: clear hub preference between cases. */
++export function resetPeerToolsForTests(): void {
++    hubPreference = undefined
++}
++
+ export function isPeerToolsDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
+-    return ['true', '1', 'yes'].includes((env.HAPI_DISABLE_PEER_TOOLS ?? '').toLowerCase());
++    const raw = env.HAPI_DISABLE_PEER_TOOLS
++    if (raw !== undefined && raw !== '') {
++        const normalized = raw.trim().toLowerCase()
++        return !(normalized === '0' || normalized === 'false' || normalized === 'off' || normalized === 'no')
++    }
++    return hubPreference === true
++}
++
++/**
++ * Env overlay resolving the kill switch for one session's captured preference.
++ *
++ * Used for wrapped-agent child environments (claude/opencode/ACP spawn env,
++ * Codex per-root `shell_environment_policy.set`): an agent shelling out
++ * `hapi ping-peer` starts a fresh process where `hubPreference` is lost, so
++ * the resolved preference must travel as an explicit env value. Both branches
++ * pin an explicit value so a later global flip cannot rewrite a live child.
++ *
++ * A non-empty machine-level `HAPI_DISABLE_PEER_TOOLS` stays authoritative
++ * (deploy-time override inherits naturally into children). The operator
++ * terminal never passes through a wrapped-agent spawn, so its exemption is
++ * untouched.
++ */
++export function peerToolsEnvOverlay(disabled: boolean, env: NodeJS.ProcessEnv = process.env): Record<string, string> {
++    const raw = env.HAPI_DISABLE_PEER_TOOLS
++    if (raw !== undefined && raw !== '') return {}
++    return { HAPI_DISABLE_PEER_TOOLS: disabled ? '1' : '0' }
++}
++
++/** Child env after applying the session overlay. */
++export function withPeerToolsPreference(disabled: boolean, env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
++    return { ...env, ...peerToolsEnvOverlay(disabled, env) }
++}
++
++/**
++ * Resolve a session's create-time hub preference into the effective state,
++ * honoring the machine-level deploy override: a non-empty
++ * `HAPI_DISABLE_PEER_TOOLS` beats the hub value in both directions, otherwise
++ * the hub value stands. ApiSessionClient captures snapshots through this so
++ * every consumer (`client.peerToolsDisabled ?? isPeerToolsDisabled()`) reads
++ * an already-env-resolved truth instead of the raw hub boolean.
++ */
++export function resolveSessionPeerToolsDisabled(hubDisabled: boolean): boolean {
++    return isPeerToolsDisabled(withPeerToolsPreference(hubDisabled))
+ }
+diff --git a/cli/src/modules/pingPeer/pingPeer.test.ts b/cli/src/modules/pingPeer/pingPeer.test.ts
+index a51469988..7e7eee18e 100644
+--- a/cli/src/modules/pingPeer/pingPeer.test.ts
++++ b/cli/src/modules/pingPeer/pingPeer.test.ts
+@@ -8,6 +8,7 @@ import {
+     requireExactSessionId,
+     waitPeer
+ } from './pingPeer'
++import { applyHubPeerToolsDisabled, resetPeerToolsForTests } from '@/modules/common/peerTools'
+ 
+ const SESSION_ID = '05d9f0f2-9273-4137-933c-07459a1146a2'
+ const REMIT_ID = '7ee03698-0fe7-4f76-b8a8-d84f4eddbf5c'
+@@ -488,3 +489,37 @@ describe('HAPI_DISABLE_PEER_TOOLS kill switch', () => {
+         expect(exitCodeForPingPeerError(new PingPeerError('disabled', 'disabled on this machine'))).toBe(2)
+     })
+ })
++
++describe('hub disablePeerTools preference', () => {
++    const original = process.env.HAPI_DISABLE_PEER_TOOLS
++
++    beforeEach(() => {
++        delete process.env.HAPI_DISABLE_PEER_TOOLS
++        applyHubPeerToolsDisabled(true)
++    })
++
++    afterEach(() => {
++        if (original === undefined) {
++            delete process.env.HAPI_DISABLE_PEER_TOOLS
++        } else {
++            process.env.HAPI_DISABLE_PEER_TOOLS = original
++        }
++        resetPeerToolsForTests()
++    })
++
++    it('pingPeer refuses before any network call', async () => {
++        await expect(pingPeer({ sessionId: '05d9f0f2-9273-4137-933c-07459a1146a2', message: 'hi' }))
++            .rejects.toMatchObject({ code: 'disabled' })
++    })
++
++    it('inspectPeer refuses before any network call', async () => {
++        await expect(inspectPeer({ sessionId: '05d9f0f2-9273-4137-933c-07459a1146a2' }))
++            .rejects.toMatchObject({ code: 'disabled' })
++    })
++
++    it('mentions the hub administrator in the refusal message', async () => {
++        const failure = await pingPeer({ sessionId: '05d9f0f2-9273-4137-933c-07459a1146a2', message: 'hi' }).catch((error) => error)
++        expect(failure).toMatchObject({ code: 'disabled' })
++        expect(String(failure.message)).toContain('hub administrator')
++    })
++})
+diff --git a/cli/src/modules/pingPeer/pingPeer.ts b/cli/src/modules/pingPeer/pingPeer.ts
+index 41ea9f168..2ca9837c3 100644
+--- a/cli/src/modules/pingPeer/pingPeer.ts
++++ b/cli/src/modules/pingPeer/pingPeer.ts
+@@ -42,15 +42,22 @@ export class PingPeerError extends Error {
+ }
+ 
+ /**
+- * Defense-in-depth gate for HAPI_DISABLE_PEER_TOOLS: the MCP server and CLI
+- * surface refuse earlier, but any other caller (stale --tools bridge, shell
+- * `hapi ping-peer` from a wrapped agent) lands here and fails loudly.
++ * Defense-in-depth gate for the peer-tools switch (hub toggle or
++ * HAPI_DISABLE_PEER_TOOLS): the MCP server and CLI surface refuse earlier,
++ * but any other caller (stale --tools bridge, shell `hapi ping-peer` from a
++ * wrapped agent) lands here and fails loudly.
++ *
++ * MCP handlers pass their session's create-time snapshot so a later session
++ * bootstrapping with a different hub preference cannot flip an
++ * already-registered tool (new-session-only semantics). Without the snapshot
++ * (CLI entry points) the module-wide resolution applies — env first, then the
++ * latest bootstrap — which keeps the operator terminal env-only.
+  */
+-function assertPeerToolsEnabled(): void {
+-    if (isPeerToolsDisabled()) {
++function assertPeerToolsEnabled(sessionPreference?: boolean): void {
++    if (sessionPreference ?? isPeerToolsDisabled()) {
+         throw new PingPeerError(
+             'disabled',
+-            'peer session tools are disabled on this machine (HAPI_DISABLE_PEER_TOOLS is set)'
++            'peer session tools are disabled (disabled by your hub administrator, or HAPI_DISABLE_PEER_TOOLS is set)'
+         )
+     }
+ }
+@@ -75,6 +82,8 @@ export type PingPeerOptions = {
+     sessionId: string
+     message: string
+     remitId?: string
++    /** Create-time session snapshot; see assertPeerToolsEnabled. */
++    peerToolsDisabled?: boolean
+     waitActiveSecs?: number
+     apiUrl?: string
+     accessToken?: string
+@@ -353,7 +362,7 @@ export function resolvePeerSessionLabel(session: PingPeerSessionSummary): string
+ }
+ 
+ export async function pingPeer(options: PingPeerOptions): Promise<PingPeerResult> {
+-    assertPeerToolsEnabled()
++    assertPeerToolsEnabled(options.peerToolsDisabled)
+     const sessionId = requireExactSessionId(options.sessionId)
+     const message = options.message ?? ''
+     if (!message) {
+@@ -452,6 +461,8 @@ export function exitCodeForPingPeerError(error: PingPeerError): number {
+ 
+ export type InspectPeerOptions = {
+     sessionId: string
++    /** Create-time session snapshot; see assertPeerToolsEnabled. */
++    peerToolsDisabled?: boolean
+     /** Recent message page size (default 30, clamped 1..100). */
+     messageLimit?: number
+     apiUrl?: string
+@@ -587,7 +598,7 @@ async function fetchSessionMessages(
+  * Read-only: never resumes inactive sessions (unlike `pingPeer`).
+  */
+ export async function inspectPeer(options: InspectPeerOptions): Promise<InspectPeerResult> {
+-    assertPeerToolsEnabled()
++    assertPeerToolsEnabled(options.peerToolsDisabled)
+     const sessionId = requireExactSessionId(options.sessionId)
+     const messageLimit = clampInspectMessageLimit(options.messageLimit)
+ 
+diff --git a/cli/src/modules/spawnPeer/spawnPeer.test.ts b/cli/src/modules/spawnPeer/spawnPeer.test.ts
+index c70343afa..1a7bf10e1 100644
+--- a/cli/src/modules/spawnPeer/spawnPeer.test.ts
++++ b/cli/src/modules/spawnPeer/spawnPeer.test.ts
+@@ -346,3 +346,18 @@ describe('spawnPeer', () => {
+         })).rejects.toMatchObject({ code: 'bad_args' })
+     })
+ })
++
++describe('spawnPeer peer-tools switch', () => {
++    it('refuses before any network call when HAPI_DISABLE_PEER_TOOLS is set', async () => {
++        const original = process.env.HAPI_DISABLE_PEER_TOOLS
++        process.env.HAPI_DISABLE_PEER_TOOLS = '1'
++        try {
++            await expect(spawnPeer({ directory: '/tmp/project', message: 'work' }))
++                .rejects.toMatchObject({ code: 'disabled' })
++            expect(exitCodeForSpawnPeerError(new SpawnPeerError('disabled', 'disabled'))).toBe(2)
++        } finally {
++            if (original === undefined) delete process.env.HAPI_DISABLE_PEER_TOOLS
++            else process.env.HAPI_DISABLE_PEER_TOOLS = original
++        }
++    })
++})
+diff --git a/cli/src/modules/spawnPeer/spawnPeer.ts b/cli/src/modules/spawnPeer/spawnPeer.ts
+index ce83d5cb9..8379fbd69 100644
+--- a/cli/src/modules/spawnPeer/spawnPeer.ts
++++ b/cli/src/modules/spawnPeer/spawnPeer.ts
+@@ -12,9 +12,11 @@ import { configuration } from '@/configuration'
+ import { getAuthToken } from '@/api/auth'
+ import { buildHubRequestHeaders } from '@/api/hubExtraHeaders'
+ import { readSettings } from '@/persistence'
++import { isPeerToolsDisabled } from '@/modules/common/peerTools'
+ 
+ export type SpawnPeerErrorCode =
+     | 'bad_args'
++    | 'disabled'
+     | 'auth_failed'
+     | 'spawn_failed'
+     | 'cleanup_failed'
+@@ -32,6 +34,8 @@ export class SpawnPeerError extends Error {
+ }
+ 
+ export type SpawnPeerOptions = {
++    /** Create-time session snapshot; MCP handlers pass it so a later bootstrap cannot flip it. */
++    peerToolsDisabled?: boolean
+     directory: string
+     message: string
+     name?: string
+@@ -126,6 +130,9 @@ async function exchangeJwt(apiUrl: string, accessToken: string, http: AxiosInsta
+ }
+ 
+ export async function spawnPeer(options: SpawnPeerOptions): Promise<SpawnPeerResult> {
++    if (options.peerToolsDisabled ?? isPeerToolsDisabled()) {
++        throw new SpawnPeerError('disabled', 'peer session tools are disabled (disabled by your hub administrator, or HAPI_DISABLE_PEER_TOOLS is set)')
++    }
+     const rawDirectory = (options.directory ?? '').trim()
+     const message = options.message ?? ''
+     const name = (options.name ?? '').trim()
+@@ -291,7 +298,7 @@ export async function listMachineTargets(options: {
+ }
+ 
+ export function exitCodeForSpawnPeerError(error: SpawnPeerError): number {
+-    if (error.code === 'bad_args' || error.code === 'auth_failed') return 2
++    if (error.code === 'bad_args' || error.code === 'disabled' || error.code === 'auth_failed') return 2
+     if (error.code === 'cleanup_failed') return 5
+     return 3
+ }
+diff --git a/cli/src/opencode/opencodeLocalLauncher.ts b/cli/src/opencode/opencodeLocalLauncher.ts
+index 483e5e170..120bf3017 100644
+--- a/cli/src/opencode/opencodeLocalLauncher.ts
++++ b/cli/src/opencode/opencodeLocalLauncher.ts
+@@ -5,6 +5,7 @@ import { ensureOpencodeHookPlugin } from './utils/hookPlugin';
+ import { buildOpencodeEnv } from './utils/config';
+ import { ensureOpencodeConfig } from './utils/opencodeConfig';
+ import { buildHapiMcpBridge } from '@/codex/utils/buildHapiMcpBridge';
++import { isPeerToolsDisabled, peerToolsEnvOverlay } from '@/modules/common/peerTools';
+ import type { OpencodeHookEvent } from './types';
+ import type { OpencodeHookServer } from './utils/startOpencodeHookServer';
+ import { createOpencodeStorageScanner, type OpencodeStorageScannerHandle } from './utils/opencodeStorageScanner';
+@@ -205,6 +206,9 @@ export async function opencodeLocalLauncher(
+         startingMode: session.startingMode,
+         launch: async (abortSignal) => {
+             const env = buildOpencodeEnv();
++            // Propagate the resolved peer-tools switch onto the local agent
++            // process (see createOpencodeBackend for rationale).
++            Object.assign(env, peerToolsEnvOverlay(session.client.peerToolsDisabled ?? isPeerToolsDisabled()));
+             env.HAPI_OPENCODE_HOOK_URL = hookUrl;
+             env.HAPI_OPENCODE_HOOK_TOKEN = opts.hookServer.token;
+             if (!env.OPENCODE_CONFIG_DIR) {
+diff --git a/cli/src/opencode/opencodeRemoteLauncher.ts b/cli/src/opencode/opencodeRemoteLauncher.ts
+index 6848567b3..35fd5f03a 100644
+--- a/cli/src/opencode/opencodeRemoteLauncher.ts
++++ b/cli/src/opencode/opencodeRemoteLauncher.ts
+@@ -214,12 +214,14 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
+         const backend = isV2
+             ? createOpencodeBackend({
+                 cwd: session.path,
+-                majorVersion: 'v2' as OpencodeFlavorVersion
++                majorVersion: 'v2' as OpencodeFlavorVersion,
++                peerToolsDisabled: session.client.peerToolsDisabled
+             })
+             : createOpencodeBackend({
+                 cwd: session.path,
+                 port: v1Port!,
+-                hostname
++                hostname,
++                peerToolsDisabled: session.client.peerToolsDisabled
+             });
+         this.backend = backend;
+         registerAcpSessionTitleSync(backend, session.client);
+diff --git a/cli/src/opencode/utils/opencodeBackend.ts b/cli/src/opencode/utils/opencodeBackend.ts
+index 08352e821..e182a288d 100644
+--- a/cli/src/opencode/utils/opencodeBackend.ts
++++ b/cli/src/opencode/utils/opencodeBackend.ts
+@@ -11,6 +11,7 @@ function readFileUtf8(path: string): Promise<string> {
+ 
+ import { AcpSdkBackend } from '@/agent/backends/acp';
+ import { buildOpencodeEnv } from './config';
++import { isPeerToolsDisabled, peerToolsEnvOverlay } from '@/modules/common/peerTools';
+ import { getInvokedCwd } from '@/utils/invokedCwd';
+ import { getAgentLaunchCommand } from '@/agent/agentLaunchCommand';
+ 
+@@ -108,9 +109,16 @@ export function createOpencodeBackend(opts: {
+     cwd?: string;
+     port?: number;
+     hostname?: string;
++    /** Peer-tools switch captured from this session's bootstrap (env > hub). */
++    peerToolsDisabled?: boolean;
+     majorVersion?: 'v1' | 'v2';
+ }): AcpSdkBackend {
+     const env = buildOpencodeEnv();
++    // Propagate the resolved peer-tools switch onto the wrapped agent so its
++    // shells (`hapi ping-peer` / `inspect-peer`) resolve the captured value
++    // instead of the wrapper's module memory. Machine-level env overrides stay
++    // authoritative inside peerToolsEnvOverlay.
++    Object.assign(env, peerToolsEnvOverlay(opts.peerToolsDisabled ?? isPeerToolsDisabled()));
+     if (opts.majorVersion === 'v2') {
+         // opencode v2 rejects `acp --cwd/--port/--hostname` ("Unrecognized
+         // flag"); the working directory is taken from the spawn cwd instead,
+diff --git a/cli/src/pi/runPi.test.ts b/cli/src/pi/runPi.test.ts
+index 6379553b6..19c85f258 100644
+--- a/cli/src/pi/runPi.test.ts
++++ b/cli/src/pi/runPi.test.ts
+@@ -1,6 +1,6 @@
+ import { beforeEach, describe, expect, it, vi } from 'vitest';
+ 
+-type TransportOptions = { command: string; args: string[]; cwd: string };
++type TransportOptions = { command: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv };
+ type LifecycleOptions = { stopKeepAlive: () => void };
+ 
+ const harness = vi.hoisted(() => ({
+@@ -200,6 +200,31 @@ describe('runPi startup', () => {
+         ]);
+     });
+ 
++    it('pins the session peer-tools preference into the Pi transport env (#2056)', async () => {
++        const original = process.env.HAPI_DISABLE_PEER_TOOLS;
++        try {
++            delete process.env.HAPI_DISABLE_PEER_TOOLS;
++
++            await runPi({ workingDirectory: '/work' });
++            expect(harness.transportOptions?.env?.HAPI_DISABLE_PEER_TOOLS).toBe('0');
++
++            const session = harness.session as { peerToolsDisabled?: boolean };
++            session.peerToolsDisabled = true;
++            try {
++                await runPi({ workingDirectory: '/work' });
++                expect(harness.transportOptions?.env?.HAPI_DISABLE_PEER_TOOLS).toBe('1');
++            } finally {
++                delete session.peerToolsDisabled;
++            }
++        } finally {
++            if (original === undefined) {
++                delete process.env.HAPI_DISABLE_PEER_TOOLS;
++            } else {
++                process.env.HAPI_DISABLE_PEER_TOOLS = original;
++            }
++        }
++    });
++
+     it('resumes with --session and keeps the session selected by Pi', async () => {
+         await runPi({
+             workingDirectory: '/work',
+diff --git a/cli/src/pi/runPi.ts b/cli/src/pi/runPi.ts
+index 0f50221ea..7722a91b6 100644
+--- a/cli/src/pi/runPi.ts
++++ b/cli/src/pi/runPi.ts
+@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
+ import { logger } from '@/ui/logger';
+ import { convertAgentMessage } from '@/agent/messageConverter';
+ import { bootstrapExistingSession, bootstrapSession } from '@/agent/sessionFactory';
++import { isPeerToolsDisabled, withPeerToolsPreference } from '@/modules/common/peerTools';
+ import { registerKillSessionHandler } from '@/claude/registerKillSessionHandler';
+ import { registerLocalHandoffHandler } from '@/agent/localHandoff';
+ import { createRunnerLifecycle, createModeChangeHandler, setControlledByUser } from '@/agent/runnerLifecycle';
+@@ -252,7 +253,9 @@ export async function runPi(opts: {
+         command: getAgentLaunchCommand('pi'),
+         args: transportArgs,
+         cwd: workingDirectory,
+-        env: process.env,
++        // Pin the session's peer-tools preference so a Pi agent shelling
++        // `hapi ping-peer` resolves it in the fresh child process (#2056).
++        env: withPeerToolsPreference(apiSession.peerToolsDisabled ?? isPeerToolsDisabled()),
+     });
+     const conversationHistory = new PiConversationHistory(
+         piSession,
+diff --git a/docs/guide/how-it-works.md b/docs/guide/how-it-works.md
+index bbe49ddd7..6ea1e884b 100644
+--- a/docs/guide/how-it-works.md
++++ b/docs/guide/how-it-works.md
+@@ -39,7 +39,7 @@ hapi wait-peer <session-id> --remit-id <remit-id> --json
+ 
+ The Hub owns namespace, freshness, and lifecycle invariants. `spawn-peer` always creates a new session and delivers its first message through one atomic Hub operation; failures trigger compensating stop/archive cleanup. Existing-session commands accept only exact UUIDs. HAPI ships the session-control skill and installs it on the runtime's execution host before session registration; no HAPI workflow prose is injected into launch prompts.
+ 
+-Use `hapi machines --json` to discover runner targets. MCP `inspect_peer`, `ping_peer`, and `spawn_peer` work within the session's hub and namespace, including from remote runner hosts. See [Installation → Split hub + remote runner](./installation.md#split-hub-remote-runner-session-control). Runners that must keep agents out of other sessions can hide all three with `HAPI_DISABLE_PEER_TOOLS=1` - see [Installation → Disabling peer tools](./installation.md#disabling-peer-tools-on-a-runner).
++Use `hapi machines --json` to discover runner targets. MCP `inspect_peer`, `ping_peer`, and `spawn_peer` work within the session's hub and namespace, including from remote runner hosts. See [Installation → Split hub + remote runner](./installation.md#split-hub-remote-runner-session-control). Hub owners can hide all three for new sessions from Settings → General, and a runner can be pinned with `HAPI_DISABLE_PEER_TOOLS` - see [Installation → Disabling peer tools](./installation.md#disabling-peer-tools).
+ 
+ ### HAPI Hub
+ 
+diff --git a/docs/guide/installation.md b/docs/guide/installation.md
+index db6f3512b..6bfeed103 100644
+--- a/docs/guide/installation.md
++++ b/docs/guide/installation.md
+@@ -326,9 +326,13 @@ hapi runner start
+ 
+ Session CLI may export an **explicit** non-default `HAPI_API_URL` (from env or settings) into child env so shell helpers hit the same remote hub. It does **not** mirror `CLI_API_TOKEN` into wrapped agents (a fresh `hapi` re-reads `~/.hapi/settings.json`, and systemd/env tokens already inherit). Web terminal PTYs still strip hub secrets.
+ 
+-##### Disabling peer tools on a runner
++##### Disabling peer tools
+ 
+-Set `HAPI_DISABLE_PEER_TOOLS=1` (also `true`/`yes`) in the runner environment to stop wrapped agents from reading or messaging other HAPI sessions. The `inspect_peer` / `ping_peer` / `spawn_peer` MCP tools are then not registered and not passed to `--allowedTools` / `--tools`, and `hapi ping-peer` / `hapi inspect-peer` fail with a `disabled` error, including from an agent's shell. Scope the variable to the runner (systemd unit, launchd plist, or runner guard script); an interactive terminal without it keeps full CLI access.
++Hub owners can hide the peer tools for new sessions on every runner from **Settings → General → Peer session tools**. Running sessions keep their tool set; no restart is needed.
++
++To pin one runner regardless of the hub setting, set `HAPI_DISABLE_PEER_TOOLS` in its environment (systemd unit, launchd plist, or runner guard script). Any non-empty value decides for that runner: `0` / `false` / `off` / `no` keeps the tools; any other value disables them. When it is unset or empty, the hub setting decides; the default is tools available.
++
++When disabled, the `inspect_peer` / `ping_peer` / `spawn_peer` MCP tools are not registered or passed to `--allowedTools` / `--tools`, and `hapi ping-peer` / `inspect-peer` / `spawn-peer` fail with a `disabled` error from an agent's shell. The hub setting never reaches an operator's interactive terminal, so terminal commands keep working there unless the variable is exported globally.
+ 
+ Additional runner commands:
+ 
+diff --git a/hub/src/config/disablePeerTools.test.ts b/hub/src/config/disablePeerTools.test.ts
+new file mode 100644
+index 000000000..41a760df5
+--- /dev/null
++++ b/hub/src/config/disablePeerTools.test.ts
+@@ -0,0 +1,84 @@
++import { afterEach, describe, expect, it } from 'bun:test'
++import { mkdtemp, rm, readFile } from 'node:fs/promises'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import {
++    readDisablePeerToolsEnabled,
++    writeDisablePeerToolsEnabled
++} from './disablePeerTools'
++import { getSettingsFile, updateSettings, writeSettings } from './settings'
++
++const directories: string[] = []
++
++afterEach(async () => {
++    await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true })))
++})
++
++describe('disablePeerTools setting', () => {
++    it('defaults to off when settings.json is missing or unset', async () => {
++        const dataDir = await mkdtemp(join(tmpdir(), 'hapi-dpt-'))
++        directories.push(dataDir)
++        expect(await readDisablePeerToolsEnabled(dataDir)).toBe(false)
++
++        await writeSettings(getSettingsFile(dataDir), { listenPort: 3006 })
++        expect(await readDisablePeerToolsEnabled(dataDir)).toBe(false)
++    })
++
++    it('persists true across reads', async () => {
++        const dataDir = await mkdtemp(join(tmpdir(), 'hapi-dpt-'))
++        directories.push(dataDir)
++        expect(await writeDisablePeerToolsEnabled(dataDir, true)).toBe(true)
++        expect(await readDisablePeerToolsEnabled(dataDir)).toBe(true)
++
++        const raw = JSON.parse(await readFile(getSettingsFile(dataDir), 'utf8')) as {
++            disablePeerTools?: boolean
++        }
++        expect(raw.disablePeerTools).toBe(true)
++
++        await writeDisablePeerToolsEnabled(dataDir, false)
++        expect(await readDisablePeerToolsEnabled(dataDir)).toBe(false)
++    })
++
++    it('serializes concurrent writers without clobbering unrelated fields', async () => {
++        const dataDir = await mkdtemp(join(tmpdir(), 'hapi-dpt-race-'))
++        directories.push(dataDir)
++        const settingsFile = getSettingsFile(dataDir)
++        await writeSettings(settingsFile, {
++            cliApiToken: 'keep-me',
++            machineId: 'machine-1',
++            relayAuthKey: 'relay-keep',
++            listenPort: 3006
++        })
++
++        const results = await Promise.all([
++            writeDisablePeerToolsEnabled(dataDir, true),
++            updateSettings(settingsFile, (current) => ({
++                settings: {
++                    ...current,
++                    publicUrl: 'https://example.test'
++                },
++                result: undefined
++            })),
++            writeDisablePeerToolsEnabled(dataDir, true)
++        ])
++
++        expect(results[0]).toBe(true)
++        expect(results[2]).toBe(true)
++
++        const raw = JSON.parse(await readFile(settingsFile, 'utf8')) as {
++            cliApiToken?: string
++            machineId?: string
++            relayAuthKey?: string
++            listenPort?: number
++            publicUrl?: string
++            disablePeerTools?: boolean
++        }
++        expect(raw.cliApiToken).toBe('keep-me')
++        expect(raw.machineId).toBe('machine-1')
++        expect(raw.relayAuthKey).toBe('relay-keep')
++        expect(raw.listenPort).toBe(3006)
++        expect(raw.publicUrl).toBe('https://example.test')
++        expect(raw.disablePeerTools).toBe(true)
++        expect(await readDisablePeerToolsEnabled(dataDir)).toBe(true)
++    })
++})
+diff --git a/hub/src/config/disablePeerTools.ts b/hub/src/config/disablePeerTools.ts
+new file mode 100644
+index 000000000..4f2f44c4f
+--- /dev/null
++++ b/hub/src/config/disablePeerTools.ts
+@@ -0,0 +1,37 @@
++import {
++    getSettingsFile,
++    readSettingsOrThrow,
++    updateSettings,
++    type Settings
++} from './settings'
++
++/**
++ * Hub-persisted opt-out for the peer-session MCP tools (`inspect_peer` /
++ * `ping_peer` / `spawn_peer`). Default is off (tools available). Env
++ * `HAPI_DISABLE_PEER_TOOLS` on the CLI process remains a per-runner escape
++ * hatch and is resolved client-side.
++ */
++export function isDisablePeerToolsSettingEnabled(settings: Settings): boolean {
++    return settings.disablePeerTools === true
++}
++
++export async function readDisablePeerToolsEnabled(dataDir: string): Promise<boolean> {
++    const settings = await readSettingsOrThrow(getSettingsFile(dataDir))
++    return isDisablePeerToolsSettingEnabled(settings)
++}
++
++export async function writeDisablePeerToolsEnabled(
++    dataDir: string,
++    disabled: boolean
++): Promise<boolean> {
++    return updateSettings(getSettingsFile(dataDir), (current) => {
++        const settings = {
++            ...current,
++            disablePeerTools: disabled
++        }
++        return {
++            settings,
++            result: settings.disablePeerTools === true
++        }
++    })
++}
+diff --git a/hub/src/config/settings.ts b/hub/src/config/settings.ts
+index 2a7fc3c2d..52b24684d 100644
+--- a/hub/src/config/settings.ts
++++ b/hub/src/config/settings.ts
+@@ -46,6 +46,12 @@ export interface Settings {
+      * Default off: render/copy strip the footer; store stays raw.
+      */
+     sessionSummaryInChat?: boolean
++    /**
++     * When true, CLI hides the peer-session MCP tools (`inspect_peer` /
++     * `ping_peer` / `spawn_peer`) from wrapped agents in new sessions.
++     * Default off.
++     */
++    disablePeerTools?: boolean
+     /**
+      * Hub-side provider API keys / endpoints managed from Settings.
+      * Env vars still win when set at process start (ops override).
+diff --git a/hub/src/web/routes/cli.ts b/hub/src/web/routes/cli.ts
+index ebbc593f6..11f6b0727 100644
+--- a/hub/src/web/routes/cli.ts
++++ b/hub/src/web/routes/cli.ts
+@@ -8,6 +8,7 @@ import {
+     PROTOCOL_VERSION
+ } from '@hapi/protocol'
+ import { getConfiguration } from '../../configuration'
++import { readDisablePeerToolsEnabled } from '../../config/disablePeerTools'
+ import { constantTimeEquals } from '../../utils/crypto'
+ import { parseAccessToken } from '../../utils/accessToken'
+ import type { Machine, Session, SyncEngine } from '../../sync/syncEngine'
+@@ -139,7 +140,10 @@ export function createCliRoutes(getSyncEngine: () => SyncEngine | null): Hono<Cl
+                     parsed.data.modelReasoningEffort,
+                     parsed.data.id
+                 )
+-            return c.json({ session })
++            const disablePeerTools = await readDisablePeerToolsEnabled(
++                getConfiguration().dataDir
++            )
++            return c.json({ session, disablePeerTools })
+         } catch (error) {
+             if (error instanceof SessionIdentityConflictError) {
+                 return c.json({ error: error.message }, 409)
+@@ -260,7 +264,10 @@ export function createCliRoutes(getSyncEngine: () => SyncEngine | null): Hono<Cl
+         if (!resolved.ok) {
+             return c.json({ error: resolved.error }, resolved.status)
+         }
+-        return c.json({ session: resolved.session })
++        const disablePeerTools = await readDisablePeerToolsEnabled(
++            getConfiguration().dataDir
++        )
++        return c.json({ session: resolved.session, disablePeerTools })
+     })
+ 
+     app.get('/sessions/:id/messages', (c) => {
+diff --git a/hub/src/web/routes/hubSettings.test.ts b/hub/src/web/routes/hubSettings.test.ts
+index 8929c9789..68f979451 100644
+--- a/hub/src/web/routes/hubSettings.test.ts
++++ b/hub/src/web/routes/hubSettings.test.ts
+@@ -24,7 +24,7 @@ async function createApp(namespace = 'default') {
+ describe('GET/PUT /api/hub-settings', () => {
+     it('persists the chat display toggle', async () => {
+         const app = await createApp()
+-        expect(await (await app.request('/api/hub-settings')).json()).toEqual({ sessionSummaryInChat: false })
++        expect(await (await app.request('/api/hub-settings')).json()).toEqual({ sessionSummaryInChat: false, disablePeerTools: false })
+ 
+         const put = await app.request('/api/hub-settings', {
+             method: 'PUT',
+@@ -32,8 +32,20 @@ describe('GET/PUT /api/hub-settings', () => {
+             body: JSON.stringify({ sessionSummaryInChat: true })
+         })
+         expect(put.status).toBe(200)
+-        expect(await put.json()).toEqual({ sessionSummaryInChat: true })
+-        expect(await (await app.request('/api/hub-settings')).json()).toEqual({ sessionSummaryInChat: true })
++        expect(await put.json()).toEqual({ sessionSummaryInChat: true, disablePeerTools: false })
++        expect(await (await app.request('/api/hub-settings')).json()).toEqual({ sessionSummaryInChat: true, disablePeerTools: false })
++    })
++
++    it('persists the peer-tools toggle alone without touching chat display', async () => {
++        const app = await createApp()
++        const put = await app.request('/api/hub-settings', {
++            method: 'PUT',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({ disablePeerTools: true })
++        })
++        expect(put.status).toBe(200)
++        expect(await put.json()).toEqual({ sessionSummaryInChat: false, disablePeerTools: true })
++        expect(await (await app.request('/api/hub-settings')).json()).toEqual({ sessionSummaryInChat: false, disablePeerTools: true })
+     })
+ 
+     it('rejects removed prompt injection settings', async () => {
+diff --git a/hub/src/web/routes/hubSettings.ts b/hub/src/web/routes/hubSettings.ts
+index 39c89ec5c..696deb84e 100644
+--- a/hub/src/web/routes/hubSettings.ts
++++ b/hub/src/web/routes/hubSettings.ts
+@@ -12,7 +12,8 @@ const OWNER_ONLY_ERROR = 'Hub settings are only available to the hub owner'
+ 
+ function toHubSettings(settings: Settings): HubSettingsResponse {
+     return {
+-        sessionSummaryInChat: settings.sessionSummaryInChat === true
++        sessionSummaryInChat: settings.sessionSummaryInChat === true,
++        disablePeerTools: settings.disablePeerTools === true
+     }
+ }
+ 
+@@ -41,6 +42,9 @@ export function createHubSettingsRoutes(dataDir: string): Hono<WebAppEnv> {
+             if (parsed.data.sessionSummaryInChat !== undefined) {
+                 settings.sessionSummaryInChat = parsed.data.sessionSummaryInChat
+             }
++            if (parsed.data.disablePeerTools !== undefined) {
++                settings.disablePeerTools = parsed.data.disablePeerTools
++            }
+             return {
+                 settings,
+                 result: toHubSettings(settings)
+diff --git a/shared/src/apiTypes.test.ts b/shared/src/apiTypes.test.ts
+index b9e58b586..4bc203b9f 100644
+--- a/shared/src/apiTypes.test.ts
++++ b/shared/src/apiTypes.test.ts
+@@ -2,11 +2,14 @@ import { describe, expect, it } from 'vitest'
+ import {
+     ClearOpencodeSessionCallbackRequestSchema,
+     ClearOpencodeSessionResponseSchema,
++    CreateSessionResponseSchema,
++    HubSettingsResponseSchema,
+     ListCodexSessionsRpcResponseSchema,
+     ListPiSessionsRpcResponseSchema,
+     MessagesQuerySchema,
+     SendMessageRequestSchema,
+-    SpawnSessionWithRemitRequestSchema
++    SpawnSessionWithRemitRequestSchema,
++    UpdateHubSettingsRequestSchema
+ } from './apiTypes'
+ 
+ describe('ListCodexSessionsRpcResponseSchema', () => {
+@@ -164,3 +167,40 @@ describe('SpawnSessionWithRemitRequestSchema', () => {
+         }).success).toBe(false)
+     })
+ })
++
++describe('disablePeerTools hub setting wire shapes', () => {
++    it('UpdateHubSettingsRequestSchema accepts a lone disablePeerTools payload but still rejects empty bodies', () => {
++        expect(UpdateHubSettingsRequestSchema.safeParse({ disablePeerTools: true }).success).toBe(true)
++        expect(UpdateHubSettingsRequestSchema.safeParse({}).success).toBe(false)
++        expect(UpdateHubSettingsRequestSchema.safeParse({ disablePeerTools: 'yes' }).success).toBe(false)
++    })
++
++    it('HubSettingsResponseSchema requires disablePeerTools as a boolean', () => {
++        const parsed = HubSettingsResponseSchema.safeParse({ sessionSummaryInChat: false, disablePeerTools: true })
++        expect(parsed.success).toBe(true)
++        if (parsed.success) expect(parsed.data.disablePeerTools).toBe(true)
++        expect(HubSettingsResponseSchema.safeParse({ sessionSummaryInChat: false }).success).toBe(false)
++    })
++
++    it('CreateSessionResponseSchema leaves disablePeerTools optional for older hubs', () => {
++        const session = {
++            id: 's1',
++            namespace: 'default',
++            seq: 0,
++            createdAt: 0,
++            updatedAt: 0,
++            active: false,
++            activeAt: null,
++            metadata: null,
++            metadataVersion: 0,
++            agentState: null,
++            agentStateVersion: 0,
++            thinking: false,
++            thinkingAt: 0
++        }
++        expect(CreateSessionResponseSchema.safeParse({ session }).success).toBe(true)
++        const parsed = CreateSessionResponseSchema.safeParse({ session, disablePeerTools: true })
++        expect(parsed.success).toBe(true)
++        if (parsed.success) expect(parsed.data.disablePeerTools).toBe(true)
++    })
++})
+diff --git a/shared/src/apiTypes.ts b/shared/src/apiTypes.ts
+index 9cd420807..3e1c755fe 100644
+--- a/shared/src/apiTypes.ts
++++ b/shared/src/apiTypes.ts
+@@ -63,24 +63,31 @@ export const CliMessagesResponseSchema = z.object({
+ export type CliMessagesResponse = z.infer<typeof CliMessagesResponseSchema>
+ 
+ export const CreateSessionResponseSchema = z.object({
+-    session: SessionSchema
++    session: SessionSchema,
++    /** Hub opt-out: hide peer-session tools from agents (default off / tools available). */
++    disablePeerTools: z.boolean().optional()
+ })
+ 
+ export type CreateSessionResponse = z.infer<typeof CreateSessionResponseSchema>
+ 
+ export const HubSettingsResponseSchema = z.object({
+     /** Show compact AGENT_NOTIFY_SUMMARY in chat (default off / hide). */
+-    sessionSummaryInChat: z.boolean()
++    sessionSummaryInChat: z.boolean(),
++    /** Hide peer-session tools (inspect_peer / ping_peer / spawn_peer) from agents (default off). */
++    disablePeerTools: z.boolean()
+ })
+ 
+ export type HubSettingsResponse = z.infer<typeof HubSettingsResponseSchema>
+ 
+ export const UpdateHubSettingsRequestSchema = z
+     .object({
+-        sessionSummaryInChat: z.boolean().optional()
++        sessionSummaryInChat: z.boolean().optional(),
++        disablePeerTools: z.boolean().optional()
+     })
+     .refine(
+-        (data) => data.sessionSummaryInChat !== undefined,
++        (data) =>
++            data.sessionSummaryInChat !== undefined ||
++            data.disablePeerTools !== undefined,
+         { message: 'At least one hub setting field is required' }
+     )
+ 
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index ee2fae563..55c9ba8c5 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -875,6 +875,10 @@ export default {
+   'settings.general.sessionSummary.description': 'Choose whether available session status summaries appear in chat.',
+   'settings.general.sessionSummaryInChat': 'Show status summaries in chat',
+   'settings.general.sessionSummaryInChat.desc': 'Only affects display in chat and copied content; it does not affect summary generation, notifications, or background work records. When on, a status row is shown; when off, it is hidden. Stored messages remain unchanged.',
++  'settings.general.peerTools.title': 'Peer session tools',
++  'settings.general.peerTools.description': 'Control whether agents can reach other sessions on this hub.',
++  'settings.general.disablePeerTools': 'Disable peer session tools',
++  'settings.general.disablePeerTools.desc': 'Applies to new sessions: agents can no longer inspect, message, or spawn other sessions. A runner\'s HAPI_DISABLE_PEER_TOOLS overrides this.',
+   'settings.language.title': 'Language',
+   'settings.language.label': 'Language',
+   'settings.display.title': 'Display',
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index 896056a13..772ce0fb4 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -873,6 +873,10 @@ export default {
+   'settings.general.sessionSummary.description': '选择是否在聊天中显示已有的会话状态摘要。',
+   'settings.general.sessionSummaryInChat': '在聊天中显示状态摘要',
+   'settings.general.sessionSummaryInChat.desc': '只影响聊天和复制内容中的显示，不影响摘要生成、通知或后台工作记录。开启后显示状态行，关闭后隐藏；已存储消息保持不变。',
++  'settings.general.peerTools.title': 'Peer 会话工具',
++  'settings.general.peerTools.description': '控制智能体能否访问同一 hub 上的其他会话。',
++  'settings.general.disablePeerTools': '禁用 peer 会话工具',
++  'settings.general.disablePeerTools.desc': '仅对新会话生效：智能体将无法查看、联系或创建其他会话。runner 上的 HAPI_DISABLE_PEER_TOOLS 优先于此设置。',
+   'settings.language.title': '语言',
+   'settings.language.label': '语言',
+   'settings.display.title': '显示',
+diff --git a/web/src/routes/settings/general.tsx b/web/src/routes/settings/general.tsx
+index 16daf280b..3a20403f1 100644
+--- a/web/src/routes/settings/general.tsx
++++ b/web/src/routes/settings/general.tsx
+@@ -42,7 +42,7 @@ export default function SettingsGeneralPage() {
+     })
+ 
+     const hubSettingsMutation = useMutation({
+-        mutationFn: async (patch: { sessionSummaryInChat?: boolean }) => {
++        mutationFn: async (patch: { sessionSummaryInChat?: boolean; disablePeerTools?: boolean }) => {
+             if (!api) throw new Error('API unavailable')
+             return await api.updateHubSettings(patch)
+         },
+@@ -76,6 +76,24 @@ export default function SettingsGeneralPage() {
+                     ) : null}
+                 </SettingsSection>
+             ) : null}
++            {isOwner ? (
++                <SettingsSection
++                    title={t('settings.general.peerTools.title')}
++                    description={t('settings.general.peerTools.description')}
++                >
++                    {hubSettingsQuery.data ? (
++                        <SettingsSwitch
++                            label={t('settings.general.disablePeerTools')}
++                            description={t('settings.general.disablePeerTools.desc')}
++                            checked={hubSettingsQuery.data.disablePeerTools}
++                            onChange={(checked) => {
++                                if (hubSettingsMutation.isPending) return
++                                hubSettingsMutation.mutate({ disablePeerTools: checked })
++                            }}
++                        />
++                    ) : null}
++                </SettingsSection>
++            ) : null}
+             <SettingsSection title={t('settings.companion.title')}>
+                 <div className="px-3 py-3">
+                     <CompanionPairing baseUrl={baseUrl} />
+diff --git a/web/src/routes/settings/index.test.tsx b/web/src/routes/settings/index.test.tsx
+index 8f85aef12..73d45d0cc 100644
+--- a/web/src/routes/settings/index.test.tsx
++++ b/web/src/routes/settings/index.test.tsx
+@@ -24,8 +24,8 @@ const { context, navigate, setAppearance, setColorTheme, setFontScale, setTermin
+     setAppBadgeEnabled: vi.fn(),
+ }))
+ 
+-const getHubSettings = vi.fn().mockResolvedValue({ sessionSummaryInChat: false })
+-const updateHubSettings = vi.fn().mockResolvedValue({ sessionSummaryInChat: false })
++const getHubSettings = vi.fn().mockResolvedValue({ sessionSummaryInChat: false, disablePeerTools: false })
++const updateHubSettings = vi.fn().mockResolvedValue({ sessionSummaryInChat: false, disablePeerTools: false })
+ 
+ vi.mock('@/hooks/useColorTheme', () => ({
+     useColorTheme: () => ({ colorTheme: 'default', setColorTheme }),
+@@ -222,8 +222,8 @@ describe('responsive settings pages', () => {
+     beforeEach(() => {
+         vi.clearAllMocks()
+         localStorage.clear()
+-        getHubSettings.mockResolvedValue({ sessionSummaryInChat: false })
+-        updateHubSettings.mockResolvedValue({ sessionSummaryInChat: false })
++        getHubSettings.mockResolvedValue({ sessionSummaryInChat: false, disablePeerTools: false })
++        updateHubSettings.mockResolvedValue({ sessionSummaryInChat: false, disablePeerTools: false })
+         context.token = `x.${btoa(JSON.stringify({ ns: 'default' }))}.x`
+     })
+ 
+@@ -258,8 +258,9 @@ describe('responsive settings pages', () => {
+     })
+ 
+     it('offers summary display without restoring agent prompt controls', async () => {
+-        updateHubSettings.mockImplementation(async (patch: { sessionSummaryInChat?: boolean }) => ({
++        updateHubSettings.mockImplementation(async (patch: { sessionSummaryInChat?: boolean; disablePeerTools?: boolean }) => ({
+             sessionSummaryInChat: patch.sessionSummaryInChat ?? false,
++            disablePeerTools: patch.disablePeerTools ?? false,
+         }))
+ 
+         renderPage(<SettingsGeneralPage />)
+@@ -274,6 +275,23 @@ describe('responsive settings pages', () => {
+         })
+     })
+ 
++    it('toggles the hub-wide peer-tools opt-out from the general page', async () => {
++        updateHubSettings.mockImplementation(async (patch: { sessionSummaryInChat?: boolean; disablePeerTools?: boolean }) => ({
++            sessionSummaryInChat: patch.sessionSummaryInChat ?? false,
++            disablePeerTools: patch.disablePeerTools ?? false,
++        }))
++
++        renderPage(<SettingsGeneralPage />)
++
++        expect(await screen.findByRole('heading', { name: 'Peer session tools' })).toBeInTheDocument()
++        const toggle = await screen.findByRole('checkbox', { name: 'Disable peer session tools' })
++        expect(toggle).not.toBeChecked()
++        fireEvent.click(toggle)
++        await waitFor(() => {
++            expect(updateHubSettings).toHaveBeenCalledWith({ disablePeerTools: true })
++        })
++    })
++
+     it('renders compact display controls without dropdown popovers', () => {
+         renderPage(<SettingsDisplayPage />)
+         expect(screen.getByRole('radio', { name: 'OLED Black' })).toBeInTheDocument()

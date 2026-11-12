@@ -1,0 +1,467 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Thu, 22 Oct 2026 05:05:36 +0000
+Subject: [PATCH 49/94] carry(upstream): PR #2090 feat(codex): expose Approve
+ for me as a permission mode (#2016)
+
+---
+ .../newsession/NewSessionViewModelTest.kt        |  2 +-
+ .../kotlin/app/hapi/protocol/catalog/Modes.kt    | 16 +++++++++++-----
+ .../app/hapi/protocol/catalog/CatalogTest.kt     | 15 +++++++++------
+ cli/src/codex/shared/launch.test.ts              |  5 +++++
+ cli/src/codex/shared/launch.ts                   |  9 +++++----
+ cli/src/codex/shared/root.test.ts                | 10 ++++++++++
+ cli/src/codex/shared/root.ts                     | 12 +++++++-----
+ cli/src/codex/utils/permissionModeConfig.ts      |  1 +
+ docs/guide/agents.md                             |  6 +++---
+ docs/guide/codex-shared-sessions.md              |  4 +++-
+ .../HapiProtocol/Catalog/PermissionModes.swift   |  6 ++++--
+ .../HapiClientTests/NewSessionFormTests.swift    |  2 +-
+ .../Tests/HapiProtocolTests/CatalogTests.swift   |  6 +++---
+ shared/fixtures/catalogs/modes.json              |  7 ++++++-
+ shared/src/modes.test.ts                         |  9 ++++++++-
+ shared/src/modes.ts                              |  4 ++--
+ .../NewSession/PermissionField.test.tsx          |  2 +-
+ 17 files changed, 80 insertions(+), 36 deletions(-)
+
+diff --git a/android/app/src/test/kotlin/app/hapi/companion/feature/newsession/NewSessionViewModelTest.kt b/android/app/src/test/kotlin/app/hapi/companion/feature/newsession/NewSessionViewModelTest.kt
+index 30206f032..e5ed3d99c 100644
+--- a/android/app/src/test/kotlin/app/hapi/companion/feature/newsession/NewSessionViewModelTest.kt
++++ b/android/app/src/test/kotlin/app/hapi/companion/feature/newsession/NewSessionViewModelTest.kt
+@@ -405,7 +405,7 @@ class NewSessionLogicTest {
+             NewSessionForm(agent = "codex", permissionMode = "safe-yolo"),
+         )
+         assertEquals("default", staleMode.permissionMode)
+-        assertEquals(listOf("default", "read-only", "yolo"), app.hapi.protocol.catalog.PermissionModes.forLaunch("codex").map { it.wireId })
++        assertEquals(listOf("default", "read-only", "autoReview", "yolo"), app.hapi.protocol.catalog.PermissionModes.forLaunch("codex").map { it.wireId })
+         assertEquals("safe-yolo", NewSessionLogic.sanitizeDraft(NewSessionForm(agent = "kimi", permissionMode = "safe-yolo")).permissionMode)
+     }
+ }
+diff --git a/android/core/protocol/src/main/kotlin/app/hapi/protocol/catalog/Modes.kt b/android/core/protocol/src/main/kotlin/app/hapi/protocol/catalog/Modes.kt
+index 3285d84a7..1a4c2bb49 100644
+--- a/android/core/protocol/src/main/kotlin/app/hapi/protocol/catalog/Modes.kt
++++ b/android/core/protocol/src/main/kotlin/app/hapi/protocol/catalog/Modes.kt
+@@ -28,7 +28,7 @@ enum class PermissionMode(
+     Plan("plan", "Plan Mode", PermissionModeTone.Info),
+     Ask("ask", "Ask Mode", PermissionModeTone.Info),
+     Debug("debug", "Debug Mode", PermissionModeTone.Info),
+-    AutoReview("autoReview", "Auto-review", PermissionModeTone.Warning),
++    AutoReview("autoReview", "Auto", PermissionModeTone.Warning),
+     ReadOnly("read-only", "Read Only", PermissionModeTone.Warning),
+     SafeYolo("safe-yolo", "Safe Yolo", PermissionModeTone.Warning),
+     Yolo("yolo", "Yolo", PermissionModeTone.Danger),
+@@ -54,8 +54,14 @@ object PermissionModes {
+         PermissionMode.BypassPermissions, PermissionMode.Plan,
+     )
+ 
+-    /** `CODEX_PERMISSION_MODES` (gemini/kimi/copilot share the same list). */
++    /** `CODEX_PERMISSION_MODES`. */
+     val CODEX = listOf(
++        PermissionMode.Default, PermissionMode.ReadOnly,
++        PermissionMode.SafeYolo, PermissionMode.AutoReview, PermissionMode.Yolo,
++    )
++
++    /** `GEMINI_PERMISSION_MODES` (kimi/copilot share the same list). */
++    val GEMINI = listOf(
+         PermissionMode.Default, PermissionMode.ReadOnly,
+         PermissionMode.SafeYolo, PermissionMode.Yolo,
+     )
+@@ -82,9 +88,9 @@ object PermissionModes {
+      */
+     fun forFlavor(flavor: String?): List<PermissionMode> = when (flavor) {
+         "codex" -> CODEX
+-        "gemini" -> CODEX
+-        "kimi" -> CODEX
+-        "copilot" -> CODEX
++        "gemini" -> GEMINI
++        "kimi" -> GEMINI
++        "copilot" -> GEMINI
+         "grok" -> GROK
+         "opencode" -> OPENCODE
+         "dsh" -> emptyList()
+diff --git a/android/core/protocol/src/test/kotlin/app/hapi/protocol/catalog/CatalogTest.kt b/android/core/protocol/src/test/kotlin/app/hapi/protocol/catalog/CatalogTest.kt
+index d29783c9c..acfc9b575 100644
+--- a/android/core/protocol/src/test/kotlin/app/hapi/protocol/catalog/CatalogTest.kt
++++ b/android/core/protocol/src/test/kotlin/app/hapi/protocol/catalog/CatalogTest.kt
+@@ -37,7 +37,7 @@ class CatalogTest {
+         assertEquals(PermissionModeTone.Info, PermissionMode.Plan.tone)
+         assertEquals("Accept Edits", PermissionMode.AcceptEdits.label)
+         assertEquals(PermissionModeTone.Warning, PermissionMode.AcceptEdits.tone)
+-        assertEquals("Auto-review", PermissionMode.AutoReview.label)
++        assertEquals("Auto", PermissionMode.AutoReview.label)
+         assertEquals("Read Only", PermissionMode.ReadOnly.label)
+         assertEquals(PermissionModeTone.Neutral, PermissionMode.Default.tone)
+         assertEquals(PermissionModeTone.Danger, PermissionMode.AlwaysProceed.tone)
+@@ -50,13 +50,16 @@ class CatalogTest {
+             PermissionModes.forFlavor("claude").map { it.wireId }
+         )
+         assertEquals(
+-            listOf("default", "read-only", "safe-yolo", "yolo"),
++            listOf("default", "read-only", "safe-yolo", "autoReview", "yolo"),
+             PermissionModes.forFlavor("codex").map { it.wireId }
+         )
+-        // gemini/kimi/copilot share the codex list.
+-        assertEquals(PermissionModes.forFlavor("codex"), PermissionModes.forFlavor("gemini"))
+-        assertEquals(PermissionModes.forFlavor("codex"), PermissionModes.forFlavor("kimi"))
+-        assertEquals(PermissionModes.forFlavor("codex"), PermissionModes.forFlavor("copilot"))
++        assertEquals(
++            listOf("default", "read-only", "safe-yolo", "yolo"),
++            PermissionModes.forFlavor("gemini").map { it.wireId }
++        )
++        // kimi/copilot share the gemini list.
++        assertEquals(PermissionModes.forFlavor("gemini"), PermissionModes.forFlavor("kimi"))
++        assertEquals(PermissionModes.forFlavor("gemini"), PermissionModes.forFlavor("copilot"))
+         assertEquals(
+             listOf("default", "auto", "bypassPermissions"),
+             PermissionModes.forFlavor("grok").map { it.wireId }
+diff --git a/cli/src/codex/shared/launch.test.ts b/cli/src/codex/shared/launch.test.ts
+index 82bfd560e..e1bf65c72 100644
+--- a/cli/src/codex/shared/launch.test.ts
++++ b/cli/src/codex/shared/launch.test.ts
+@@ -47,6 +47,11 @@ describe('shared launch configuration', () => {
+         expect(sharedLaunchConfig({ codexArgs: ['--', '-C', 'literal'] }, '/tmp').tuiArgs).toEqual(['--', '-C', 'literal']);
+         expect(() => sharedLaunchConfig({ permissionMode: 'safe-yolo' }, '/tmp')).toThrow('not a native shared');
+     });
++    it('maps HAPI autoReview to native auto-review in the workspace-write sandbox', () => {
++        const result = sharedLaunchConfig({ permissionMode: 'autoReview', codexArgs: ['--yolo'] }, '/tmp');
++        expect(result.threadParams).toMatchObject({ approvalPolicy: 'on-request', approvalsReviewer: 'auto_review', sandbox: 'workspace-write' });
++        expect(result.serverArgs).toEqual(['-c', 'approval_policy="on-request"', '-c', 'sandbox_mode="workspace-write"', '-c', 'approvals_reviewer="auto_review"']);
++    });
+     it('preserves launch-time provider and automatic-review policy', () => {
+         const result = sharedLaunchConfig({ codexArgs: ['--oss', '--local-provider', 'ollama', '--approve-for-me'] }, '/tmp');
+         expect(result.threadParams).toMatchObject({ modelProvider: 'ollama', approvalsReviewer: 'auto_review', sandbox: 'workspace-write' });
+diff --git a/cli/src/codex/shared/launch.ts b/cli/src/codex/shared/launch.ts
+index 5a98373eb..538338c6b 100644
+--- a/cli/src/codex/shared/launch.ts
++++ b/cli/src/codex/shared/launch.ts
+@@ -9,7 +9,7 @@ import type { CodexAppServerClient } from '../codexAppServerClient';
+ export const SharedLaunchSchema = z.object({
+     startedBy: z.enum(['runner', 'terminal']).optional(),
+     codexArgs: z.array(z.string()).optional(),
+-    permissionMode: z.enum(['default', 'read-only', 'safe-yolo', 'yolo']).optional(),
++    permissionMode: z.enum(['default', 'read-only', 'safe-yolo', 'autoReview', 'yolo']).optional(),
+     resumeSessionId: z.string().optional(), resumeLast: z.boolean().optional(), resumeAll: z.boolean().optional(),
+     existingSessionId: z.string().optional(),
+     /** Hub-preallocated stub — create/adopt, not reopen. */
+@@ -45,7 +45,7 @@ export function resolveSharedCodex(): CodexCommand {
+ export function sharedLaunchConfig(options: SharedLaunchOptions, cwd: string): {
+     cwd: string; serverArgs: string[]; tuiArgs: string[]; threadParams: Record<string, unknown>;
+ } {
+-    if (options.permissionMode === 'safe-yolo') throw new Error('safe-yolo is not a native shared permission mode. Choose default, read-only, yolo, or native --approve-for-me.');
++    if (options.permissionMode === 'safe-yolo') throw new Error('safe-yolo is not a native shared permission mode. Choose default, read-only, autoReview, or yolo.');
+     const args = options.codexArgs ?? [];
+     const serverArgs: string[] = [];
+     let tuiArgs: string[] = [];
+@@ -122,12 +122,13 @@ export function sharedLaunchConfig(options: SharedLaunchOptions, cwd: string): {
+     if (extraDirs.length) config['sandbox_workspace_write.writable_roots'] = extraDirs.map(path => resolve(directory, path));
+     if (provider) config.model_provider = provider;
+     const permission = options.permissionMode ? resolveCodexPermissionModeConfig(options.permissionMode) : undefined;
++    const reviewer = options.permissionMode === 'autoReview' ? 'auto_review' : 'user';
+     if (permission) {
+         // Explicit HAPI permission selection wins on every launch surface:
+         // initial thread, attached TUI, and later native /new threads.
+         config.approval_policy = permission.approvalPolicy;
+         config.sandbox_mode = permission.sandbox;
+-        config.approvals_reviewer = 'user';
++        config.approvals_reviewer = reviewer;
+     }
+     // The attached TUI resumes a remote task, which rejects permission flags.
+     // The initial thread already has their resolved policy; inherit it there.
+@@ -144,7 +145,7 @@ export function sharedLaunchConfig(options: SharedLaunchOptions, cwd: string): {
+             ...(overrides.approvalPolicy ? { approvalPolicy: overrides.approvalPolicy } : {}),
+             ...(overrides.sandbox ? { sandbox: overrides.sandbox } : {}),
+             ...(autoReview ? { approvalPolicy: 'on-request', approvalsReviewer: 'auto_review', sandbox: 'workspace-write' } : {}),
+-            ...(permission ? { approvalPolicy: permission.approvalPolicy, approvalsReviewer: 'user', sandbox: permission.sandbox } : {}),
++            ...(permission ? { approvalPolicy: permission.approvalPolicy, approvalsReviewer: reviewer, sandbox: permission.sandbox } : {}),
+             config: { ...config, ...(options.modelReasoningEffort ? { model_reasoning_effort: options.modelReasoningEffort } : {}) },
+         }
+     };
+diff --git a/cli/src/codex/shared/root.test.ts b/cli/src/codex/shared/root.test.ts
+index e89035d1e..72fd172cd 100644
+--- a/cli/src/codex/shared/root.test.ts
++++ b/cli/src/codex/shared/root.test.ts
+@@ -201,6 +201,16 @@ async function completePlan(f: Awaited<ReturnType<typeof fixture>>, status = 'co
+     return codexPlanProposalId('thread', turn.id, 'plan-item');
+ }
+ 
++describe('shared permission modes', () => {
++    it('switches native auto-review on and back to the human reviewer', async () => {
++        const f = await fixture();
++        expect((await f.root.applySettings({ permissionMode: 'autoReview' })).applied.permissionMode).toBe('autoReview');
++        expect(f.root.client).toMatchObject({ settings: { approvalPolicy: 'on-request', approvalsReviewer: 'auto_review', sandboxPolicy: { type: 'workspaceWrite' } } });
++        expect((await f.root.applySettings({ permissionMode: 'default' })).applied.permissionMode).toBe('default');
++        expect(f.root.client).toMatchObject({ settings: { approvalsReviewer: 'user' } });
++    });
++});
++
+ describe('shared plan actions', () => {
+     it('keeps a remote change_title while mirroring the native thread title as summary', async () => {
+         const f = await fixture();
+diff --git a/cli/src/codex/shared/root.ts b/cli/src/codex/shared/root.ts
+index 3393888d0..61b2c50e0 100644
+--- a/cli/src/codex/shared/root.ts
++++ b/cli/src/codex/shared/root.ts
+@@ -32,7 +32,7 @@ export type RootHost = {
+     end(root: SharedCodexRoot, nativeArchive?: boolean): Promise<void>;
+ };
+ const SettingsSchema = z.object({
+-    permissionMode: z.enum(['default', 'read-only', 'safe-yolo', 'yolo']).optional(),
++    permissionMode: z.enum(['default', 'read-only', 'safe-yolo', 'autoReview', 'yolo']).optional(),
+     model: z.string().min(1).optional(), modelReasoningEffort: z.string().nullable().optional(),
+     collaborationMode: z.enum(['default', 'plan']).optional(),
+     serviceTier: z.enum(['fast', 'standard']).nullable().optional(),
+@@ -269,7 +269,8 @@ export class SharedCodexRoot {
+         const sandbox = record(value.sandboxPolicy ?? value.sandbox).type;
+         this.settings = { ...this.settings, model: value.model,
+             modelReasoningEffort: string(value.effort ?? value.reasoningEffort) ?? null,
+-            ...(sandbox ? { permissionMode: sandbox === 'dangerFullAccess' ? 'yolo' : sandbox === 'readOnly' ? 'read-only' : 'default' } : {}),
++            ...(sandbox ? { permissionMode: sandbox === 'dangerFullAccess' ? 'yolo' : sandbox === 'readOnly' ? 'read-only'
++                : this.settingsNative.approvalsReviewer === 'auto_review' ? 'autoReview' : 'default' } : {}),
+             ...('serviceTier' in value ? { serviceTier: value.serviceTier === 'priority' ? 'fast' : 'standard' } : {}),
+             ...('collaborationMode' in value ? { collaborationMode: record(value.collaborationMode).mode === 'plan' ? 'plan' as const : 'default' as const } : {})
+         };
+@@ -417,7 +418,7 @@ export class SharedCodexRoot {
+     }
+     async applySettings(raw: unknown): Promise<{ applied: RuntimeSettings }> {
+         const config = SettingsSchema.parse(raw);
+-        if (config.permissionMode === 'safe-yolo') throw new Error('safe-yolo is not a native shared permission mode; choose default, read-only, or yolo');
++        if (config.permissionMode === 'safe-yolo') throw new Error('safe-yolo is not a native shared permission mode; choose default, read-only, autoReview, or yolo');
+         if (Object.keys(config).length === 0) return { applied: this.settings };
+         if (typeof config.modelReasoningEffort === 'string') config.modelReasoningEffort = parseReasoningEffortValue(config.modelReasoningEffort);
+         if (config.modelReasoningEffort === null) {
+@@ -439,7 +440,8 @@ export class SharedCodexRoot {
+             ...(config.personality ? { personality: config.personality } : {}),
+             ...(config.modelReasoningEffort !== undefined ? { effort: config.modelReasoningEffort } : {}),
+             ...(config.serviceTier !== undefined ? { serviceTier: config.serviceTier === 'fast' ? 'priority' : null } : {}),
+-            ...(permission ? { approvalPolicy: permission.approvalPolicy, sandboxPolicy: permission.sandboxPolicy } : {}),
++            ...(permission ? { approvalPolicy: permission.approvalPolicy, sandboxPolicy: permission.sandboxPolicy,
++                approvalsReviewer: config.permissionMode === 'autoReview' ? 'auto_review' : 'user' } : {}),
+             ...(config.collaborationMode ? { collaborationMode: { mode: config.collaborationMode, settings: {
+                 model: config.model ?? this.settings.model, reasoning_effort: config.modelReasoningEffort ?? this.settings.modelReasoningEffort,
+                 developer_instructions: null
+@@ -587,7 +589,7 @@ export class SharedCodexRoot {
+         if (command === '/exit') { this.notice('/exit closes a native terminal, not this Web view. Use End session to archive this conversation.'); return null; }
+         if (!command.startsWith('/')) return text;
+         const slash = resolveCodexSlashCommand(text, { commands: await listSlashCommands('codex', this.bootstrap.workingDirectory),
+-            permissionMode: this.settings.permissionMode === 'yolo' ? 'yolo' : this.settings.permissionMode === 'read-only' ? 'read-only' : 'default',
++            permissionMode: this.settings.permissionMode === 'yolo' || this.settings.permissionMode === 'read-only' || this.settings.permissionMode === 'autoReview' ? this.settings.permissionMode : 'default',
+             collaborationMode: this.settings.collaborationMode ?? 'default', model: this.settings.model ?? undefined,
+             modelReasoningEffort: parseReasoningEffortValue(this.settings.modelReasoningEffort), serviceTier: this.settings.serviceTier });
+         if (slash.kind === 'passthrough') return text;
+diff --git a/cli/src/codex/utils/permissionModeConfig.ts b/cli/src/codex/utils/permissionModeConfig.ts
+index 576050d28..bb7508173 100644
+--- a/cli/src/codex/utils/permissionModeConfig.ts
++++ b/cli/src/codex/utils/permissionModeConfig.ts
+@@ -10,6 +10,7 @@ export type CodexPermissionModeConfig = {
+ export function resolveCodexPermissionModeConfig(mode: CodexPermissionMode): CodexPermissionModeConfig {
+     switch (mode) {
+         case 'default':
++        case 'autoReview':
+             return {
+                 // Remote Codex sessions rely on HAPI's approval UI for sandbox escalation.
+                 // `on-request` keeps workspace-write sandboxing while still surfacing a
+diff --git a/docs/guide/agents.md b/docs/guide/agents.md
+index c29d0c846..243f02574 100644
+--- a/docs/guide/agents.md
++++ b/docs/guide/agents.md
+@@ -13,7 +13,7 @@ agent's integration; their supported syntax varies by agent.
+ | Agent | Command | Integration | Local | Remote | Permission modes | Resume |
+ |-------|---------|-------------|:-----:|:------:|------------------|:------:|
+ | Claude Code | `hapi claude` | Terminal wrapper (local) + Claude Agent SDK (remote) | ✓ | ✓ | `default` `acceptEdits` `auto` `bypassPermissions` `plan` | ✓ |
+-| Codex | `hapi codex` | Native terminal + `codex app-server` (Codex 0.154.0+) | ✓ | ✓ | `default` `read-only` `yolo` (+ `plan` collaboration mode) | ✓ |
++| Codex | `hapi codex` | Native terminal + `codex app-server` (Codex 0.154.0+) | ✓ | ✓ | `default` `read-only` `autoReview` `yolo` (+ `plan` collaboration mode) | ✓ |
+ | Cursor Agent | `hapi cursor` | ACP (`agent acp`); legacy stream-json resume | ✓ | ✓ | `default` `plan` `ask` `debug` `autoReview` `yolo` | ✓ |
+ | Grok Build | `hapi grok` | ACP (`grok agent stdio`) | ✓ | ✓ | `default` `auto` `bypassPermissions` | ✓ |
+ | GitHub Copilot | `hapi copilot` | ACP (`copilot --acp --stdio`) | ✓ | ✓ | `default` `read-only` `safe-yolo` `yolo` | ✓ |
+@@ -96,7 +96,7 @@ hapi cursor --continue         # Resume the most recent chat
+ hapi cursor --plan             # Start in Plan mode (shortcut)
+ hapi cursor --mode plan        # Start in Plan mode
+ hapi cursor --mode ask         # Start in Ask mode
+-hapi cursor --auto-review      # Start with Auto-review (Smart Auto)
++hapi cursor --auto-review      # Start with Auto (Smart Auto)
+ hapi cursor --yolo             # Bypass approval prompts (--force)
+ hapi cursor --model <model>    # Specify model
+ hapi cursor --cursor-worktree              # Cursor-native worktree (auto-named)
+@@ -112,7 +112,7 @@ hapi cursor --cursor-add-dir ../shared     # Extra workspace root (repeatable)
+ | `plan` | Plan mode - design approach before coding |
+ | `ask` | Ask mode - explore code without edits |
+ | `debug` | Debug mode - hypotheses + instrumentation |
+-| `autoReview` | Auto-review (Smart Auto) - allowlist/sandbox/classifier instead of full YOLO |
++| `autoReview` | Auto (Smart Auto) - allowlist/sandbox/classifier instead of full YOLO |
+ | `yolo` | Bypass approval prompts |
+ 
+ Set mode via `--plan` / `--mode` / `--permission-mode` / `--auto-review`, or change from the web UI during a session.
+diff --git a/docs/guide/codex-shared-sessions.md b/docs/guide/codex-shared-sessions.md
+index e954da2c6..83a0e021c 100644
+--- a/docs/guide/codex-shared-sessions.md
++++ b/docs/guide/codex-shared-sessions.md
+@@ -121,7 +121,9 @@ endpoints/tokens never go into HAPI session metadata or SSE.
+   parent HAPI session; HAPI does not independently start a child execution.
+ - HAPI's legacy `safe-yolo` auto-approval policy is not a native Codex mode;
+   shared sessions reject it instead of silently weakening or misreporting it.
+-  Use `default`, `read-only`, `yolo`, or native `--approve-for-me`.
++  Use `default`, `read-only`, `autoReview`, or `yolo`. `autoReview` keeps the
++  workspace-write sandbox and routes escalations to Codex's native auto-review
++  (`approvals_reviewer = "auto_review"`, same as `--approve-for-me`).
+ - Web-created new/fork roots preserve the standard native sandbox restrictions.
+   Named permission profiles and external sandboxes must be created in the
+   native TUI; HAPI never converts them silently to workspace-write.
+diff --git a/ios/Packages/HapiKit/Sources/HapiProtocol/Catalog/PermissionModes.swift b/ios/Packages/HapiKit/Sources/HapiProtocol/Catalog/PermissionModes.swift
+index 4234e7250..21faa6586 100644
+--- a/ios/Packages/HapiKit/Sources/HapiProtocol/Catalog/PermissionModes.swift
++++ b/ios/Packages/HapiKit/Sources/HapiProtocol/Catalog/PermissionModes.swift
+@@ -40,7 +40,7 @@ public enum PermissionMode: String, Codable, CaseIterable, Sendable {
+         case .plan: return "Plan Mode"
+         case .ask: return "Ask Mode"
+         case .debug: return "Debug Mode"
+-        case .autoReview: return "Auto-review"
++        case .autoReview: return "Auto"
+         case .readOnly: return "Read Only"
+         case .safeYolo: return "Safe Yolo"
+         case .yolo: return "Yolo"
+@@ -94,7 +94,9 @@ extension AgentFlavor {
+     /// Claude set, and Pi offers none (its RPC mode always auto-approves).
+     public var permissionModes: [PermissionMode] {
+         switch self {
+-        case .codex, .gemini, .kimi, .copilot:
++        case .codex:
++            return [.default, .readOnly, .safeYolo, .autoReview, .yolo]
++        case .gemini, .kimi, .copilot:
+             return [.default, .readOnly, .safeYolo, .yolo]
+         case .grok:
+             return [.default, .auto, .bypassPermissions]
+diff --git a/ios/Packages/HapiKit/Tests/HapiClientTests/NewSessionFormTests.swift b/ios/Packages/HapiKit/Tests/HapiClientTests/NewSessionFormTests.swift
+index 1867549a0..218971bb2 100644
+--- a/ios/Packages/HapiKit/Tests/HapiClientTests/NewSessionFormTests.swift
++++ b/ios/Packages/HapiKit/Tests/HapiClientTests/NewSessionFormTests.swift
+@@ -279,7 +279,7 @@ struct NewSessionLogicTests {
+             NewSessionForm(agent: .codex, permissionMode: .safeYolo)
+         )
+         #expect(staleMode.permissionMode == .default)
+-        #expect(AgentFlavor.codex.launchPermissionModes == [.default, .readOnly, .yolo])
++        #expect(AgentFlavor.codex.launchPermissionModes == [.default, .readOnly, .autoReview, .yolo])
+         #expect(NewSessionLogic.sanitizeDraft(NewSessionForm(agent: .kimi, permissionMode: .safeYolo)).permissionMode == .safeYolo)
+     }
+ 
+diff --git a/ios/Packages/HapiKit/Tests/HapiProtocolTests/CatalogTests.swift b/ios/Packages/HapiKit/Tests/HapiProtocolTests/CatalogTests.swift
+index a3c4d3320..ea27d0803 100644
+--- a/ios/Packages/HapiKit/Tests/HapiProtocolTests/CatalogTests.swift
++++ b/ios/Packages/HapiKit/Tests/HapiProtocolTests/CatalogTests.swift
+@@ -78,7 +78,7 @@ struct CatalogTests {
+ 
+     @Test func codexFamilyFlavorsShareTheCodexModeSet() {
+         let expected: [PermissionMode] = [.default, .readOnly, .safeYolo, .yolo]
+-        #expect(permissionModes(forFlavor: "codex") == expected)
++        #expect(permissionModes(forFlavor: "codex") == [.default, .readOnly, .safeYolo, .autoReview, .yolo])
+         #expect(permissionModes(forFlavor: "gemini") == expected)
+         #expect(permissionModes(forFlavor: "kimi") == expected)
+         #expect(permissionModes(forFlavor: "copilot") == expected)
+@@ -117,7 +117,7 @@ struct CatalogTests {
+         #expect(PermissionMode.default.label == "Default")
+         #expect(PermissionMode.acceptEdits.label == "Accept Edits")
+         #expect(PermissionMode.bypassPermissions.label == "Yolo")
+-        #expect(PermissionMode.autoReview.label == "Auto-review")
++        #expect(PermissionMode.autoReview.label == "Auto")
+         #expect(PermissionMode.readOnly.label == "Read Only")
+         #expect(PermissionMode.plan.label == "Plan Mode")
+         #expect(PermissionMode.alwaysProceed.label == "Always Proceed")
+@@ -144,7 +144,7 @@ struct CatalogTests {
+ 
+     @Test func optionListsCarryLabelAndTone() {
+         let options = permissionModeOptions(forFlavor: "codex")
+-        #expect(options.count == 4)
++        #expect(options.count == 5)
+         #expect(options.first == PermissionModeOption(mode: .default))
+         #expect(options.first?.label == "Default")
+         #expect(options.first?.tone == .neutral)
+diff --git a/shared/fixtures/catalogs/modes.json b/shared/fixtures/catalogs/modes.json
+index 9ead59bed..506cfe11e 100644
+--- a/shared/fixtures/catalogs/modes.json
++++ b/shared/fixtures/catalogs/modes.json
+@@ -65,6 +65,11 @@
+                 "mode": "safe-yolo",
+                 "tone": "warning"
+             },
++            {
++                "label": "Auto",
++                "mode": "autoReview",
++                "tone": "warning"
++            },
+             {
+                 "label": "Yolo",
+                 "mode": "yolo",
+@@ -115,7 +120,7 @@
+                 "tone": "info"
+             },
+             {
+-                "label": "Auto-review",
++                "label": "Auto",
+                 "mode": "autoReview",
+                 "tone": "warning"
+             },
+diff --git a/shared/src/modes.test.ts b/shared/src/modes.test.ts
+index d52946ae2..c582cff05 100644
+--- a/shared/src/modes.test.ts
++++ b/shared/src/modes.test.ts
+@@ -3,6 +3,7 @@ import {
+     AGENT_FLAVORS,
+     AgentFlavorSchema,
+     CREATABLE_AGENT_FLAVORS,
++    getLaunchPermissionModesForFlavor,
+     getPermissionModeLabel,
+     getPermissionModeOptionsForFlavor,
+     getPermissionModeTone,
+@@ -93,11 +94,17 @@ describe('isPermissionModeAllowedForFlavor', () => {
+ 
+     test("cursor includes autoReview", () => {
+         expect(getPermissionModesForFlavor('cursor')).toContain('autoReview')
+-        expect(getPermissionModeLabel('autoReview')).toBe('Auto-review')
++        expect(getPermissionModeLabel('autoReview')).toBe('Auto')
+         expect(getPermissionModeTone('autoReview')).toBe('warning')
+         expect(isPermissionModeAllowedForFlavor('autoReview', 'cursor')).toBe(true)
+         expect(isPermissionModeAllowedForFlavor('autoReview', 'claude')).toBe(false)
+     })
++
++    test("codex offers autoReview at launch and mid-session", () => {
++        expect(getLaunchPermissionModesForFlavor('codex')).toEqual(['default', 'read-only', 'autoReview', 'yolo'])
++        expect(isPermissionModeAllowedForFlavor('autoReview', 'codex')).toBe(true)
++        expect(isPermissionModeAllowedForFlavor('autoReview', 'gemini')).toBe(false)
++    })
+ })
+ 
+ describe('getPermissionModeLabel', () => {
+diff --git a/shared/src/modes.ts b/shared/src/modes.ts
+index becf45047..be182dd0a 100644
+--- a/shared/src/modes.ts
++++ b/shared/src/modes.ts
+@@ -25,7 +25,7 @@ export type AgyPermissionMode = typeof AGY_PERMISSION_MODES[number]
+ export const CLAUDE_PERMISSION_MODES = ['default', 'acceptEdits', 'auto', 'bypassPermissions', 'plan'] as const
+ export type ClaudePermissionMode = typeof CLAUDE_PERMISSION_MODES[number]
+ 
+-export const CODEX_PERMISSION_MODES = ['default', 'read-only', 'safe-yolo', 'yolo'] as const
++export const CODEX_PERMISSION_MODES = ['default', 'read-only', 'safe-yolo', 'autoReview', 'yolo'] as const
+ export type CodexPermissionMode = typeof CODEX_PERMISSION_MODES[number]
+ 
+ export const CODEX_COLLABORATION_MODES = ['default', 'plan'] as const
+@@ -74,7 +74,7 @@ export const PERMISSION_MODE_LABELS: Record<PermissionMode, string> = {
+     plan: 'Plan Mode',
+     ask: 'Ask Mode',
+     debug: 'Debug Mode',
+-    autoReview: 'Auto-review',
++    autoReview: 'Auto',
+     bypassPermissions: 'Yolo',
+     'read-only': 'Read Only',
+     'safe-yolo': 'Safe Yolo',
+diff --git a/web/src/components/NewSession/PermissionField.test.tsx b/web/src/components/NewSession/PermissionField.test.tsx
+index 1ec60ecf0..ff29b768f 100644
+--- a/web/src/components/NewSession/PermissionField.test.tsx
++++ b/web/src/components/NewSession/PermissionField.test.tsx
+@@ -23,7 +23,7 @@ describe('PermissionField', () => {
+     it('offers only native shared permission modes for Codex', () => {
+         renderField({ agent: 'codex' })
+         expect(screen.getAllByRole('option').map(option => (option as HTMLOptionElement).value))
+-            .toEqual(['default', 'read-only', 'yolo'])
++            .toEqual(['default', 'read-only', 'autoReview', 'yolo'])
+     })
+     it('renders native permission modes for codex-family agents', () => {
+         const onChange = vi.fn()

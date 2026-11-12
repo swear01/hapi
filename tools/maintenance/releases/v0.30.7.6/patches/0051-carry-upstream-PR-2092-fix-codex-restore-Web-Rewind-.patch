@@ -1,0 +1,1389 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Thu, 22 Oct 2026 05:08:05 +0000
+Subject: [PATCH 51/95] carry(upstream): PR #2092 fix(codex): restore Web
+ Rewind for shared sessions
+
+---
+ cli/src/codex/shared/gateway.test.ts          |  32 ++-
+ cli/src/codex/shared/gateway.ts               |  13 +
+ cli/src/codex/shared/permissions.ts           |   1 +
+ cli/src/codex/shared/projection.ts            |   5 +-
+ cli/src/codex/shared/queue.ts                 |   1 +
+ cli/src/codex/shared/rewind.test.ts           |  49 ++++
+ cli/src/codex/shared/rewind.ts                |  58 +++++
+ cli/src/codex/shared/root.test.ts             | 222 +++++++++++++++++-
+ cli/src/codex/shared/root.ts                  | 191 +++++++++++++--
+ .../codex/shared/runtime.integration.test.ts  |  30 ++-
+ cli/src/codex/shared/runtime.ts               |  16 +-
+ docs/guide/codex-shared-sessions.md           |  28 ++-
+ hub/src/sync/conversationHistoryCodex.test.ts |  52 ++++
+ hub/src/sync/rpcGateway.ts                    |   4 +
+ hub/src/sync/syncEngine.ts                    |   3 +
+ scripts/dev/codex-rewind-model-fixture.ts     |  46 ++++
+ shared/src/apiTypes.ts                        |   2 +
+ shared/src/rpcMethods.ts                      |   1 +
+ web/e2e/codex-rewind-session.spec.ts          | 103 ++++++++
+ web/playwright.live.config.ts                 |   2 +-
+ 20 files changed, 822 insertions(+), 37 deletions(-)
+ create mode 100644 cli/src/codex/shared/rewind.test.ts
+ create mode 100644 cli/src/codex/shared/rewind.ts
+ create mode 100644 hub/src/sync/conversationHistoryCodex.test.ts
+ create mode 100644 scripts/dev/codex-rewind-model-fixture.ts
+ create mode 100644 web/e2e/codex-rewind-session.spec.ts
+
+diff --git a/cli/src/codex/shared/gateway.test.ts b/cli/src/codex/shared/gateway.test.ts
+index fbbf77ccd..305efc85f 100644
+--- a/cli/src/codex/shared/gateway.test.ts
++++ b/cli/src/codex/shared/gateway.test.ts
+@@ -1,8 +1,8 @@
+ import { describe, expect, it, vi } from 'vitest';
+ import { WebSocket, WebSocketServer } from 'ws';
+-import { startCodexGateway, type Envelope } from './gateway';
++import { startCodexGateway, type Envelope, type GatewayHooks } from './gateway';
+ 
+-async function fixture(after: (request: Envelope, response: Envelope, connection: string) => Promise<void>) {
++async function fixture(after: (request: Envelope, response: Envelope, connection: string) => Promise<void>, admit?: GatewayHooks['admit']) {
+     const engine = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+     await new Promise<void>(resolve => engine.once('listening', resolve));
+     const connections = new Map<WebSocket, Envelope[]>();
+@@ -17,7 +17,7 @@ async function fixture(after: (request: Envelope, response: Envelope, connection
+     const port = (engine.address() as { port: number }).port;
+     const before = vi.fn(async (value: Envelope) => value);
+     const gateway = await startCodexGateway({ upstream: `ws://127.0.0.1:${port}`, token: 'secret', hooks: {
+-        before, after, control: async () => ({})
++        before, after, admit, control: async () => ({})
+     } });
+     const clients: WebSocket[] = [];
+     const connect = async () => {
+@@ -31,6 +31,32 @@ async function fixture(after: (request: Envelope, response: Envelope, connection
+     } };
+ }
+ describe('native gateway barriers', () => {
++    it('holds native write admission until the response barrier completes', async () => {
++        let finish!: () => void;
++        const gate = new Promise<void>(resolve => { finish = resolve; });
++        const release = vi.fn();
++        const f = await fixture(async () => { await gate; }, async () => release);
++        try {
++            const client = await f.connect(); const replies: unknown[] = [];
++            client.on('message', value => replies.push(value));
++            client.send(JSON.stringify({ id: 1, method: 'thread/resume', params: { threadId: 'root' } }));
++            await vi.waitFor(() => expect(f.before).toHaveBeenCalledOnce());
++            expect(release).not.toHaveBeenCalled(); expect(replies).toHaveLength(0);
++            finish();
++            await vi.waitFor(() => expect(replies).toHaveLength(1));
++            expect(release).toHaveBeenCalledOnce();
++        } finally { finish(); await f.close(); }
++    });
++    it('does not dispatch writes rejected by rewind admission', async () => {
++        const f = await fixture(async () => {}, async () => { throw new Error('rewind pending'); });
++        try {
++            const client = await f.connect();
++            const result = new Promise<Envelope>(resolve => client.once('message', raw => resolve(JSON.parse(raw.toString()))));
++            client.send(JSON.stringify({ id: 1, method: 'turn/start', params: { threadId: 'root' } }));
++            expect(await result).toMatchObject({ error: { message: 'rewind pending' } });
++            expect(f.before).not.toHaveBeenCalled();
++        } finally { await f.close(); }
++    });
+     it('namespaces colliding native request IDs by connection and withholds replies until binding', async () => {
+         let release!: () => void; const barrier = new Promise<void>(resolve => { release = resolve; });
+         const after = vi.fn(async () => { await barrier; }); const f = await fixture(after);
+diff --git a/cli/src/codex/shared/gateway.ts b/cli/src/codex/shared/gateway.ts
+index 4ad40accf..310f02804 100644
+--- a/cli/src/codex/shared/gateway.ts
++++ b/cli/src/codex/shared/gateway.ts
+@@ -22,6 +22,8 @@ export type GatewayHooks = {
+     before(request: Envelope, connectionId: string): Promise<Envelope>;
+     after(request: Envelope, response: Envelope, connectionId: string): Promise<void | Envelope[]>;
+     disconnected?(connectionId: string): void;
++    /** Admit before dispatch and release only after the native response. */
++    admit?(request: Envelope, connectionId: string): Promise<() => void>;
+     control(method: string, params: unknown): Promise<unknown>;
+ };
+ 
+@@ -51,6 +53,7 @@ export async function startCodexGateway(options: {
+         });
+         connections.set(downstream, upstream);
+         const pending = new Map<string | number, Envelope>();
++        const admissions = new Map<string | number, () => void>();
+         const ready = new Promise<void>((resolve, reject) => { upstream.once('open', resolve); upstream.once('error', reject); });
+         void ready.catch(() => downstream.close(1011, 'Codex unavailable'));
+         let detached = false;
+@@ -64,6 +67,8 @@ export async function startCodexGateway(options: {
+             finished = true; clearTimeout(drainTimer);
+             connections.delete(downstream); upstream.close();
+             options.hooks.disconnected?.(connectionId);
++            // Unanswered writes remain uncertain. Do not release their barriers
++            // on disconnect: a native engine may still be executing them.
+         };
+         const drained = () => { if (detached && processing === 0 && pending.size === 0) finish(); };
+         const send = (target: WebSocket, value: Envelope) => {
+@@ -78,17 +83,22 @@ export async function startCodexGateway(options: {
+             processing++;
+             incoming = incoming.then(async () => {
+                 await ready;
++                let release: (() => void) | undefined;
+                 try {
+                     if (message.method?.startsWith('hapi/')) {
+                         send(downstream, { id: message.id, result: await options.hooks.control(message.method, message.params) });
+                         return;
+                     }
++                    release = await options.hooks.admit?.(message, connectionId);
+                     const transformed = await options.hooks.before(message, connectionId);
++                    if (release && transformed.id !== undefined) admissions.set(transformed.id, release);
+                     if (transformed.id !== undefined && ['thread/start', 'thread/resume', 'thread/fork', 'thread/archive', 'thread/revert', 'thread/rollback', 'thread/queue/delete'].includes(transformed.method ?? '')) {
+                         pending.set(transformed.id, transformed);
+                     }
+                     send(upstream, transformed);
++                    if (transformed.id === undefined) release?.();
+                 } catch (error) {
++                    release?.();
+                     send(downstream, { id: message.id, error: { code: -32600, message: error instanceof Error ? error.message : String(error) } });
+                 }
+             }).catch(() => downstream.close(1011, 'Codex connection failed')).finally(() => { processing--; drained(); });
+@@ -97,6 +107,7 @@ export async function startCodexGateway(options: {
+             outgoing = outgoing.then(async () => {
+                 const message = EnvelopeSchema.parse(JSON.parse(raw.toString()));
+                 const request = message.method === undefined && message.id !== undefined ? pending.get(message.id) : undefined;
++                const release = message.method === undefined && message.id !== undefined ? admissions.get(message.id) : undefined;
+                 let replay: void | Envelope[] = undefined;
+                 if (request) {
+                     try { replay = await options.hooks.after(request, message, connectionId); }
+@@ -105,6 +116,8 @@ export async function startCodexGateway(options: {
+                         return;
+                     } finally { pending.delete(message.id!); drained(); }
+                 }
++                release?.();
++                if (message.id !== undefined && message.method === undefined) admissions.delete(message.id);
+                 send(downstream, message);
+                 for (const notification of replay ?? []) send(downstream, notification);
+             }).catch(() => downstream.close(1011, 'Invalid Codex response'));
+diff --git a/cli/src/codex/shared/permissions.ts b/cli/src/codex/shared/permissions.ts
+index f8466f6cb..926d4b9d3 100644
+--- a/cli/src/codex/shared/permissions.ts
++++ b/cli/src/codex/shared/permissions.ts
+@@ -19,6 +19,7 @@ export class SharedCodexPermissions {
+     private readonly pending = new Map<string, Pending>();
+     private readonly retired = new Set<string>();
+     private closed = false;
++    hasPending(): boolean { return this.pending.size > 0; }
+     private questionEvent(request: Pending, status?: 'resolved' | 'canceled'): void {
+         const id = `codex:${request.threadId}:question:${request.toolCallId}:${status ?? 'start'}`;
+         const message = status
+diff --git a/cli/src/codex/shared/projection.ts b/cli/src/codex/shared/projection.ts
+index 7fcb601bc..d95474736 100644
+--- a/cli/src/codex/shared/projection.ts
++++ b/cli/src/codex/shared/projection.ts
+@@ -45,8 +45,9 @@ export class SharedCodexProjection {
+     private readonly completedTitles = new Set<string>();
+     private titleRevision = 0;
+     constructor(private readonly session: ApiSessionClient, readonly threadId: string,
+-        private readonly committed: (id: string) => Promise<void>, private readonly parentThreadId?: string) {
+-        if (!parentThreadId) for (const [id, turn] of Object.entries(session.getMetadata()?.conversationHistoryTurns ?? {})) this.turns.set(id, turn);
++        private readonly committed: (id: string) => Promise<void>, private readonly parentThreadId?: string, restoreLocators = true) {
++        if (!parentThreadId && restoreLocators) for (const [id, turn] of Object.entries(session.getMetadata()?.conversationHistoryTurns ?? {})) this.turns.set(id, turn);
++        if (!restoreLocators) session.updateMetadata(metadata => ({ ...metadata, conversationHistoryTurns: {}, conversationHistoryPoints: {} }));
+     }
+ 
+     turnFor(id: string): string | undefined { return this.turns.get(id); }
+diff --git a/cli/src/codex/shared/queue.ts b/cli/src/codex/shared/queue.ts
+index 0ddb01bc2..7023d9113 100644
+--- a/cli/src/codex/shared/queue.ts
++++ b/cli/src/codex/shared/queue.ts
+@@ -44,6 +44,7 @@ export class SharedCodexQueue {
+     }
+     owns(id: string): boolean { return id in this.entries; }
+     state(id: string): Entry['state'] | undefined { return this.entries[id]?.state; }
++    hasUncertainInput(): boolean { return Object.values(this.entries).some(entry => ['unknown', 'queued', 'released'].includes(entry.state)); }
+     /** Slash commands can mutate native state too. Crash/redelivery must not
+      * repeat /new, /compact, or a settings change whose outcome was lost. */
+     command(id: string, work: () => Promise<string | null>): Promise<string | null> {
+diff --git a/cli/src/codex/shared/rewind.test.ts b/cli/src/codex/shared/rewind.test.ts
+new file mode 100644
+index 000000000..a2ffb40cf
+--- /dev/null
++++ b/cli/src/codex/shared/rewind.test.ts
+@@ -0,0 +1,49 @@
++import { afterEach, describe, expect, it } from 'vitest';
++import { mkdtemp, rm } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import { SharedRewindBarrier, isNativeHistoryRead } from './rewind';
++
++const homes: string[] = [];
++afterEach(async () => { for (const home of homes.splice(0)) await rm(home, { recursive: true, force: true }); });
++async function fixture() {
++    const home = await mkdtemp(join(tmpdir(), 'hapi-rewind-')); homes.push(home);
++    const file = join(home, 'barrier.json');
++    return { file, barrier: new SharedRewindBarrier(file) };
++}
++describe('shared rewind admission', () => {
++    it('excludes in-flight writes and prevents new writes until commit', async () => {
++        const { barrier } = await fixture();
++        const release = barrier.enter();
++        await expect(barrier.begin()).rejects.toThrow('in flight');
++        release(); release();
++        const token = await barrier.begin();
++        expect(() => barrier.enter()).toThrow('rewind');
++        await expect(barrier.begin()).rejects.toThrow('rewind');
++        await barrier.complete(token, async () => {});
++        barrier.enter()();
++        await barrier.complete(token, async () => { throw new Error('Must not repeat'); });
++    });
++    it('retains quarantine across failed commit and process replacement', async () => {
++        const { file, barrier } = await fixture();
++        const token = await barrier.begin();
++        await expect(barrier.complete(token, async () => { throw new Error('Hub lost'); })).rejects.toThrow('Hub lost');
++        expect(() => barrier.enter()).toThrow();
++        const replacement = new SharedRewindBarrier(file); await replacement.load();
++        expect(() => replacement.enter()).toThrow();
++        await expect(replacement.complete(token, async () => {})).rejects.toThrow('Invalid');
++    });
++    it('unlocks only a proven rejection before native dispatch', async () => {
++        const { file, barrier } = await fixture();
++        await barrier.begin(); await barrier.cancel();
++        const replacement = new SharedRewindBarrier(file); await replacement.load();
++        replacement.enter()();
++    });
++    it('treats new native methods as mutations by default', () => {
++        expect(isNativeHistoryRead('thread/turns/list')).toBe(true);
++        for (const method of ['turn/start', 'turn/steer', 'thread/queue/add', 'thread/queue/start',
++            'thread/settings/update', 'thread/compact/start', 'thread/fork', 'thread/revert', 'future/write']) {
++            expect(isNativeHistoryRead(method)).toBe(false);
++        }
++    });
++});
+diff --git a/cli/src/codex/shared/rewind.ts b/cli/src/codex/shared/rewind.ts
+new file mode 100644
+index 000000000..970c993a6
+--- /dev/null
++++ b/cli/src/codex/shared/rewind.ts
+@@ -0,0 +1,58 @@
++import { mkdir, readFile, writeFile, unlink } from 'node:fs/promises';
++import { dirname } from 'node:path';
++import { randomUUID } from 'node:crypto';
++
++/** A per-root admission barrier, held until the hub acknowledges its durable truncate.
++ * An uncertain native mutation is never unlocked by a timer or process restart. */
++export class SharedRewindBarrier {
++    private token?: string;
++    private completed?: string;
++    private writers = 0;
++    private completing?: Promise<void>;
++    constructor(private readonly file: string) {}
++
++    get blocked(): boolean { return this.token !== undefined; }
++    async load(): Promise<void> {
++        try { await readFile(this.file); this.token = 'reconciliation-required'; }
++        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
++    }
++    assertOpen(): void {
++        if (this.blocked) throw new Error('Conversation rewind is pending or requires reconciliation; new operations are blocked');
++    }
++    enter(): () => void {
++        this.assertOpen(); this.writers++;
++        let released = false;
++        return () => { if (!released) { released = true; this.writers--; } };
++    }
++    async begin(): Promise<string> {
++        this.assertOpen();
++        if (this.writers) throw new Error('Session has operations in flight');
++        const token = this.token = randomUUID();
++        try {
++            await mkdir(dirname(this.file), { recursive: true, mode: 0o700 });
++            await writeFile(this.file, JSON.stringify({ token }), { mode: 0o600, flag: 'wx' });
++        } catch (error) { this.token = undefined; throw error; }
++        return token;
++    }
++    /** Only before native dispatch: rejection is proven, so no reconciliation is needed. */
++    async cancel(): Promise<void> {
++        await unlink(this.file); this.token = undefined;
++    }
++    async complete(token: string, reconcile: () => Promise<void>): Promise<void> {
++        if (this.completing) await this.completing;
++        if (!this.blocked && this.completed === token) return;
++        if (!this.token || token !== this.token || token === 'reconciliation-required') throw new Error('Invalid rewind transaction');
++        this.completing = (async () => {
++            await reconcile();
++            await unlink(this.file);
++            this.completed = token; this.token = undefined;
++        })();
++        try { await this.completing; } finally { this.completing = undefined; }
++    }
++}
++
++/** Reads do not change context; unknown/new native methods are writes by default. */
++export function isNativeHistoryRead(method: string): boolean {
++    return ['thread/read', 'thread/turns/list', 'thread/items/list', 'thread/queue/list',
++        'thread/goal/get', 'thread/memory/read'].includes(method);
++}
+diff --git a/cli/src/codex/shared/root.test.ts b/cli/src/codex/shared/root.test.ts
+index b3ed8b486..a52ba2d1c 100644
+--- a/cli/src/codex/shared/root.test.ts
++++ b/cli/src/codex/shared/root.test.ts
+@@ -6,28 +6,40 @@ import type { SessionBootstrapResult } from '@/agent/sessionFactory';
+ import { SharedCodexRoot, type RootHost } from './root';
+ import { codexPlanProposalId } from './plan';
+ import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
++import { SharedRewindBarrier } from './rewind';
+ 
+ type NativeTurn = { id: string; status: string; items: unknown[] };
+ 
+ vi.mock('../codexAppServerClient', () => ({
+     CodexAppServerClient: class {
+         initialized = false;
+-        thread = { id: 'thread', turns: [] as NativeTurn[] };
++        thread = { id: 'thread', historyMode: 'legacy', turns: [] as NativeTurn[] };
+         settings: Record<string, unknown> = { model: 'mock', collaborationMode: { mode: 'default' } };
+         queue: Array<{ id: string; clientUserMessageId: unknown; input: unknown }> = [];
+         notify?: (method: string, params: unknown) => void;
+         abandoned?: () => void;
++        serverRequest?: (request: { id: number; method: string; params: unknown }) => void;
+         setNotificationHandler(handler: typeof this.notify) { this.notify = handler; }
+         setTransportAbandonedHandler(handler: (() => void) | null) { this.abandoned = handler ?? undefined; }
+-        setServerRequestHandler() {}
++        setServerRequestHandler(handler: typeof this.serverRequest) { this.serverRequest = handler; }
+         async connect() {}
+         async initialize() { this.initialized = true; }
+         isInitialized() { return this.initialized; }
+         async disconnect() { this.initialized = false; }
++        async supportsMethod() { return true; }
+         async request(method: string, params: Record<string, unknown> = {}) {
+             if (method === 'thread/read' || method === 'thread/resume') return { ...this.settings, thread: structuredClone(this.thread) };
+             if (method === 'thread/list') return { data: [] };
+             if (method === 'thread/queue/list') return { data: this.queue };
++            if (method === 'thread/goal/get') return { goal: null };
++            if (method === 'thread/turns/list') return { data: structuredClone(this.thread.turns) };
++            if (method === 'thread/revert') {
++                const index = this.thread.turns.findIndex(turn => turn.id === params.beforeTurnId);
++                if (index < 0) throw new Error('Invalid boundary');
++                this.thread.turns.splice(index);
++                this.notify?.('thread/reverted', { threadId: 'thread' });
++                return { thread: { ...this.thread, turns: [] } };
++            }
+             if (method === 'thread/settings/update') {
+                 this.settings = { ...this.settings, ...params };
+                 this.notify?.('thread/settings/updated', { threadId: 'thread', threadSettings: this.settings });
+@@ -88,10 +100,11 @@ async function fixture(opts?: { hubArchived?: boolean; end?: RootHost['end'] })
+     await root.bind('thread', { model: 'mock', thread: { turns: [] } }, false);
+     const native = root.client as unknown as {
+         initialized: boolean;
+-        thread: { id: string; turns: NativeTurn[] };
++        thread: { id: string; historyMode: string; turns: NativeTurn[] };
+         queue: Array<{ id: string; clientUserMessageId: string; input: unknown }>;
+         notify(method: string, params: unknown): void;
+         abandoned(): void;
++        serverRequest(request: { id: number; method: string; params: unknown }): void;
+     };
+     return {
+         root, native, rpc, send, metadata: () => metadata, state: () => state, updateState,
+@@ -125,6 +138,209 @@ describe('shared permission modes', () => {
+     });
+ });
+ 
++describe('shared conversation rewind', () => {
++    async function history() {
++        const f = await fixture();
++        f.native.thread.historyMode = 'paginated';
++        f.native.thread.turns = ['one', 'two', 'three'].map(id => ({ id, status: 'completed', items: [
++            { id: `item-${id}`, type: 'userMessage', clientId: id, content: [{ type: 'inputText', text: id }] }
++        ] }));
++        await f.root.refresh();
++        await f.root.activate();
++        return f;
++    }
++
++    it('reverts the exact native boundary and holds writes until the hub commits', async () => {
++        const f = await history();
++        expect(f.metadata().capabilities?.conversationHistory?.rewindToMessage).toBe(true);
++        const result = await f.rpc.get(RPC_METHODS.RewindConversation)!({ messageLocalId: 'two' }) as {
++            success: boolean; rewindToken: string; truncateFromLocalId: string;
++        };
++        expect(result).toMatchObject({ success: true, truncateFromLocalId: 'two', rewindToken: expect.any(String) });
++        expect(f.native.thread.turns.map(t => t.id)).toEqual(['one']);
++        await expect(f.rpc.get(RPC_METHODS.SetSessionConfig)!({ model: 'other' })).rejects.toThrow(/rewind/i);
++        await expect(f.rpc.get('complete-conversation-rewind')!({ rewindToken: 'wrong' })).rejects.toThrow();
++        await f.rpc.get('complete-conversation-rewind')!({ rewindToken: result.rewindToken });
++        expect(f.metadata().conversationHistoryTurns).toEqual({ one: 'one' });
++        await expect(f.rpc.get(RPC_METHODS.SetSessionConfig)!({ model: 'other' })).resolves.toBeDefined();
++    });
++
++    it('rejects queued native input without changing history', async () => {
++        const f = await history();
++        f.native.queue.push({ id: 'q', clientUserMessageId: 'queued', input: [] });
++        await expect(f.rpc.get(RPC_METHODS.RewindConversation)!({ messageLocalId: 'two' })).resolves.toMatchObject({
++            success: false, outcome: 'rejected'
++        });
++        expect(f.native.thread.turns).toHaveLength(3);
++    });
++
++    it('rejects a cut inside a steered turn without changing history', async () => {
++        const f = await history();
++        f.native.thread.turns[1]!.items.push({ id: 'steer', type: 'userMessage', clientId: 'steer', content: [] });
++        await f.root.refresh();
++        await expect(f.rpc.get(RPC_METHODS.RewindConversation)!({ messageLocalId: 'steer' })).resolves.toMatchObject({
++            success: false, outcome: 'rejected'
++        });
++        expect(f.native.thread.turns).toHaveLength(3);
++    });
++
++    it('allows the first user message of a steered turn as an exact native boundary', async () => {
++        const f = await history();
++        f.native.thread.turns[1]!.items.push({ id: 'steer', type: 'userMessage', clientId: 'steer', content: [] });
++        await f.root.refresh();
++        expect(await f.rpc.get(RPC_METHODS.RewindConversation)!({ messageLocalId: 'two' })).toMatchObject({ success: true });
++        expect(f.native.thread.turns.map(t => t.id)).toEqual(['one']);
++    });
++
++    it.each(['legacy', 'missing', 'busy', 'inflight'])('rejects %s preconditions before dispatch', async reason => {
++        const f = await history();
++        if (reason === 'legacy') f.native.thread.historyMode = 'legacy';
++        if (reason === 'busy') f.native.thread.turns[2]!.status = 'inProgress';
++        const release = reason === 'inflight' ? f.root.nativeAdmission('turn/start') : () => {};
++        expect(await f.rpc.get(RPC_METHODS.RewindConversation)!({ messageLocalId: reason === 'missing' ? 'missing' : 'two' }))
++            .toMatchObject({ success: false, outcome: 'rejected' });
++        release();
++        expect(f.native.thread.turns).toHaveLength(3);
++        if (reason === 'busy') expect(f.state().steeringActive).toBe(true);
++    });
++
++    it('quarantines a failed or unverifiable native mutation and ignores late projection', async () => {
++        const f = await history();
++        const request = f.root.client.request.bind(f.root.client);
++        vi.spyOn(f.root.client, 'request').mockImplementation(async (method, params) => {
++            if (method === 'thread/revert') throw new Error('Lost native response');
++            return request(method, params);
++        });
++        await expect(f.rpc.get(RPC_METHODS.RewindConversation)!({ messageLocalId: 'two' })).rejects.toThrow('Lost native');
++        expect(f.metadata().conversationHistoryDiverged).toBe(true);
++        expect(() => f.root.nativeAdmission('turn/start')).toThrow('rewind');
++        f.send.mockClear();
++        f.native.notify('item/completed', { threadId: 'thread', turnId: 'three', item: {
++            id: 'late', type: 'agentMessage', text: 'stale response'
++        } });
++        await f.root.refresh();
++        expect(f.send).not.toHaveBeenCalled();
++    });
++
++    it('supports repeated rewinds, including removing the first turn', async () => {
++        const f = await history();
++        for (const id of ['three', 'two', 'one']) {
++            const result = await f.rpc.get(RPC_METHODS.RewindConversation)!({ messageLocalId: id }) as { rewindToken: string };
++            await f.rpc.get('complete-conversation-rewind')!({ rewindToken: result.rewindToken });
++        }
++        expect(f.native.thread.turns).toEqual([]);
++        expect(f.metadata().conversationHistoryTurns).toEqual({});
++        expect(f.metadata().conversationHistoryPoints).toEqual({});
++    });
++
++    it('rejects active goals and unconfirmed retained history', async () => {
++        const f = await history();
++        const request = f.root.client.request.bind(f.root.client);
++        const spy = vi.spyOn(f.root.client, 'request').mockImplementation(async (method, params) => {
++            if (method === 'thread/goal/get') return { goal: { status: 'active' } };
++            return request(method, params);
++        });
++        expect(await f.rpc.get(RPC_METHODS.RewindConversation)!({ messageLocalId: 'two' })).toMatchObject({ success: false });
++        expect(f.native.thread.turns).toHaveLength(3);
++        spy.mockImplementation(async (method, params) => method === 'thread/revert' ? {} : request(method, params));
++        await expect(f.rpc.get(RPC_METHODS.RewindConversation)!({ messageLocalId: 'two' })).rejects.toThrow('reconciliation');
++        expect(() => f.root.nativeAdmission('turn/start')).toThrow();
++    });
++
++    it('reconnects after transport loss during rejected read-only rewind preflight', async () => {
++        const f = await history();
++        const planId = await completePlan(f);
++        const request = f.root.client.request.bind(f.root.client);
++        const spy = vi.spyOn(f.root.client, 'request').mockImplementation(async (method, params) => {
++            if (method === 'thread/goal/get') {
++                f.native.initialized = false; f.native.abandoned();
++                throw new Error('Lost preflight connection');
++            }
++            return request(method, params);
++        });
++        expect(await f.rpc.get(RPC_METHODS.RewindConversation)!({ messageLocalId: 'two' }))
++            .toMatchObject({ success: false, outcome: 'rejected' });
++        await vi.waitFor(() => expect(f.native.initialized).toBe(true));
++        expect(spy.mock.calls.some(([method]) => method === 'thread/resume')).toBe(true);
++        expect(f.native.thread.turns).toHaveLength(4);
++        spy.mockImplementation(request);
++        // Native initialization precedes queue/history recovery. Wait for the
++        // final UI control publication before exercising the recovered root.
++        await vi.waitFor(() => expect(f.state().codexPlanProposalId).toBe(planId));
++        await expect(f.rpc.get(RPC_METHODS.SetSessionConfig)!({ model: 'reconnected' })).resolves.toBeDefined();
++    });
++
++    it('retires native approval resolutions arriving while the rewind marker is being written', async () => {
++        const f = await history();
++        f.native.thread.turns[2]!.status = 'inProgress';
++        f.native.serverRequest({ id: 77, method: 'item/tool/requestUserInput', params: {
++            threadId: 'thread', turnId: 'three', itemId: 'question', questions: [
++                { id: 'q', header: 'Choice', question: 'Choose?', options: [{ label: 'A', description: 'A' }] }
++            ]
++        } });
++        await vi.waitFor(() => expect(Object.keys(f.state().requests ?? {})).toHaveLength(1));
++        const id = Object.keys(f.state().requests!)[0]!;
++        const begin = SharedRewindBarrier.prototype.begin;
++        const spy = vi.spyOn(SharedRewindBarrier.prototype, 'begin').mockImplementation(function(this: SharedRewindBarrier) {
++            const writing = begin.call(this);
++            // begin synchronously closes admission, then awaits its marker write.
++            f.native.notify('serverRequest/resolved', { threadId: 'thread', requestId: 77 });
++            return writing;
++        });
++        try {
++            expect(await f.rpc.get(RPC_METHODS.RewindConversation)!({ messageLocalId: 'two' }))
++                .toMatchObject({ success: false, outcome: 'rejected' });
++        } finally { spy.mockRestore(); }
++        expect(f.state().requests).toEqual({});
++        expect(f.state().completedRequests?.[id]?.status).toBe('resolved');
++        f.native.thread.turns[2]!.status = 'completed';
++        await f.root.refresh();
++        expect(await f.rpc.get(RPC_METHODS.RewindConversation)!({ messageLocalId: 'two' }))
++            .toMatchObject({ success: true });
++    });
++
++    it.each([false, true])('recovers new requests received during rejected preflight without reviving resolved ones (%s)', async resolved => {
++        const f = await history();
++        f.native.thread.turns[2]!.status = 'inProgress';
++        const begin = SharedRewindBarrier.prototype.begin;
++        const spy = vi.spyOn(SharedRewindBarrier.prototype, 'begin').mockImplementation(function(this: SharedRewindBarrier) {
++            const writing = begin.call(this);
++            f.native.serverRequest({ id: 88, method: 'item/tool/requestUserInput', params: {
++                threadId: 'thread', turnId: 'three', itemId: 'new-question', questions: [
++                    { id: 'new-q', header: 'Choice', question: 'New choice?', options: [{ label: 'A', description: 'A' }] }
++                ]
++            } });
++            if (resolved) f.native.notify('serverRequest/resolved', { threadId: 'thread', requestId: 88 });
++            return writing;
++        });
++        try {
++            expect(await f.rpc.get(RPC_METHODS.RewindConversation)!({ messageLocalId: 'two' }))
++                .toMatchObject({ success: false, outcome: 'rejected' });
++        } finally { spy.mockRestore(); }
++        expect(Object.values(f.state().requests ?? {})).toHaveLength(resolved ? 0 : 1);
++        if (!resolved) {
++            expect(Object.values(f.state().requests!)[0]?.toolCallId).toBe('new-question');
++            f.native.notify('serverRequest/resolved', { threadId: 'thread', requestId: 88 });
++        }
++        f.native.thread.turns[2]!.status = 'completed';
++        await f.root.refresh();
++        expect(await f.rpc.get(RPC_METHODS.RewindConversation)!({ messageLocalId: 'two' }))
++            .toMatchObject({ success: true });
++    });
++
++    it('refuses cold recovery before connecting a native client after an interrupted rewind', async () => {
++        const f = await history();
++        await f.rpc.get(RPC_METHODS.RewindConversation)!({ messageLocalId: 'two' });
++        await f.root.close(false);
++        const replacement = new SharedCodexRoot(f.root.bootstrap, {
++            directory: f.root.bootstrap.workingDirectory, generation: 'replacement', endpoint: 'mock',
++            settingsFor: () => undefined, create: async () => { throw new Error('Unexpected create'); }, end: async () => {}
++        });
++        await expect(replacement.prepare()).rejects.toThrow('reconciliation');
++        expect(replacement.client.isInitialized()).toBe(false);
++    });
++});
++
+ describe('shared plan actions', () => {
+     it('keeps a remote change_title while mirroring the native thread title as summary', async () => {
+         const f = await fixture();
+diff --git a/cli/src/codex/shared/root.ts b/cli/src/codex/shared/root.ts
+index 1d31e97a3..0a41be94a 100644
+--- a/cli/src/codex/shared/root.ts
++++ b/cli/src/codex/shared/root.ts
+@@ -8,7 +8,7 @@ import { listSlashCommands } from '@/modules/common/slashCommands';
+ import { normalizeCodexModel } from '@/modules/common/codexModels';
+ import { formatMessageWithAttachments } from '@/utils/attachmentFormatter';
+ import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
+-import { ImplementCodexPlanRequestSchema, type ImplementCodexPlanResult } from '@hapi/protocol/apiTypes';
++import { ImplementCodexPlanRequestSchema, type ImplementCodexPlanResult, type RewindConversationRpcResult } from '@hapi/protocol/apiTypes';
+ import { CodexAppServerClient, isIndeterminateError } from '../codexAppServerClient';
+ import { buildHapiMcpBridge, type HapiMcpBridge } from '../utils/buildHapiMcpBridge';
+ import { buildUserInputFromMessage } from '../utils/appServerConfig';
+@@ -23,8 +23,10 @@ import { record, string } from './gateway';
+ import { initializeSharedClient, type SharedLaunchOptions } from './launch';
+ import { inheritedSandbox, settingsMatch } from './settings';
+ import { planImplementationMessageId, planProposalForItem, planProposalForTurn } from './plan';
++import { SharedRewindBarrier, isNativeHistoryRead } from './rewind';
+ 
+ type RuntimeSettings = NonNullable<Parameters<ApiSessionClient['keepAlive']>[2]>;
++type NativeServerRequest = { id: string | number; method: string; params: unknown };
+ export type RootHost = {
+     directory: string; generation: string; endpoint: string; token?: string;
+     settingsFor(threadId: string): Record<string, unknown> | undefined;
+@@ -75,16 +77,23 @@ export class SharedCodexRoot {
+     private readonly settingsListeners = new Set<() => void>();
+     private ready!: () => void;
+     private readonly bound = new Promise<void>(resolve => { this.ready = resolve; });
++    private readonly rewindBarrier: SharedRewindBarrier;
++    private supportsRevert?: boolean;
++    private retainedTurnIds?: string[];
++    private deferredRequests: NativeServerRequest[] = [];
+ 
+     constructor(readonly bootstrap: SessionBootstrapResult, private readonly host: RootHost) {
+         this.session = bootstrap.session;
+         this.titles = new CodexSessionTitles(this.session, bootstrap.workingDirectory, () => this.threadId || null,
+             { endpoint: host.endpoint, token: host.token });
++        this.rewindBarrier = new SharedRewindBarrier(join(host.directory, `${this.session.sessionId}.rewind.json`));
+         this.client = new CodexAppServerClient({ endpoint: host.endpoint, token: host.token, cwd: bootstrap.workingDirectory });
+         this.client.setNotificationHandler((method, params) => {
+             if (method === 'serverRequest/resolved') {
+                 this.permissions?.resolved(string(record(params).threadId) ?? '', record(params).requestId); return;
+             }
++            const eventThread = string(record(params).threadId);
++            if (this.rewindBarrier.blocked && (eventThread === this.threadId || this.children.has(eventThread ?? ''))) return;
+             if (method === 'thread/settings/updated' && record(params).threadId === this.threadId) this.acceptSettings(record(record(params).threadSettings));
+             if (record(params).threadId === this.threadId) {
+                 if (method === 'turn/started') {
+@@ -117,6 +126,9 @@ export class SharedCodexRoot {
+         });
+         this.client.setTransportAbandonedHandler(() => { void this.reconnect(); });
+         this.session.onUserMessage((message, localId) => {
++            let release: () => void;
++            try { release = this.rewindBarrier.enter(); }
++            catch { if (localId) this.session.emitSteerIndeterminate([localId]); return; }
+             this.work = this.work.catch(() => {}).then(async () => {
+                 await this.bound;
+                 if (this.closed || this.stopping) return;
+@@ -125,18 +137,23 @@ export class SharedCodexRoot {
+                 const resolved = text.trim().startsWith('/') ? await this.queue.command(id, () => this.command(text)) : text;
+                 if (resolved === null) { this.session.emitMessagesConsumed([id], { clearQueuedThinkingGrace: true }); return; }
+                 await this.queue.enqueue(id, buildUserInputFromMessage(resolved), this.interrupted);
+-            }).catch(error => this.notice(`Message not confirmed: ${error instanceof Error ? error.message : error}. Inspect the queue before retrying.`));
++            }).catch(error => this.notice(`Message not confirmed: ${error instanceof Error ? error.message : error}. Inspect the queue before retrying.`)).finally(release);
++        });
++        this.session.onCancelQueuedMessage(async id => {
++            await this.bound;
++            if (this.stopping || this.rewindBarrier.blocked) return 'indeterminate';
++            const release = this.rewindBarrier.enter();
++            try { return await this.queue.cancel(id); } finally { release(); }
+         });
+-        this.session.onCancelQueuedMessage(async id => { await this.bound; return this.stopping ? 'indeterminate' : this.queue.cancel(id); });
+         // Absence from history is NOT proof an uncertain mutation failed.
+         this.session.onRetryQueuedMessage(async id => {
+             await this.bound;
+-            if (this.stopping) return false;
++            if (this.stopping || this.rewindBarrier.blocked) return false;
+             await this.refresh();
+             return ['rejected', 'canceled', 'released'].includes(this.queue.state(id) ?? '');
+         });
+         this.session.onReconnect(() => {
+-            if (!this.threadId || this.closed || this.stopping) return;
++            if (!this.threadId || this.closed || this.stopping || this.rewindBarrier.blocked) return;
+             // An emitted socket packet is not a durable hub acknowledgement.
+             // Replay final native history with stable IDs after every reconnect.
+             this.projection?.reset();
+@@ -148,6 +165,9 @@ export class SharedCodexRoot {
+     }
+ 
+     async prepare(): Promise<void> {
++        await this.rewindBarrier.load();
++        this.rewindBarrier.assertOpen();
++        if (this.session.getMetadata()?.conversationHistoryDiverged) throw new Error('Conversation history requires reconciliation before resume');
+         // Descendants share this bridge. The projection applies successful
+         // root title calls so a child cannot rename the parent session.
+         this.bridge = await buildHapiMcpBridge(this.session, { exportSessionEnv: false, emitTitleSummary: false,
+@@ -156,13 +176,24 @@ export class SharedCodexRoot {
+         this.permissions = new SharedCodexPermissions(this.session, this.client, this.host.generation);
+         this.client.setServerRequestHandler(request => { void this.receiveRequest(request); });
+     }
+-    private async receiveRequest(request: { id: string | number; method: string; params: unknown }): Promise<void> {
++    private async receiveRequest(request: NativeServerRequest): Promise<void> {
+         await this.bound;
+         if (this.closed || this.stopping) return;
++        if (this.rewindBarrier.blocked) { this.deferredRequests.push(request); return; }
+         const threadId = string(record(request.params).threadId);
+         // App-server automatically subscribes every initialized connection to
+         // newly created threads, including siblings. Never answer their calls.
+-        if (threadId && await this.ownsThread(threadId)) this.permissions.receive(request);
++        if (threadId && await this.ownsThread(threadId)) {
++            // Ownership lookup can await native ancestry while admission closes.
++            if (this.rewindBarrier.blocked) this.deferredRequests.push(request);
++            else this.permissions.receive(request);
++        }
++    }
++    private async replayDeferredRequests(): Promise<void> {
++        const requests = this.deferredRequests.splice(0);
++        // Native resolutions are tracked even while admission is closed, so
++        // permissions.receive ignores any buffered request already retired.
++        for (const request of requests) await this.receiveRequest(request);
+     }
+     private async ownsThread(threadId: string): Promise<boolean> {
+         const visited = new Set<string>();
+@@ -190,6 +221,7 @@ export class SharedCodexRoot {
+     async bind(threadId: string, response: Record<string, unknown>, subscribe: boolean): Promise<void> {
+         if (this.threadId && this.threadId !== threadId) throw new Error('Cannot retarget a shared HAPI session');
+         this.threadId = threadId;
++        await this.rewindBarrier.load();
+         this.queue = new SharedCodexQueue(this.client, threadId, join(this.host.directory, `${this.session.sessionId}.queue.json`),
+             (ids, steered) => this.session.emitMessagesConsumed(ids, { steered }), ids => this.session.emitSteerIndeterminate(ids),
+             (id, input) => this.session.syncNativeQueuedMessage(id, input === null ? null : inputText(input)),
+@@ -198,8 +230,6 @@ export class SharedCodexRoot {
+         this.projection = new SharedCodexProjection(this.session, threadId, id => this.queue.committed(id));
+         this.session.updateMetadata(metadata => ({ ...metadata, codexSessionId: threadId, capabilities: {
+             ...metadata.capabilities, concurrentClients: true, terminal: true,
+-            // In-place rewind needs a native + hub commit barrier. Do not
+-            // advertise a destructive operation we cannot make atomic yet.
+             conversationHistory: { forkCurrent: true, forkAtMessage: true, rewindToMessage: false }
+         } }));
+         this.session.updateAgentState(state => ({ ...state, controlledByUser: false, startingMode: undefined, codexPlanProposalId: null, requests: {},
+@@ -208,11 +238,13 @@ export class SharedCodexRoot {
+         }));
+         if (subscribe) response = record(await this.client.request('thread/resume', { threadId }));
+         this.acceptSettings(response); this.acceptSettings(this.host.settingsFor(threadId) ?? {});
+-        await this.projection.history(response.thread); await this.refresh(); await this.refreshChildren(true);
++        if (!this.rewindBarrier.blocked && this.session.getMetadata()?.conversationHistoryDiverged !== true) {
++            await this.projection.history(response.thread); await this.refresh(); await this.refreshChildren(true);
++        }
+     }
+     async activate(options: SharedLaunchOptions = {}): Promise<void> {
+         // Restored input cannot run before the cold-resume settings are applied.
+-        await this.initialSettings(options);
++        if (!this.rewindBarrier.blocked) await this.initialSettings(options);
+         if (this.stopping) throw new Error('Codex execution is stopping');
+         this.registerControls(); this.ready();
+         this.heartbeat = setInterval(() => this.alive(), 2_000); this.alive(); this.session.emitSessionReady();
+@@ -230,7 +262,7 @@ export class SharedCodexRoot {
+     }
+     private availablePlanId(): string | null {
+         if (this.currentTurn || this.latestTurn?.status !== 'completed' || this.settings.collaborationMode !== 'plan'
+-            || this.stopping || this.closed || this.reconnecting || this.submittingPlan || !this.client.isInitialized()) return null;
++            || this.stopping || this.closed || this.reconnecting || this.submittingPlan || this.rewindBarrier.blocked || !this.client.isInitialized()) return null;
+         const id = this.latestTurn.planId;
+         // An uncertain/accepted submission must never become a fresh Execute button after reconnect.
+         return id && !this.queue?.owns(planImplementationMessageId(id)) ? id : null;
+@@ -265,6 +297,7 @@ export class SharedCodexRoot {
+             if (id) this.ancestry.set(id, string(thread.parentThreadId) ?? null);
+         }
+         const eventThread = string(p.threadId) ?? string(record(p.thread).id);
++        if (this.rewindBarrier.blocked && (eventThread === this.threadId || this.children.has(eventThread ?? ''))) return;
+         if (eventThread && eventThread !== this.threadId) {
+             if (!await this.ownsThread(eventThread)) return;
+             let projection = this.children.get(eventThread);
+@@ -302,13 +335,24 @@ export class SharedCodexRoot {
+         return thread;
+     }
+     refresh(): Promise<void> {
+-        return this.refreshing ??= this.refreshNow().finally(() => { this.refreshing = undefined; });
++        if (this.rewindBarrier.blocked) return Promise.resolve();
++        if (this.refreshing) return this.refreshing;
++        const release = this.rewindBarrier.enter();
++        return this.refreshing = this.refreshNow().finally(() => { this.refreshing = undefined; release(); });
+     }
+     private async refreshNow(): Promise<void> {
+         if (!this.threadId || this.closed || !this.client.isInitialized()) return;
+         const revision = this.turnRevision;
+         const thread = await this.readThread();
+         this.titles.sync(this.threadId, thread.name);
++        if (thread.historyMode === 'paginated' && this.supportsRevert === undefined) {
++            this.supportsRevert = await this.client.supportsMethod('thread/revert');
++        }
++        const rewindToMessage = thread.historyMode === 'paginated' && this.supportsRevert === true;
++        if (this.session.getMetadata()?.capabilities?.conversationHistory?.rewindToMessage !== rewindToMessage) {
++            this.session.updateMetadata(metadata => ({ ...metadata, capabilities: { ...metadata.capabilities,
++                conversationHistory: { ...metadata.capabilities?.conversationHistory, rewindToMessage } } }));
++        }
+         const turns = Array.isArray(thread.turns) ? thread.turns.map(record) : [];
+         if (revision === this.turnRevision) {
+             this.currentTurn = string(turns.find(turn => turn.status === 'inProgress')?.id);
+@@ -320,6 +364,11 @@ export class SharedCodexRoot {
+         await this.projection.history(thread); await this.queue.reconcile(); this.alive();
+     }
+     private async refreshChildren(subscribe: boolean): Promise<void> {
++        if (this.rewindBarrier.blocked) return;
++        const release = this.rewindBarrier.enter();
++        try { await this.refreshChildrenNow(subscribe); } finally { release(); }
++    }
++    private async refreshChildrenNow(subscribe: boolean): Promise<void> {
+         let cursor: string | undefined;
+         do {
+             const page = record(await this.client.request('thread/list', { ancestorThreadId: this.threadId, cursor,
+@@ -348,13 +397,20 @@ export class SharedCodexRoot {
+         }
+     }
+     nativeQueueDeleted(nativeId: string): Promise<void> { return this.queue.deleted(nativeId); }
++    /** Native terminal operations participate in the same root barrier as Web RPCs. */
++    nativeAdmission(method: string): () => void {
++        return isNativeHistoryRead(method) ? () => {} : this.rewindBarrier.enter();
++    }
++    containsThread(threadId: string): Promise<boolean> { return this.ownsThread(threadId); }
+     replaySettings(): Array<{ method: string; params: unknown }> {
+         return this.settingsNotification ? [{ method: 'thread/settings/updated', params: {
+             threadId: this.threadId, threadSettings: this.settingsNotification
+         } }] : [];
+     }
+     private async reconnect(): Promise<void> {
+-        if (this.closed || this.stopping || this.reconnecting || !this.threadId) return;
++        if (this.closed || this.stopping || this.reconnecting || !this.threadId || this.rewindBarrier.blocked) return;
++        // The new connection replays authoritative pending native requests.
++        this.deferredRequests = [];
+         this.reconnecting = true; this.publishSteering(); this.publishPlan(); this.permissions.close();
+         try {
+             while (!this.closed && !this.stopping) {
+@@ -459,8 +515,12 @@ export class SharedCodexRoot {
+         const rpc = { registerHandler: (method: string, handler: (raw: unknown) => Promise<unknown>) => {
+             this.session.rpcHandlerManager.registerHandler(method, async (raw: unknown) => {
+                 if (this.stopping) throw new Error('Codex execution is stopping; resume when inactive');
+-                const pending = handler(raw); this.controls.add(pending);
+-                try { return await pending; } finally { this.controls.delete(pending); }
++                const transaction = method === RPC_METHODS.RewindConversation || method === RPC_METHODS.CompleteConversationRewind;
++                const release = transaction ? () => {} : this.rewindBarrier.enter();
++                try {
++                    const pending = handler(raw); this.controls.add(pending);
++                    try { return await pending; } finally { this.controls.delete(pending); }
++                } finally { release(); }
+             });
+         } };
+         rpc.registerHandler(RPC_METHODS.ListCodexModels, async raw => {
+@@ -517,9 +577,104 @@ export class SharedCodexRoot {
+             await child.initialSettings({ collaborationMode: this.settings.collaborationMode });
+             return { nativeSessionId: child.threadId, sessionId: child.session.sessionId };
+         });
+-        rpc.registerHandler(RPC_METHODS.RewindConversation, async () => {
+-            throw new Error('In-place rewind is not supported for concurrent Codex clients; fork at the message instead');
++        rpc.registerHandler(RPC_METHODS.RewindConversation, raw => this.rewind(
++            z.object({ messageLocalId: z.string().min(1) }).parse(raw).messageLocalId));
++        rpc.registerHandler(RPC_METHODS.CompleteConversationRewind, raw => this.completeRewind(
++            z.object({ rewindToken: z.string().min(1) }).parse(raw).rewindToken));
++    }
++    private async rewind(messageLocalId: string): Promise<RewindConversationRpcResult> {
++        const rejected = (error: unknown): RewindConversationRpcResult => ({ success: false, outcome: 'rejected',
++            error: error instanceof Error ? error.message : String(error) });
++        let token: string;
++        try { token = await this.rewindBarrier.begin(); } catch (error) { return rejected(error); }
++        let dispatched = false;
++        this.publishPlan();
++        try {
++            if (this.currentTurn || this.reconnecting || this.permissions.hasPending() || !this.client.isInitialized()
++                || this.session.getMetadata()?.conversationHistoryDiverged) throw new Error('Session is not ready for rewind');
++            await this.notifications;
++            await this.queue.flush();
++            if ((await this.queue.list()).length || this.queue.hasUncertainInput()) throw new Error('Session has queued or uncertain input');
++            const goal = record(record(await this.client.request('thread/goal/get', { threadId: this.threadId })).goal);
++            if (goal.status === 'active') throw new Error('Pause the native goal before rewinding');
++            const thread = await this.readThread();
++            if (thread.historyMode !== 'paginated' || this.supportsRevert !== true) throw new Error('Rewind requires native thread/revert and paginated history');
++            const turns = this.checkedRewindTurns(thread);
++            const turnId = this.projection.turnFor(messageLocalId);
++            const index = turns.findIndex(turn => turn.id === turnId);
++            const selected = turns[index];
++            const first = selected?.items.map(record).find(item => item.type === 'userMessage');
++            const firstId = first && (string(first.clientId ?? first.clientUserMessageId)
++                ?? (first.id ? `codex:${this.threadId}:user:${first.id}` : undefined));
++            if (index < 0 || firstId !== messageLocalId) throw new Error('Select the first user message of a complete native turn');
++            // Child histories have independent lifetimes and traces. Until a
++            // subtree reconciliation protocol exists, preserve them via Fork.
++            if (this.children.size) throw new Error('Rewind with child-agent history is unavailable; fork at the message instead');
++            if (await this.session.flush() === false) throw new Error('Hub transcript acknowledgement is unavailable');
++            if (this.deferredRequests.length) throw new Error('Native input arrived during rewind preflight');
++            this.retainedTurnIds = turns.slice(0, index).map(turn => turn.id);
++            dispatched = true;
++            await this.client.request('thread/revert', { threadId: this.threadId, beforeTurnId: turnId });
++            await this.notifications;
++            await this.verifyRewind();
++            return { success: true, truncateFromLocalId: messageLocalId, messages: [], rewindToken: token };
++        } catch (error) {
++            if (!dispatched) {
++                await this.rewindBarrier.cancel();
++                // Native activity admitted before the barrier can finish while
++                // preflight is checking it. Restore notifications suppressed
++                // during that check before exposing controls again.
++                this.acceptSettings(this.host.settingsFor(this.threadId) ?? {});
++                if (!this.client.isInitialized()) {
++                    // Transport loss while the barrier was closed deferred its
++                    // callback. Pre-dispatch rejection is safe to reconnect;
++                    // never take this path after native mutation was dispatched.
++                    void this.reconnect().catch(reconnectError => logger.debug('[Codex shared] rejected rewind reconnect', reconnectError));
++                } else {
++                    await this.replayDeferredRequests();
++                    await this.refresh().catch(refreshError => logger.debug('[Codex shared] rejected rewind refresh', refreshError));
++                }
++                this.publishPlan(); return rejected(error);
++            }
++            this.session.updateMetadata(metadata => ({ ...metadata, conversationHistoryDiverged: true }));
++            throw error; // The hub quarantines unknown outcomes; the durable barrier stays closed.
++        }
++    }
++    private checkedRewindTurns(thread: Record<string, unknown>): Array<{ id: string; items: unknown[] }> {
++        if (!Array.isArray(thread.turns)) throw new Error('Incomplete native history');
++        const ids = new Set<string>();
++        return thread.turns.map(value => {
++            const turn = record(value); const id = string(turn.id);
++            if (!id || ids.has(id) || !Array.isArray(turn.items) || !['completed', 'interrupted', 'failed'].includes(String(turn.status))) {
++                throw new Error('Native history is incomplete or busy');
++            }
++            ids.add(id); return { id, items: turn.items };
++        });
++    }
++    private async verifyRewind(): Promise<Record<string, unknown>> {
++        const thread = await this.readThread();
++        const ids = this.checkedRewindTurns(thread).map(turn => turn.id);
++        if (!this.retainedTurnIds || JSON.stringify(ids) !== JSON.stringify(this.retainedTurnIds)
++            || (await this.queue.list()).length) throw new Error('Native rewind requires reconciliation');
++        return thread;
++    }
++    private async completeRewind(token: string): Promise<{ success: true }> {
++        await this.rewindBarrier.complete(token, async () => {
++            const thread = await this.verifyRewind();
++            await this.notifications;
++            const response = record(await this.client.request('thread/read', { threadId: this.threadId, includeTurns: false }));
++            this.acceptSettings(response);
++            this.projection = new SharedCodexProjection(this.session, this.threadId, id => this.queue.committed(id), undefined, false);
++            const last = Array.isArray(thread.turns) ? record(thread.turns.at(-1)) : {};
++            const lastId = string(last.id);
++            this.currentTurn = undefined;
++            this.latestTurn = lastId ? { id: lastId, status: string(last.status) ?? 'unknown', planId: planProposalForTurn(this.threadId, last) } : undefined;
++            this.interrupted = last.status === 'interrupted';
++            await this.projection.history(thread);
++            if (await this.session.flush() === false) throw new Error('Hub history reconciliation acknowledgement is unavailable');
+         });
++        this.deferredRequests = [];
++        this.publishPlan(); return { success: true };
+     }
+     private async assertBoundary(localId: string, turnId: string): Promise<Record<string, unknown>> {
+         const thread = await this.readThread();
+diff --git a/cli/src/codex/shared/runtime.integration.test.ts b/cli/src/codex/shared/runtime.integration.test.ts
+index c69df380d..5eb22edd2 100644
+--- a/cli/src/codex/shared/runtime.integration.test.ts
++++ b/cli/src/codex/shared/runtime.integration.test.ts
+@@ -1,7 +1,7 @@
+ import { afterEach, describe, expect, it, vi } from 'vitest';
+ import { createServer } from 'node:http';
+ import { EventEmitter } from 'node:events';
+-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
++import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
+ import { join } from 'node:path';
+ import { randomUUID } from 'node:crypto';
+ import type { AgentState, Metadata } from '@/api/types';
+@@ -80,7 +80,7 @@ describe.skipIf(process.env.HAPI_RUN_SHARED_CODEX_TESTS !== '1')('installed Code
+             expect(ready).not.toHaveBeenCalled(); expect(state.sessions.size).toBe(0);
+             expect(requests.mock.calls.some(([method]) => method === 'thread/resume')).toBe(false);
+         } finally { requests.mockRestore(); await rm(home, { recursive: true, force: true }); }
+-    }, 30_000);
++    }, 90_000);
+     it.each(['abort', 'failure'])('cleans up the native engine and partial roots on startup %s', async outcome => {
+         const home = await mkdtemp('/tmp/hapi-shared-startup-'); state.home = home;
+         const ch = join(home, 'codex'); await mkdir(ch);
+@@ -106,7 +106,7 @@ describe.skipIf(process.env.HAPI_RUN_SHARED_CODEX_TESTS !== '1')('installed Code
+                 expect(session.dead).toBe(true); expect(session.metadata.lifecycleState).not.toBe('archived');
+             }
+         } finally { release(); abort.abort(); await running.catch(() => {}); await rm(home, { recursive: true, force: true }); }
+-    }, 30_000);
++    }, 90_000);
+     it('reports the bootstrap start marker to the runner although the hub view of the metadata lacks it', async () => {
+         const home = await mkdtemp('/tmp/hapi-shared-marker-'); state.home = home;
+         const ch = join(home, 'codex'); const cwd = join(home, 'work'); await mkdir(ch); await mkdir(cwd);
+@@ -146,7 +146,7 @@ describe.skipIf(process.env.HAPI_RUN_SHARED_CODEX_TESTS !== '1')('installed Code
+         });
+         await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
+         const port = (http.address() as { port: number }).port;
+-        await writeFile(join(ch, 'config.toml'), `model = "mock-model"\nmodel_provider = "mock_provider"\napproval_policy = "never"\nsandbox_mode = "read-only"\ncheck_for_update_on_startup = false\n[model_providers.mock_provider]\nname = "Isolated mock"\nbase_url = "http://127.0.0.1:${port}/v1"\nwire_api = "responses"\nrequires_openai_auth = false\nsupports_websockets = false\nrequest_max_retries = 0\nstream_max_retries = 0\n[analytics]\nenabled = false\n[feedback]\nenabled = false\n[projects."${cwd}"]\ntrust_level = "trusted"\n`);
++        await writeFile(join(ch, 'config.toml'), `model = "mock-model"\nmodel_provider = "mock_provider"\napproval_policy = "never"\nsandbox_mode = "read-only"\ncheck_for_update_on_startup = false\n[model_providers.mock_provider]\nname = "Isolated mock"\nbase_url = "http://127.0.0.1:${port}/v1"\nwire_api = "responses"\nrequires_openai_auth = false\nsupports_websockets = false\nrequest_max_retries = 0\nstream_max_retries = 0\n[analytics]\nenabled = false\n[feedback]\nenabled = false\n[projects."${cwd.split(String.fromCharCode(92)).join('/')}"]\ntrust_level = "trusted"\n`);
+         vi.stubEnv('CODEX_HOME', ch); vi.stubEnv('HOME', home); vi.stubEnv('HAPI_SESSION_ID', 'parent-must-not-leak');
+         const { runSharedRuntime } = await import('./runtime');
+         let ready!: (value: import('./runtime').RuntimeReady) => void;
+@@ -189,6 +189,26 @@ describe.skipIf(process.env.HAPI_RUN_SHARED_CODEX_TESTS !== '1')('installed Code
+                 expect(usageModels).toContain('mock-model');
+                 expect(usageModels).toContain('second-mock');
+             }, { timeout: 15_000 });
++            // Real app-server and native gateway: Web rewind must fence both
++            // terminals until the hub's transcript transaction acknowledges it.
++            await vi.waitFor(async () => {
++                const snapshot = record(await second.request('thread/read', { threadId: initial, includeTurns: false }));
++                expect(record(snapshot.thread).status).not.toMatchObject({ type: 'active' });
++            }, { timeout: 15_000 });
++            const changedFile = join(cwd, 'kept-after-rewind.txt');
++            await writeFile(changedFile, 'Existing edits must survive\n');
++            const rewind = record(await web.rpc.get('rewind-conversation')!({ messageLocalId: 'native-1' }));
++            expect(rewind).toMatchObject({ success: true, rewindToken: expect.any(String) });
++            await expect(second.request('thread/queue/add', { threadId: initial, input: [{ type: 'text', text: 'RACING INPUT', text_elements: [] }],
++                clientUserMessageId: 'race' })).rejects.toThrow(/rewind/);
++            await expect(first.request('turn/start', { threadId: initial, input: [{ type: 'text', text: 'RACING TURN', text_elements: [] }] })).rejects.toThrow(/rewind/);
++            await web.rpc.get('complete-conversation-rewind')!({ rewindToken: rewind.rewindToken });
++            expect(await readFile(changedFile, 'utf8')).toBe('Existing edits must survive\n');
++            web.user?.({ content: { text: 'AFTER REWIND' } }, 'after-rewind');
++            await vi.waitFor(() => expect(web.consumed).toContain('after-rewind'), { timeout: 15_000 });
++            await vi.waitFor(() => expect(JSON.stringify(modelRequests.at(-1))).toContain('AFTER REWIND'), { timeout: 15_000 });
++            expect(JSON.stringify(modelRequests.at(-1))).toContain('HELLO FROM WEB');
++            expect(JSON.stringify(modelRequests.at(-1))).not.toContain('HELLO FROM TERMINAL');
+             await first.disconnect(); expect(web.dead).toBe(false);
+             await second.request('thread/archive', { threadId: initial }); roots = [];
+             await running;
+@@ -201,5 +221,5 @@ describe.skipIf(process.env.HAPI_RUN_SHARED_CODEX_TESTS !== '1')('installed Code
+             await new Promise<void>(resolve => http.close(() => resolve()));
+             await rm(home, { recursive: true, force: true, maxRetries: 3 });
+         }
+-    }, 60_000);
++    }, 120_000);
+ });
+diff --git a/cli/src/codex/shared/runtime.ts b/cli/src/codex/shared/runtime.ts
+index 5d59b2006..0a58cefc3 100644
+--- a/cli/src/codex/shared/runtime.ts
++++ b/cli/src/codex/shared/runtime.ts
+@@ -14,6 +14,7 @@ import { codexHome, saveRuntime, runtimeDirectory, runtimeAuthHash, findColdBind
+ import { startCodexGateway, record, string, type Envelope } from './gateway';
+ import { resolveSharedCodex, sharedLaunchConfig, initializeSharedClient, checkSharedCapabilities, takeReservedSessionId, type SharedLaunchOptions } from './launch';
+ import { SharedCodexRoot } from './root';
++import { isNativeHistoryRead } from './rewind';
+ 
+ export type RuntimeReady = { sessionId: string; runtime: CodexRuntimeRecord };
+ type Reservation = { root: SharedCodexRoot; resumeId?: string };
+@@ -241,6 +242,19 @@ export async function runSharedRuntime(options: SharedLaunchOptions, onReady?: (
+         }
+     });
+     const key = (connection: string, request: Envelope) => `${connection}:${typeof request.id}:${request.id}`;
++    const admit = async (request: Envelope): Promise<() => void> => {
++        const threadId = string(record(request.params).threadId);
++        if (!threadId || !request.method) return () => {};
++        if (request.id === undefined && !isNativeHistoryRead(request.method)) throw new Error('Native mutations require a request ID');
++        // No await between resolving an already-bound root and taking its
++        // lease: rewind admission must not slip between those two steps.
++        const direct = roots.get(threadId);
++        if (direct) return direct.nativeAdmission(request.method);
++        for (const root of roots.values()) {
++            if (await root.containsThread(threadId)) return root.nativeAdmission(request.method);
++        }
++        return () => {};
++    };
+     const before = (request: Envelope, connection: string): Promise<Envelope> => operation(async () => {
+         const params = record(request.params);
+         if (['thread/revert', 'thread/rollback'].includes(request.method ?? '')) {
+@@ -332,7 +346,7 @@ export async function runSharedRuntime(options: SharedLaunchOptions, onReady?: (
+         await checkSharedCapabilities(control);
+         assertRunning();
+         gateway = await startCodexGateway({ upstream, upstreamToken, path: process.platform === 'win32' ? undefined : join(sockets, 'clients.sock'), token,
+-            hooks: { before, after, disconnected: connection => {
++            hooks: { before, after, admit, disconnected: connection => {
+                 for (const [key, reservation] of reservations) {
+                     if (!key.startsWith(`${connection}:`)) continue;
+                     reservation.root.session.sendSessionEvent({ type: 'message', message: 'Native lifecycle outcome is unknown after transport loss. Do not retry blindly; inspect the shared runtime log.' });
+diff --git a/docs/guide/codex-shared-sessions.md b/docs/guide/codex-shared-sessions.md
+index 3344d6347..5f48af8d0 100644
+--- a/docs/guide/codex-shared-sessions.md
++++ b/docs/guide/codex-shared-sessions.md
+@@ -123,10 +123,18 @@ endpoints/tokens never go into HAPI session metadata or SSE.
+ - `--profile` / `-p`: rejected. Standalone app-server 0.154 cannot select the
+   native profile-v2 loader; flattening it into `-c` changes configuration
+   precedence. Use a dedicated `CODEX_HOME` or explicit `-c` overrides.
+-- Native in-place rewind/rollback and Web Rewind are unavailable for concurrent
+-  sessions: a native mutation plus hub transcript truncation needs a commit
+-  barrier across every sender. Use **Fork at message** instead. Cuts inside a
+-  steered turn are rejected; select its first user message.
++- Web Rewind is available for paginated histories when the installed Codex
++  supports `thread/revert`. Select the first user message of a completed turn;
++  the selected turn and everything after it are removed from the conversation.
++  Files, Git commits, the index and the working tree remain unchanged.
++  Rewind requires an idle session, no active goal, no queued or uncertain input, and no
++  child-agent history. Legacy histories and cuts inside a steered turn remain
++  unsupported; use **Fork at message** instead.
++  All terminal and Web writes are blocked until native history is verified and
++  the Hub durably truncates its transcript. An uncertain mutation or interrupted
++  commit stays blocked across process restarts and requires reconciliation;
++  HAPI does not automatically retry it. Native terminal rewind/rollback stays
++  disabled: initiate the coordinated operation from Web.
+ - `--worktree` and unsupported launch flags fail explicitly; create/select the
+   working directory before launch. `--oss` requires an explicit
+   `--local-provider`. Bare resume pickers use `hapi resume` or the attached TUI.
+@@ -160,3 +168,15 @@ not a fake Codex executable. Coverage includes keyboard/Web answers, sibling
+ question isolation, native queue editing/deletion, fork, primary-terminal exit,
+ secondary attachment/detachment, Web→Runner resume with the same HAPI/native
+ identity, and safe pending-message recovery.
++
++The opt-in `web/e2e/codex-rewind-session.spec.ts` additionally exercises Web
++Rewind at desktop and mobile widths against a real Hub, Runner and Codex.
++Use a separate `HAPI_HOME`, `CODEX_HOME`, test database and project directory.
++Run `scripts/dev/codex-rewind-model-fixture.ts` with an explicit
++`HAPI_REWIND_MODEL_PORT`, then configure that isolated Codex home's Responses
++provider to use `http://127.0.0.1:<port>/v1` without authentication or WebSockets.
++Set `HAPI_REWIND_PROJECT_ROOT` to the disposable project directory, `HAPI_URL`
++to the test Hub and `HAPI_ACCESS_TOKEN` to its token before running the Live
++Playwright suite with `HAPI_LIVE=1`. The fixture makes Codex execute a shell
++tool that modifies and creates files. Assertions verify transcript truncation,
++the subsequent model request, file bytes, Git HEAD, index and working tree.
+diff --git a/hub/src/sync/conversationHistoryCodex.test.ts b/hub/src/sync/conversationHistoryCodex.test.ts
+new file mode 100644
+index 000000000..a688bdaec
+--- /dev/null
++++ b/hub/src/sync/conversationHistoryCodex.test.ts
+@@ -0,0 +1,52 @@
++import { describe, expect, it } from 'bun:test'
++import { Store } from '../store'
++import { RpcRegistry } from '../socket/rpcRegistry'
++import { SyncEngine } from './syncEngine'
++
++function fixture() {
++    const store = new Store(':memory:')
++    const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
++    const session = engine.getOrCreateSession('shared-codex', {
++        path: '/tmp/project', host: 'test', flavor: 'codex',
++        capabilities: { concurrentClients: true, conversationHistory: { rewindToMessage: true } },
++    }, null, 'default')
++    engine.handleSessionAlive({ sid: session.id, time: Date.now(), mode: 'remote' })
++    for (const localId of ['one', 'two', 'three']) {
++        store.messages.addMessage(session.id, { role: 'user', content: localId }, localId)
++        store.messages.markMessagesInvoked(session.id, [localId], Date.now())
++    }
++    const gateway = (engine as unknown as { rpcGateway: {
++        rewindConversation: () => Promise<unknown>
++        completeConversationRewind: (sessionId: string, token: string) => Promise<void>
++    } }).rpcGateway
++    return { store, engine, session, gateway }
++}
++describe('shared Codex rewind commit', () => {
++    it('acknowledges the CLI only after durable transcript truncation and keeps sends locked', async () => {
++        const { store, engine, session, gateway } = fixture()
++        try {
++            let completed = false
++            gateway.rewindConversation = async () => ({ success: true, truncateFromLocalId: 'two', rewindToken: 'transaction' })
++            gateway.completeConversationRewind = async (id, token) => {
++                expect(id).toBe(session.id); expect(token).toBe('transaction')
++                expect(store.messages.getLocalMessageStates(id, ['one', 'two', 'three'])).toHaveLength(1)
++                await expect(engine.sendMessage(id, { text: 'racing message', localId: 'race' })).rejects.toThrow('in progress')
++                completed = true
++            }
++            expect(await engine.rewindConversation(session.id, 'default', 'two')).toEqual({ type: 'success' })
++            expect(completed).toBe(true)
++        } finally { engine.stop() }
++    })
++    it.each(['truncate', 'complete'])('quarantines a %s failure without reporting success', async failure => {
++        const { store, engine, session, gateway } = fixture()
++        try {
++            let completed = false
++            gateway.rewindConversation = async () => ({ success: true, truncateFromLocalId: 'two', rewindToken: 'transaction' })
++            if (failure === 'truncate') store.messages.truncateMessagesFromLocalId = () => { throw new Error('disk failure') }
++            gateway.completeConversationRewind = async () => { completed = true; throw new Error('ack failure') }
++            expect(await engine.rewindConversation(session.id, 'default', 'two')).toMatchObject({ type: 'error', hydrateFailed: true })
++            expect(completed).toBe(failure === 'complete')
++            expect(engine.getSession(session.id)?.metadata?.conversationHistoryDiverged).toBe(true)
++        } finally { engine.stop() }
++    })
++})
+diff --git a/hub/src/sync/rpcGateway.ts b/hub/src/sync/rpcGateway.ts
+index bfc8902d2..ad702f45d 100644
+--- a/hub/src/sync/rpcGateway.ts
++++ b/hub/src/sync/rpcGateway.ts
+@@ -599,6 +599,10 @@ export class RpcGateway {
+         ) as import('@hapi/protocol/apiTypes').RewindConversationRpcResult
+     }
+ 
++    async completeConversationRewind(sessionId: string, rewindToken: string): Promise<void> {
++        await this.sessionRpc(sessionId, RPC_METHODS.CompleteConversationRewind, { rewindToken }, 120_000)
++    }
++
+     async listOpencodeReasoningEffortOptionsForSession(sessionId: string): Promise<RpcListOpencodeReasoningEffortOptionsResponse> {
+         return await this.sessionRpc(sessionId, RPC_METHODS.ListOpencodeReasoningEffortOptions, {}) as RpcListOpencodeReasoningEffortOptionsResponse
+     }
+diff --git a/hub/src/sync/syncEngine.ts b/hub/src/sync/syncEngine.ts
+index 5b59f28b9..e277af5f4 100644
+--- a/hub/src/sync/syncEngine.ts
++++ b/hub/src/sync/syncEngine.ts
+@@ -1846,6 +1846,9 @@ export class SyncEngine {
+                 truncateFromLocalId: rpcResult.truncateFromLocalId ?? messageLocalId
+             })
+             this.sessionCache.refreshSession(sessionId)
++            if (rpcResult.rewindToken) {
++                await this.rpcGateway.completeConversationRewind(sessionId, rpcResult.rewindToken)
++            }
+             return { type: 'success' }
+         } catch (error) {
+             // Native history already changed; refuse further history actions until repaired.
+diff --git a/scripts/dev/codex-rewind-model-fixture.ts b/scripts/dev/codex-rewind-model-fixture.ts
+new file mode 100644
+index 000000000..da36cc7fe
+--- /dev/null
++++ b/scripts/dev/codex-rewind-model-fixture.ts
+@@ -0,0 +1,46 @@
++/** Local Responses fixture for the opt-in shared Codex Rewind browser test.
++ * Run with an explicit HAPI_REWIND_MODEL_PORT and point an isolated Codex
++ * provider at http://127.0.0.1:<port>/v1. No model credentials are needed. */
++import { appendFile } from 'node:fs/promises';
++
++const port = Number(process.env.HAPI_REWIND_MODEL_PORT);
++if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('Set HAPI_REWIND_MODEL_PORT to an isolated test port');
++const log = process.env.HAPI_REWIND_MODEL_LOG;
++let count = 0;
++const server = Bun.serve({ hostname: '127.0.0.1', port, async fetch(request) {
++    const url = new URL(request.url);
++    if (url.pathname === '/shutdown') {
++        setTimeout(() => { server.stop(true); process.exit(0); }, 50);
++        return new Response('stopping');
++    }
++    if (url.pathname === '/health') return Response.json({ ready: true, count });
++    if (!url.pathname.endsWith('/responses')) return new Response('missing', { status: 404 });
++    const body = await request.json() as { input?: Array<Record<string, unknown>>; tools?: Array<{ name?: string }> };
++    if (log) await appendFile(log, JSON.stringify(body) + '\n');
++    count++;
++    const input = body.input ?? [];
++    const lastUser = JSON.stringify(input.filter(item => item.role === 'user').at(-1) ?? '');
++    const id = `fixture-${count}`;
++    let output: unknown;
++    if (lastUser.includes('MAKE_FILE_SENTINEL_8F4C') && !input.some(item =>
++        item.type === 'function_call_output' && String(item.call_id).startsWith('write-fixture'))) {
++        const tool = body.tools?.find(tool => /^(exec_command|shell_command|shell)$/.test(tool.name ?? ''));
++        if (!tool) return new Response('No native shell tool in the model request', { status: 400 });
++        const command = process.platform === 'win32'
++            ? "Set-Content -LiteralPath 'generated.txt' -Value 'GENERATED_8F4C'; Add-Content -LiteralPath 'existing.txt' -Value 'MODIFIED_8F4C'"
++            : "printf '%s\\n' 'GENERATED_8F4C' > generated.txt; printf '%s\\n' 'MODIFIED_8F4C' >> existing.txt";
++        output = { type: 'function_call', id: `fc_${count}`, call_id: `write-fixture-${count}`, name: tool.name,
++            arguments: JSON.stringify(tool.name === 'exec_command' ? { cmd: command, yield_time_ms: 1000, max_output_tokens: 500 } : { command }) };
++    } else {
++        const text = lastUser.includes('PROBE_CONTEXT')
++            ? (JSON.stringify(input).includes('MAKE_FILE_SENTINEL_8F4C') ? 'CONTEXT_STILL_HAS_SENTINEL' : 'CONTEXT_CLEAN')
++            : lastUser.includes('MAKE_FILE_SENTINEL_8F4C') ? 'FILES_CREATED' : 'FIXTURE_READY';
++        output = { type: 'message', role: 'assistant', id: `msg_${count}`, content: [{ type: 'output_text', text }] };
++    }
++    const events = [{ type: 'response.created', response: { id } },
++        { type: 'response.output_item.done', item: output },
++        { type: 'response.completed', response: { id, usage: { input_tokens: 12, output_tokens: 4, total_tokens: 16 } } }];
++    return new Response(events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(''),
++        { headers: { 'Content-Type': 'text/event-stream' } });
++} });
++console.log(`Isolated Codex Rewind model fixture listening on ${server.url}`);
+diff --git a/shared/src/apiTypes.ts b/shared/src/apiTypes.ts
+index c6728b500..8755e8651 100644
+--- a/shared/src/apiTypes.ts
++++ b/shared/src/apiTypes.ts
+@@ -607,6 +607,8 @@ export type RewindConversationErrorCode =
+ 
+ export type RewindConversationRpcResult = {
+     success: true
++    /** Shared Codex keeps every sender blocked until the hub commits and acknowledges truncation. */
++    rewindToken?: string
+     /** Truncate HAPI transcript at/after this localId, then accept rehydrated history. */
+     truncateFromLocalId: string
+     messages?: Array<{
+diff --git a/shared/src/rpcMethods.ts b/shared/src/rpcMethods.ts
+index 9bdb63bd5..6ae8e0ebc 100644
+--- a/shared/src/rpcMethods.ts
++++ b/shared/src/rpcMethods.ts
+@@ -51,6 +51,7 @@ export const RPC_METHODS = {
+     SteerQueuedMessage: 'steer-queued-message',
+     ForkConversation: 'fork-conversation',
+     RewindConversation: 'rewind-conversation',
++    CompleteConversationRewind: 'complete-conversation-rewind',
+     ClearConversation: 'clear-conversation',
+     ImplementCodexPlan: 'implement-codex-plan',
+ } as const
+diff --git a/web/e2e/codex-rewind-session.spec.ts b/web/e2e/codex-rewind-session.spec.ts
+new file mode 100644
+index 000000000..4cb0ab699
+--- /dev/null
++++ b/web/e2e/codex-rewind-session.spec.ts
+@@ -0,0 +1,103 @@
++import { expect, test } from '@playwright/test'
++import { mkdir, readFile, writeFile } from 'node:fs/promises'
++import { execFileSync } from 'node:child_process'
++import { join } from 'node:path'
++import { randomUUID } from 'node:crypto'
++import { getHapiBaseUrl, installHapiAuth, readCliAccessToken } from './helpers/hapi-live'
++
++// Opt-in: the task Runner must use an isolated Codex home with a local model
++// fixture that executes the MAKE_FILE prompt and inspects PROBE_CONTEXT input.
++const projectRoot = process.env.HAPI_REWIND_PROJECT_ROOT
++test.describe('shared Codex rewind (live)', () => {
++    test.skip(process.env.HAPI_LIVE !== '1' || !projectRoot, 'Requires isolated Full environment and local model fixture')
++    for (const viewport of [{ width: 1440, height: 1000 }, { width: 412, height: 915 }]) {
++        test(`rewinds context while preserving actual generated files and Git (${viewport.width}px)`, async ({ page, request }) => {
++            test.setTimeout(180_000)
++            const base = getHapiBaseUrl()
++            const token = readCliAccessToken()
++            const auth = await request.post(`${base}/api/auth`, { data: { accessToken: token } })
++            expect(auth.ok()).toBe(true)
++            const headers = { Authorization: `Bearer ${(await auth.json()).token}` }
++            let machine: { id: string } | undefined
++            await expect.poll(async () => {
++                const machines = await (await request.get(`${base}/api/machines`, { headers })).json()
++                machine = machines.machines.find((m: { active: boolean }) => m.active)
++                return Boolean(machine)
++            }, { timeout: 60_000 }).toBe(true)
++            const cwd = join(projectRoot!, `rewind-${viewport.width}-${randomUUID()}`)
++            await mkdir(cwd, { recursive: true })
++            await writeFile(join(cwd, 'existing.txt'), 'ORIGINAL\n')
++            const git = (...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', windowsHide: true })
++            git('init', '--quiet'); git('add', 'existing.txt')
++            git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'fixture', '--quiet')
++            const spawn = await request.post(`${base}/api/machines/${machine!.id}/spawn`, { headers,
++                data: { directory: cwd, agent: 'codex', model: 'mock-model', permissionMode: 'yolo' }, timeout: 90_000 })
++            const spawned = await spawn.json()
++            let sessionId: string = spawned.sessionId
++            if (spawned.type === 'error' && /timed out|webhook timeout/i.test(spawned.message ?? '')) {
++                // Existing slow-start behavior can lose the machine-RPC reply.
++                // Never spawn twice: locate only this fixture's unique cwd.
++                test.info().annotations.push({ type: 'setup limitation', description: spawned.message })
++                await expect.poll(async () => {
++                    const sessions = await (await request.get(`${base}/api/sessions`, { headers })).json()
++                    const exact = sessions.sessions.filter((s: { active: boolean; metadata?: { path?: string } }) =>
++                        s.active && s.metadata?.path?.replaceAll('\\', '/') === cwd.replaceAll('\\', '/'))
++                    expect(exact.length).toBeLessThanOrEqual(1)
++                    sessionId = exact[0]?.id
++                    return Boolean(sessionId)
++                }, { timeout: 90_000 }).toBe(true)
++            } else expect(spawned, JSON.stringify(spawned)).toMatchObject({ type: 'success', sessionId: expect.any(String) })
++            const send = async (text: string, localId: string) => {
++                expect((await request.post(`${base}/api/sessions/${sessionId}/messages`, { headers, data: { text, localId } })).ok()).toBe(true)
++            }
++            const history = async () => (await (await request.get(`${base}/api/sessions/${sessionId}/messages?limit=200`, { headers })).json()).messages
++            try {
++                await send('KEEP_PREFIX', 'keep-prefix')
++                await expect.poll(async () => JSON.stringify(await history())).toContain('FIXTURE_READY')
++                await send('MAKE_FILE_SENTINEL_8F4C', 'file-target')
++                await expect.poll(async () => JSON.stringify(await history()), { timeout: 30_000 }).toContain('FILES_CREATED')
++                expect(await readFile(join(cwd, 'existing.txt'), 'utf8')).toContain('MODIFIED_8F4C')
++                expect(await readFile(join(cwd, 'generated.txt'), 'utf8')).toContain('GENERATED_8F4C')
++                git('add', 'existing.txt')
++                const snapshot = async () => ({ existing: await readFile(join(cwd, 'existing.txt'), 'hex'),
++                    generated: await readFile(join(cwd, 'generated.txt'), 'hex'), head: git('rev-parse', 'HEAD'),
++                    status: git('status', '--porcelain'), index: git('ls-files', '--stage') })
++                const before = await snapshot()
++                await page.setViewportSize(viewport)
++                await installHapiAuth(page, base, token)
++                await page.addInitScript(() => {
++                    for (const feature of ['rich-composer-mentions', 'scratchlist-toggle']) localStorage.setItem(`hapi.fue.v1.${feature}`, '1')
++                })
++                page.setDefaultTimeout(15_000)
++                await page.goto(`${base}/sessions/${sessionId}`, { waitUntil: 'domcontentloaded' })
++                const target = page.locator('[data-hapi-message-role="user"]').filter({ hasText: 'MAKE_FILE_SENTINEL_8F4C' })
++                await expect(target).toBeVisible()
++                await target.hover()
++                const rewind = target.getByRole('button', { name: /^(Rewind|回退)$/ })
++                await rewind.click()
++                const dialog = page.getByRole('dialog')
++                await expect(dialog).toContainText(/Files will not be changed|文件不会被修改/)
++                await dialog.getByRole('button', { name: /^(Cancel|取消)$/ }).click()
++                expect(JSON.stringify(await history())).toContain('MAKE_FILE_SENTINEL_8F4C')
++                await target.hover()
++                await rewind.click()
++                const response = page.waitForResponse(r => r.url().endsWith(`/sessions/${sessionId}/rewind`) && r.request().method() === 'POST')
++                await dialog.getByRole('button', { name: /^(Rewind|回退)$/ }).click()
++                expect((await response).ok()).toBe(true)
++                await expect(target).toHaveCount(0)
++                expect(await snapshot()).toEqual(before)
++                expect(JSON.stringify(await history())).not.toContain('MAKE_FILE_SENTINEL_8F4C')
++                await page.reload()
++                await expect(page.getByText('KEEP_PREFIX', { exact: true })).toBeVisible()
++                await expect(page.getByText('MAKE_FILE_SENTINEL_8F4C', { exact: true })).toHaveCount(0)
++                await send('PROBE_CONTEXT', 'probe-context')
++                await expect.poll(async () => JSON.stringify(await history()), { timeout: 30_000 }).toContain('CONTEXT_CLEAN')
++                expect(JSON.stringify(await history())).not.toContain('CONTEXT_STILL_HAS_SENTINEL')
++                expect(await snapshot()).toEqual(before)
++            } finally {
++                test.setTimeout(test.info().timeout + 90_000)
++                await request.post(`${base}/api/sessions/${sessionId}/archive`, { headers, timeout: 90_000 })
++            }
++        })
++    }
++})
+diff --git a/web/playwright.live.config.ts b/web/playwright.live.config.ts
+index b0f17a5f9..6446d75a2 100644
+--- a/web/playwright.live.config.ts
++++ b/web/playwright.live.config.ts
+@@ -5,7 +5,7 @@ const chromePath = process.env.PLAYWRIGHT_CHROME_PATH
+ /** Live hub session tests — no Vite; hits HAPI_URL with HAPI_LIVE=1. */
+ export default defineConfig({
+     testDir: './e2e',
+-    testMatch: ['mermaid-lightbox-session.spec.ts', 'latex-bracket-math-session.spec.ts'],
++    testMatch: ['mermaid-lightbox-session.spec.ts', 'latex-bracket-math-session.spec.ts', 'codex-rewind-session.spec.ts'],
+     timeout: 120_000,
+     expect: { timeout: 20_000 },
+     fullyParallel: false,
