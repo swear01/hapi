@@ -66,6 +66,7 @@ export const RPC_METHODS = {
     ForkConversation: 'fork-conversation',
     ForkArchivedCodex: 'fork-archived-codex',
     RewindConversation: 'rewind-conversation',
+    CompleteConversationRewind: 'complete-conversation-rewind',
     ClearConversation: 'clear-conversation',
     ImplementCodexPlan: 'implement-codex-plan',
 } as const
