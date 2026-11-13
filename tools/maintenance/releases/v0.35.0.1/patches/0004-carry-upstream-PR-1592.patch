@@ -1,0 +1,224 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Fri, 13 Nov 2026 03:50:14 +0800
+Subject: [PATCH 04/28] carry(upstream): PR #1592
+
+---
+ .../assistant-ui/reasoning.test.tsx           | 36 +++++++++++++------
+ web/src/components/assistant-ui/reasoning.tsx |  7 ++--
+ .../hooks/useReasoningCollapse.cold.test.ts   | 26 ++++++++++++++
+ web/src/hooks/useReasoningCollapse.ts         |  2 +-
+ web/src/lib/locales/en.ts                     |  2 ++
+ web/src/lib/locales/zh-CN.ts                  |  2 ++
+ web/src/routes/settings/index.test.tsx        | 13 +++++++
+ 7 files changed, 72 insertions(+), 16 deletions(-)
+ create mode 100644 web/src/hooks/useReasoningCollapse.cold.test.ts
+
+diff --git a/web/src/components/assistant-ui/reasoning.test.tsx b/web/src/components/assistant-ui/reasoning.test.tsx
+index 34fcf8b56..c23f1cef5 100644
+--- a/web/src/components/assistant-ui/reasoning.test.tsx
++++ b/web/src/components/assistant-ui/reasoning.test.tsx
+@@ -91,12 +91,19 @@ describe('ReasoningGroup', () => {
+         vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {})
+     })
+ 
+-    it('is collapsed by default', () => {
++    it('expands historical reasoning when the preference is disabled', () => {
++        const { container } = renderGroup()
++        expect(isCollapsed(container)).toBe(false)
++    })
++
++    it('collapses historical reasoning when the preference is enabled', () => {
++        window.localStorage.setItem(STORAGE_KEY, 'true')
+         const { container } = renderGroup()
+         expect(isCollapsed(container)).toBe(true)
+     })
+ 
+-    it('expands on click', () => {
++    it('can be expanded manually while the preference is enabled', () => {
++        window.localStorage.setItem(STORAGE_KEY, 'true')
+         const { container } = renderGroup()
+         const scroll = container.querySelector('.aui-reasoning-scroll') as HTMLDivElement
+         expect(scroll.tabIndex).toBe(-1)
+@@ -128,14 +135,8 @@ describe('ReasoningGroup', () => {
+         expect(isCollapsed(container)).toBe(true)
+     })
+ 
+-    it('collapses an auto-expanded streaming block when the preference is enabled from another tab', () => {
+-        const { container, rerender } = renderGroup()
+-        setStreaming()
+-        rerender(
+-            <ReasoningGroup>
+-                <div data-testid="reasoning-content">thinking text</div>
+-            </ReasoningGroup>
+-        )
++    it('collapses mounted historical reasoning when the preference is enabled from another tab', () => {
++        const { container } = renderGroup()
+         expect(isCollapsed(container)).toBe(false)
+ 
+         const scroll = container.querySelector('.aui-reasoning-scroll') as HTMLDivElement
+@@ -156,6 +157,19 @@ describe('ReasoningGroup', () => {
+         expect(onNestedScrollFollowChange).toHaveBeenLastCalledWith(true)
+     })
+ 
++    it('expands mounted historical reasoning when the preference is disabled from another tab', () => {
++        window.localStorage.setItem(STORAGE_KEY, 'true')
++        const { container } = renderGroup()
++        expect(isCollapsed(container)).toBe(true)
++
++        act(() => {
++            window.localStorage.removeItem(STORAGE_KEY)
++            window.dispatchEvent(new StorageEvent('storage', { key: STORAGE_KEY }))
++        })
++
++        expect(isCollapsed(container)).toBe(false)
++    })
++
+     it('opens a streaming reasoning panel at the latest content and follows new output at the bottom', () => {
+         window.localStorage.setItem(STORAGE_KEY, 'true')
+         setStreaming()
+@@ -290,7 +304,7 @@ describe('ReasoningGroup', () => {
+         const { container } = renderGroup()
+ 
+         expect(container.querySelector('.animate-pulse')).toBeNull()
+-        expect(isCollapsed(container)).toBe(true)
++        expect(isCollapsed(container)).toBe(false)
+     })
+ 
+     it('uses the reasoning part status for the running indicator', () => {
+diff --git a/web/src/components/assistant-ui/reasoning.tsx b/web/src/components/assistant-ui/reasoning.tsx
+index 97236d885..bd969cf96 100644
+--- a/web/src/components/assistant-ui/reasoning.tsx
++++ b/web/src/components/assistant-ui/reasoning.tsx
+@@ -93,7 +93,8 @@ export const ReasoningGroup: FC<HappyReasoningGroupProps> = ({
+     startIndex = 0,
+     endIndex,
+ }) => {
+-    const [isOpen, setIsOpen] = useState(false)
++    const { reasoningCollapsed } = useReasoningCollapse()
++    const [isOpen, setIsOpen] = useState(() => !reasoningCollapsed)
+     const scrollRef = useRef<HTMLDivElement | null>(null)
+     const followLatestRef = useRef(true)
+     const pointerActiveRef = useRef(false)
+@@ -104,17 +105,15 @@ export const ReasoningGroup: FC<HappyReasoningGroupProps> = ({
+         const parts = state.message.parts.slice(startIndex, endIndex === undefined ? undefined : endIndex + 1)
+         return parts.some((part) => part.type === 'reasoning' && part.status.type === 'running')
+     })
+-    const { reasoningCollapsed } = useReasoningCollapse()
+     const chatContext = useOptionalHappyChatContext()
+ 
+     useEffect(() => {
+-        if (!isStreaming) return
+         const nextOpen = !reasoningCollapsed
+         if (nextOpen) {
+             followLatestRef.current = true
+         }
+         setIsOpen(nextOpen)
+-    }, [isStreaming, reasoningCollapsed])
++    }, [reasoningCollapsed])
+ 
+     useEffect(() => {
+         if (isOpen || followLatestRef.current) return
+diff --git a/web/src/hooks/useReasoningCollapse.cold.test.ts b/web/src/hooks/useReasoningCollapse.cold.test.ts
+new file mode 100644
+index 000000000..955069d4e
+--- /dev/null
++++ b/web/src/hooks/useReasoningCollapse.cold.test.ts
+@@ -0,0 +1,26 @@
++import { cleanup, renderHook } from '@testing-library/react'
++import { afterEach, describe, expect, it } from 'vitest'
++
++const STORAGE_KEY = 'hapi-reasoning-collapsed'
++
++describe('useReasoningCollapse cold load', () => {
++    afterEach(() => {
++        cleanup()
++        window.localStorage.clear()
++    })
++
++    it('hydrates the stored preference before the first render', async () => {
++        window.localStorage.setItem(STORAGE_KEY, 'true')
++        const { useReasoningCollapse } = await import('./useReasoningCollapse')
++        const renderedSnapshots: boolean[] = []
++
++        const { result } = renderHook(() => {
++            const { reasoningCollapsed } = useReasoningCollapse()
++            renderedSnapshots.push(reasoningCollapsed)
++            return reasoningCollapsed
++        })
++
++        expect(renderedSnapshots[0]).toBe(true)
++        expect(result.current).toBe(true)
++    })
++})
+diff --git a/web/src/hooks/useReasoningCollapse.ts b/web/src/hooks/useReasoningCollapse.ts
+index 994fe709f..ebe0a6801 100644
+--- a/web/src/hooks/useReasoningCollapse.ts
++++ b/web/src/hooks/useReasoningCollapse.ts
+@@ -50,7 +50,7 @@ export function getInitialReasoningCollapsed(): boolean {
+ // subscription lives here at module scope: one listener total, and every hook
+ // instance reads the same shared snapshot.
+ 
+-let currentCollapsed = DEFAULT_REASONING_COLLAPSED
++let currentCollapsed = getInitialReasoningCollapsed()
+ // True while a persistence failure left the in-memory value diverging from
+ // storage. New subscriptions must not resync over it until a real cross-tab
+ // storage event arrives.
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index 7db484572..5e1b42424 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -1056,10 +1056,12 @@ export default {
+   'settings.chat.toolCardDisplay.preview.detailed': 'Show each tool separately; terminal cards include an output preview',
+   'settings.chat.codexExplorationCollapsed': 'Collapse explored tool groups',
+   'settings.chat.codexExplorationCollapsed.desc': 'Collapse Codex read and search activity; click to view details.',
++
+   'settings.chat.reasoningCollapsed': 'Collapse reasoning by default',
+   'settings.chat.reasoningCollapsed.desc': 'Keep AI reasoning messages collapsed, including while streaming.',
+   'settings.chat.conciseView': 'Concise view',
+   'settings.chat.conciseView.desc': 'Show only your messages and the final replies from the agent. Tool calls, reasoning, and progress updates are hidden; permission requests, questions, plans, and errors stay visible.',
++
+   'settings.chat.groupedToolBackground': 'Combined Tool Use Background',
+   'settings.chat.userMessageBackground': 'User Message Background',
+   'settings.chat.surfaceColor.default': 'Default color',
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index cdad87d16..2966fe4ad 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -1054,10 +1054,12 @@ export default {
+   'settings.chat.toolCardDisplay.preview.detailed': '各工具调用分开显示，终端卡片同时显示输出预览',
+   'settings.chat.codexExplorationCollapsed': '收起已探索工具组',
+   'settings.chat.codexExplorationCollapsed.desc': '收起Codex的读取和搜索活动，点击后查看详情。',
++
+   'settings.chat.reasoningCollapsed': '思考默认折叠',
+   'settings.chat.reasoningCollapsed.desc': 'AI 思考内容默认保持折叠，流式输出期间也不会自动展开。',
+   'settings.chat.conciseView': '简约模式',
+   'settings.chat.conciseView.desc': '只显示你发出的消息和 AI 的最终回复，隐藏工具调用、思考和过程说明；权限请求、提问、计划和错误仍会显示。',
++
+   'settings.chat.groupedToolBackground': '合并 Tool Use 背景',
+   'settings.chat.userMessageBackground': '用户消息背景',
+   'settings.chat.surfaceColor.default': '默认颜色',
+diff --git a/web/src/routes/settings/index.test.tsx b/web/src/routes/settings/index.test.tsx
+index 48272ff4d..9dc260b2f 100644
+--- a/web/src/routes/settings/index.test.tsx
++++ b/web/src/routes/settings/index.test.tsx
+@@ -452,6 +452,19 @@ describe('responsive settings pages', () => {
+         expect(setCodexExplorationCollapsed).toHaveBeenCalledWith(false)
+     })
+ 
++    it('renders the collapse-reasoning switch with its streaming behavior', () => {
++        renderPage(<SettingsChatPage />)
++        expect(screen.getByRole('checkbox', { name: 'Collapse reasoning by default' })).not.toBeChecked()
++        expect(screen.getByText('Keep AI reasoning messages collapsed, including while streaming.')).toBeInTheDocument()
++    })
++
++    it('renders the updated collapse-reasoning copy in Chinese', () => {
++        localStorage.setItem('hapi-lang', 'zh-CN')
++        renderPage(<SettingsChatPage />)
++        expect(screen.getByRole('checkbox', { name: '思考默认折叠' })).not.toBeChecked()
++        expect(screen.getByText('AI 思考内容默认保持折叠，流式输出期间也不会自动展开。')).toBeInTheDocument()
++    })
++
+     it('renders About metadata on its own route page', () => {
+         renderPage(<SettingsAboutPage />)
+         expect(screen.queryByText('Companion')).not.toBeInTheDocument()

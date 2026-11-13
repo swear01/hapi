@@ -1,0 +1,325 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Fri, 13 Nov 2026 04:12:37 +0800
+Subject: [PATCH 19/28] carry(upstream): PR #2423
+
+---
+ .../feature/chat/ChatViewModelInteractionTest.kt       |  4 ++--
+ .../src/test/kotlin/app/hapi/data/api/HapiApiTest.kt   |  2 +-
+ docs/api/client-contract/errors.md                     | 10 ++++++----
+ docs/api/client-contract/rest.md                       |  8 ++++----
+ hub/README.md                                          |  2 +-
+ hub/src/sync/archiveCleanupError.ts                    |  5 +++--
+ hub/src/sync/syncEngineArchiveSession.test.ts          |  3 ++-
+ hub/src/sync/titleSuggestion.ts                        |  4 ++--
+ hub/src/web/routes/machines.ts                         |  2 +-
+ hub/src/web/routes/sessions.test.ts                    |  2 ++
+ hub/src/web/routes/sessions.ts                         |  6 +++---
+ hub/src/web/routes/voice.ts                            | 10 +++++-----
+ .../HapiClientTests/Chat/ChatInteractorTests.swift     |  4 ++--
+ 13 files changed, 34 insertions(+), 28 deletions(-)
+
+diff --git a/android/app/src/test/kotlin/app/hapi/companion/feature/chat/ChatViewModelInteractionTest.kt b/android/app/src/test/kotlin/app/hapi/companion/feature/chat/ChatViewModelInteractionTest.kt
+index 3c819756a..0d909d971 100644
+--- a/android/app/src/test/kotlin/app/hapi/companion/feature/chat/ChatViewModelInteractionTest.kt
++++ b/android/app/src/test/kotlin/app/hapi/companion/feature/chat/ChatViewModelInteractionTest.kt
+@@ -581,7 +581,7 @@ class ChatViewModelInteractionTest {
+     }
+ 
+     @Test fun `plan errors survive withdrawal and do not automatically resubmit`() = runTest {
+-        for ((status, code) in listOf(409 to "stale_plan", 409 to "unavailable", 502 to "failed", 503 to "indeterminate")) {
++        for ((status, code) in listOf(409 to "stale_plan", 409 to "unavailable", 500 to "failed", 503 to "indeterminate")) {
+             val harness = InteractionHarness(this, planDetail())
+             harness.api.planFailures.add(ApiError.from(status, """{"ok":false,"code":"$code","error":"Not confirmed"}"""))
+             harness.sessionStore.detailToLoad = planDetail().copy(agentState = AgentState())
+@@ -599,7 +599,7 @@ class ChatViewModelInteractionTest {
+ 
+     @Test fun `confirmed failure allows an explicit retry and clears its error`() = runTest {
+         val harness = InteractionHarness(this, planDetail())
+-        harness.api.planFailures.add(ApiError.from(502, """{"code":"failed","error":"Try again"}"""))
++        harness.api.planFailures.add(ApiError.from(500, """{"code":"failed","error":"Try again"}"""))
+         harness.viewModel.implementCodexPlan("plan-1")
+         testScheduler.runCurrent()
+         assertTrue(harness.viewModel.codexPlanActions.value.forPlan("plan-1").canAct)
+diff --git a/android/core/data/src/test/kotlin/app/hapi/data/api/HapiApiTest.kt b/android/core/data/src/test/kotlin/app/hapi/data/api/HapiApiTest.kt
+index ac32a3276..02ce7eea2 100644
+--- a/android/core/data/src/test/kotlin/app/hapi/data/api/HapiApiTest.kt
++++ b/android/core/data/src/test/kotlin/app/hapi/data/api/HapiApiTest.kt
+@@ -128,7 +128,7 @@ class HapiApiTest {
+     }
+ 
+     @Test fun `uncertain plan implementation reports its error without automatic resubmission`() = runBlocking {
+-        for ((status, code) in listOf(409 to "stale_plan", 409 to "unavailable", 502 to "failed", 503 to "indeterminate")) {
++        for ((status, code) in listOf(409 to "stale_plan", 409 to "unavailable", 500 to "failed", 503 to "indeterminate")) {
+             server.enqueue(MockResponse().setResponseCode(status).setBody("""{"ok":false,"code":"$code","error":"Not confirmed"}"""))
+             val error = assertFailsWith<ApiError> { session.api.implementCodexPlan("session", "proposal") }
+             assertEquals(status, error.status)
+diff --git a/docs/api/client-contract/errors.md b/docs/api/client-contract/errors.md
+index 558cfb693..1e969a1ed 100644
+--- a/docs/api/client-contract/errors.md
++++ b/docs/api/client-contract/errors.md
+@@ -40,13 +40,13 @@ When no `code` is present, branch on status alone and treat the failure generica
+ | 409 | — | `sessions.ts` delete-while-active, archive of plain inactive row, fork/rewind refusals, remote-only config on terminal-controlled sessions (`controlledByUser`) | Surface message; refresh session state |
+ | 413 | — | `sessions.ts` upload (> 50 MB decoded), export too large (`{error, count, limit}`); `voice.ts` transcription (`Audio file too large`, 25 MB audio / ~26 MB body) | Reduce payload |
+ | 413 | `scratchlist_attachment_too_large` | `sessions.ts` scratchlist upload | Reduce attachment |
+-| 422 | — | `sessions.ts` reopen with incomplete metadata (`{error, missing[]}`); title-suggestion pass-through (`TitleSuggestionError`, statuses 422/429/502/503) | Not reopenable / feature unavailable |
++| 422 | — | `sessions.ts` reopen with incomplete metadata (`{error, missing[]}`); title-suggestion pass-through (`TitleSuggestionError`, statuses 422/429/500/503) | Not reopenable / feature unavailable |
+ | 429 | — | Title suggestion (provider rate limit) | Back off |
+-| 500 | — | Catch-all in most routes (`{error: message}`) | Log; generic failure UI |
+-| 502 | — | Title suggestion upstream failure; restart-runner unknown error | Retry later |
++| 500 | — | Catch-all in most routes (`{error: message}`); upstream failures: title suggestion, voice transcription/realtime token, restart-runner and cursor-chat-store unknown errors (with `code` when the source has one), Codex plan implement `failed` | Log; surface the body's `error` |
+ | 503 | — | `guards.ts` `requireSyncEngine` → `{error: 'Not connected'}` — hub subsystems not up (startup/shutdown window); also Telegram-disabled on `/api/auth` initData path | Retry with backoff |
+ | 503 | `no_machine_online` | resume/reopen/spawn-flow result mapping (`sessions.ts`) | The machine that owns the session is offline — tell the user to start the runner |
+ | 503 | `machine_offline` | `machines.ts` restart-runner | Same |
++| 503 | `archive-cleanup-unavailable`, `archive-cleanup-timeout` | `sessions.ts` archive (Runner cleanup unconfirmed) | Retry to verify the cleanup result; branch on `code`, not status |
+ | 503 | `rpc_target_missing` | `machines.ts` pi/codex model catalogs (`RPC_TARGET_MISSING_ERROR_CODE` in `shared/src/rpcMethods.ts` — RPC handler unregistered or socket disconnected) | CLI-side target gone — treat as offline |
+ 
+ ## RPC-wrapped endpoints
+@@ -66,11 +66,13 @@ One route qualifies that rule. `GET /api/machines/:id/agy-models` keeps serving
+ 
+ When that background re-check lands a different listing, the machine says so over the existing event stream rather than making clients ask: `machine-agy-models-updated` (see [SSE](./sse.md)) carries the `machineId` and nothing else. Refetch that machine's route on it — the answer comes from the machine's cache, so it costs no `agy` run and produces no further event. It is emitted whenever the re-check changes what this route would answer — a different listing, **or** a sign-in warning that appeared or cleared — and not when it changes neither, so a failed re-check that raises a warning does announce. The machine's very first listing is never announced: whoever triggered it is already awaiting it. Requests during that window are answered from the machine's cache and do not launch agy.
+ 
++The hub does not answer 502 or 504: Cloudflare Tunnel replaces those bodies with `text/plain` `error code: 502/504`, so a client seeing either one is looking at a proxy, not a hub error.
++
+ ## Retry guidance
+ 
+ | Class | Retry? |
+ |-------|--------|
+ | 400 / 403 / 404 / 409 / 413 / 422 | No (fix input, refresh state, or hide surface) |
+ | 401 (middleware) | Once, after silent re-auth ([Auth](./auth.md#silent-re-auth-401-handling)) |
+-| 429 / 502 / 503 | Reads: retry with backoff. Mutations: follow the endpoint's recovery contract; do not replay a write whose outcome is unknown |
++| 429 / 503 | Reads: retry with backoff. Mutations: follow the endpoint's recovery contract; do not replay a write whose outcome is unknown |
+ | 200 `{success: false}` | Inspect the error and endpoint contract; manual retry only when safe. This envelope can also represent a missing RPC target or timeout |
+diff --git a/docs/api/client-contract/rest.md b/docs/api/client-contract/rest.md
+index a0ac15bd6..4646d9b93 100644
+--- a/docs/api/client-contract/rest.md
++++ b/docs/api/client-contract/rest.md
+@@ -61,14 +61,14 @@ Source: `hub/src/web/routes/sessions.ts`; request schemas in `shared/src/apiType
+ | `POST /api/sessions/:id/resume` | `{permissionMode?}` (`ResumeSessionRequestSchema`) | `{type: 'success', sessionId}` |
+ | `POST /api/sessions/:id/reopen` | `{}` | `{ok: true, sessionId, resumed: boolean, cursorSessionProtocol?}` (`ReopenSessionResponseSchema`); `422 {error, missing[]}` if metadata is incomplete |
+ | `POST /api/sessions/:id/abort` | `{}` | `{ok: true}` (active sessions only) |
+-| `POST /api/sessions/:id/archive` | `{}` | `{ok: true}` or `{ok: true, alreadyArchived: true}`; 409 for a plain inactive session |
++| `POST /api/sessions/:id/archive` | `{}` | `{ok: true}` or `{ok: true, alreadyArchived: true}`; 409 for a plain inactive session; unconfirmed Runner cleanup returns 409 `archive-cleanup-unconfirmed` or 503 `archive-cleanup-unavailable` / `archive-cleanup-timeout` |
+ | `DELETE /api/sessions/:id` | — | `{ok: true}`; 409 while active (archive first) |
+ | `PATCH /api/sessions/:id` | `{name?, titleLocked?}` (at least one; name: 1–255 chars; lock: boolean) | `{ok: true}` (rename) |
+ | `PATCH /api/sessions/:id/summary` | `{text, titleLocked?}` (text: 1–255 chars; lock: boolean) | `{ok: true}` |
+ | `PUT /api/sessions/:id/pin` | `{mode: 'none'\|'project'\|'global'}` | `{ok: true}` |
+ | `POST /api/sessions/:id/switch` | `{}` | `{ok: true}` — hands terminal-controlled session over to remote control |
+ | `POST /api/sessions/:id/clear` | `{}` | `{sessionId}` — shared sessions only; resume inactive sessions through the Runner first, then create a new root; navigate only the initiating view |
+-| `POST /api/sessions/:id/title-suggestion` | — | `{title}`; errors pass through 422/429/502/503 |
++| `POST /api/sessions/:id/title-suggestion` | — | `{title}`; errors pass through 422/429/500/503 |
+ | `GET /api/sessions/:id/slash-commands` | — | `SlashCommandsResponse` `{success, commands?, error?}` |
+ | `GET /api/sessions/:id/skills` | — | `SkillsResponse`-shaped `{success, ...}` |
+ 
+@@ -143,7 +143,7 @@ tool-call id; `null` withdraws actions without removing content. The CLI
+ validates the latest completed Plan-mode turn, switches to Default, and queues
+ `Implement the plan.` with a stable submission id. Repeating an accepted
+ action does not enqueue it again. This is separate from tool permissions.
+-Errors include HTTP 409 (`stale_plan` / `unavailable`), 502 (`failed`) and 503
++Errors include HTTP 409 (`stale_plan` / `unavailable`), 500 (`failed`) and 503
+ (`indeterminate`); error bodies have `{ok: false, code, error}`. Do not
+ automatically resend after an unconfirmed result. "Continue planning" is a
+ local composer-focus action and does not submit a native approval or message.
+@@ -169,7 +169,7 @@ Source: `hub/src/web/routes/machines.ts`; schemas `SpawnSessionRequestSchema`, `
+ | `POST /api/machines/:id/spawn` | `{directory, agent?, model?, effort?, modelReasoningEffort?, yolo?, permissionMode?, sessionType?: 'simple'\|'worktree', worktreeName?, serviceTier?, collaborationMode?, copilotAgentMode?, startingMode?: 'remote'\|'pty'}` | `{type: 'success', sessionId}` \| `{type: 'error', message, code?, agent?}` (agy accepts only `remote`) |
+ | `POST /api/machines/:id/list-directory` | `{path, includeHidden?}` | `{success, entries?: (DirectoryEntry & {isGitRepo?})[], error?}` |
+ | `POST /api/machines/:id/paths/exists` | `{paths: string[]}` (≤ 1000) | `{exists: Record<string, boolean>, outsideWorkspaceRoots?: string[]}` |
+-| `POST /api/machines/:id/restart-runner` | `{}` | `{message}`; errors carry `code: 'machine_not_found' \| 'machine_offline'` |
++| `POST /api/machines/:id/restart-runner` | `{}` | `{message}`; errors carry `code`: 404 `machine_not_found`, 503 `machine_offline`, other Runner failures 500 |
+ 
+ Note the spawn response is discriminated on `type`, not HTTP status — a failed
+ spawn is still HTTP 200. Stable spawn failure codes are
+diff --git a/hub/README.md b/hub/README.md
+index 9e492dcd9..b451b6416 100644
+--- a/hub/README.md
++++ b/hub/README.md
+@@ -132,7 +132,7 @@ for request/response shapes and error semantics, and `src/web/routes/` for all e
+   early inactive/archived update. Concurrent requests join the same operation.
+   Cleanup confirmation has a 90-second budget; failure returns a structured
+   `archive-cleanup-unconfirmed` (409), `archive-cleanup-unavailable` (503), or
+-  `archive-cleanup-timeout` (504) error. A timeout does not cancel Runner cleanup
++  `archive-cleanup-timeout` (503) error. A timeout does not cancel Runner cleanup
+   or prove the process is still alive; retry to verify the final result.
+ - `PATCH /api/sessions/:id` - Rename session.
+ - `DELETE /api/sessions/:id` - Delete inactive session.
+diff --git a/hub/src/sync/archiveCleanupError.ts b/hub/src/sync/archiveCleanupError.ts
+index 4f9ac2d1b..bd9051f5b 100644
+--- a/hub/src/sync/archiveCleanupError.ts
++++ b/hub/src/sync/archiveCleanupError.ts
+@@ -1,6 +1,6 @@
+ /** Cleanup is unconfirmed; an inactive realtime update does not prove success. */
+ export class ArchiveCleanupError extends Error {
+-    readonly status: 409 | 503 | 504
++    readonly status: 409 | 503
+     readonly code: 'archive-cleanup-unconfirmed' | 'archive-cleanup-unavailable' | 'archive-cleanup-timeout'
+ 
+     constructor(reason: 'unconfirmed' | 'unavailable' | 'timeout', cause?: unknown) {
+@@ -10,7 +10,8 @@ export class ArchiveCleanupError extends Error {
+                 ? 'Runner did not confirm session cleanup. Reconnect the Runner and retry to verify its result.'
+                 : 'Session cleanup is not yet confirmed. Retry after the remaining processes have stopped.', { cause })
+         this.name = 'ArchiveCleanupError'
+-        this.status = reason === 'timeout' ? 504 : reason === 'unavailable' ? 503 : 409
++        // tiann/hapi#2422: not 504 — Cloudflare Tunnel replaces 502/504 bodies; `code` tells timeout apart.
++        this.status = reason === 'unconfirmed' ? 409 : 503
+         this.code = `archive-cleanup-${reason}`
+     }
+ }
+diff --git a/hub/src/sync/syncEngineArchiveSession.test.ts b/hub/src/sync/syncEngineArchiveSession.test.ts
+index db70db69a..99c4bae94 100644
+--- a/hub/src/sync/syncEngineArchiveSession.test.ts
++++ b/hub/src/sync/syncEngineArchiveSession.test.ts
+@@ -105,7 +105,8 @@ describe('SyncEngine.archiveSession runner reaping (#1910)', () => {
+         gateway.stopRunnerSession = async () => { throw new RunnerStopRpcError(true, new Error('operation has timed out')) }
+         const error = await engine.archiveSession(sessionId).catch(error => error)
+         expect(error).toBeInstanceOf(ArchiveCleanupError)
+-        expect(error.status).toBe(504)
++        expect(error.status).toBe(503)
++        expect(error.code).toBe('archive-cleanup-timeout')
+         expect(cache().getSession(sessionId)?.active).toBe(true)
+         gateway.stopRunnerSession = async () => 'already_gone'
+         await engine.archiveSession(sessionId)
+diff --git a/hub/src/sync/titleSuggestion.ts b/hub/src/sync/titleSuggestion.ts
+index f33297ba5..cf8a7ae17 100644
+--- a/hub/src/sync/titleSuggestion.ts
++++ b/hub/src/sync/titleSuggestion.ts
+@@ -26,7 +26,7 @@ export class TitleSuggestionError extends Error {
+     constructor(
+         readonly code: TitleSuggestionErrorCode,
+         message: string,
+-        readonly status: 422 | 429 | 502 | 503
++        readonly status: 422 | 429 | 500 | 503
+     ) {
+         super(message)
+         this.name = 'TitleSuggestionError'
+@@ -421,7 +421,7 @@ export class TitleSuggestionService {
+             throw new TitleSuggestionError(
+                 'provider',
+                 'The title suggestion provider failed',
+-                502
++                500
+             )
+         } finally {
+             this.inFlightSessionIds.delete(sessionId)
+diff --git a/hub/src/web/routes/machines.ts b/hub/src/web/routes/machines.ts
+index 24e7c6614..9c7f95514 100644
+--- a/hub/src/web/routes/machines.ts
++++ b/hub/src/web/routes/machines.ts
+@@ -657,7 +657,7 @@ export function createMachinesRoutes(
+         if (result.type === 'error') {
+             const status = result.code === 'machine_not_found' ? 404
+                 : result.code === 'machine_offline' ? 503
+-                    : 502
++                    : 500
+             return c.json({ error: result.message, code: result.code }, status)
+         }
+         return c.json({ message: result.message })
+diff --git a/hub/src/web/routes/sessions.test.ts b/hub/src/web/routes/sessions.test.ts
+index e8aa852d3..f9fe1abcf 100644
+--- a/hub/src/web/routes/sessions.test.ts
++++ b/hub/src/web/routes/sessions.test.ts
+@@ -228,6 +228,8 @@ describe('sessions routes', () => {
+         expect(calls).toEqual([['session-1', 'default', 'plan']])
+         result = { ok: false, code: 'stale_plan', error: 'Old plan' }
+         expect((await post()).status).toBe(409)
++        result = { ok: false, code: 'failed', error: 'Try again' }
++        expect((await post()).status).toBe(500)
+         result = { ok: false, code: 'indeterminate', error: 'Unknown result' }
+         expect((await post()).status).toBe(503)
+     })
+diff --git a/hub/src/web/routes/sessions.ts b/hub/src/web/routes/sessions.ts
+index ed0afe4b7..76b9e9e14 100644
+--- a/hub/src/web/routes/sessions.ts
++++ b/hub/src/web/routes/sessions.ts
+@@ -406,7 +406,7 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
+                 : result.code === 'access_denied' ? 403
+                     : result.code === 'resume_unavailable' ? 409
+                         : result.code === 'no_machine_online' ? 503
+-                            : 502
++                            : 500
+             return c.json({ error: result.message, code: result.code }, status)
+         }
+ 
+@@ -766,7 +766,7 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
+             ok: false as const, code: 'indeterminate' as const,
+             error: 'Plan implementation could not be confirmed. Reconnect and check the mode, queue and conversation before retrying.'
+         }))
+-        const status = result.ok ? 200 : result.code === 'indeterminate' ? 503 : result.code === 'failed' ? 502 : 409
++        const status = result.ok ? 200 : result.code === 'indeterminate' ? 503 : result.code === 'failed' ? 500 : 409
+         return c.json(result, status)
+     })
+ 
+@@ -1122,7 +1122,7 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
+             if (error instanceof TitleSuggestionError) {
+                 return c.json({ error: error.message }, error.status)
+             }
+-            return c.json({ error: 'Failed to generate a session title' }, 502)
++            return c.json({ error: 'Failed to generate a session title' }, 500)
+         }
+     })
+ 
+diff --git a/hub/src/web/routes/voice.ts b/hub/src/web/routes/voice.ts
+index 4c6858eef..1390d3a61 100644
+--- a/hub/src/web/routes/voice.ts
++++ b/hub/src/web/routes/voice.ts
+@@ -157,7 +157,7 @@ async function transcribeStandard(
+         })
+         if (!response.ok) {
+             console.warn('[Voice][Transcription] Upstream request failed', { provider, status: response.status })
+-            return Response.json({ error: `${provider} transcription failed (HTTP ${response.status})` }, { status: 502 })
++            return Response.json({ error: `${provider} transcription failed (HTTP ${response.status})` }, { status: 500 })
+         }
+         const data = await response.json() as {
+             text?: string
+@@ -174,7 +174,7 @@ async function transcribeStandard(
+             provider,
+             error: error instanceof Error ? error.message : String(error)
+         })
+-        return Response.json({ error: `${provider} transcription request failed` }, { status: 502 })
++        return Response.json({ error: `${provider} transcription request failed` }, { status: 500 })
+     }
+ }
+ 
+@@ -233,18 +233,18 @@ async function createRealtimeTranscriptionToken(
+         })
+         if (!response.ok) {
+             console.warn('[Voice][RealtimeTranscription] Token request failed', { provider, status: response.status })
+-            return Response.json({ error: `${provider} realtime transcription token failed (HTTP ${response.status})` }, { status: 502 })
++            return Response.json({ error: `${provider} realtime transcription token failed (HTTP ${response.status})` }, { status: 500 })
+         }
+         const data = await response.json() as { value?: string; token?: string; access_token?: string }
+         const token = data.value ?? data.token ?? data.access_token
+-        if (!token) return Response.json({ error: `${provider} realtime transcription returned no token` }, { status: 502 })
++        if (!token) return Response.json({ error: `${provider} realtime transcription returned no token` }, { status: 500 })
+         return Response.json({ token })
+     } catch (error) {
+         console.warn('[Voice][RealtimeTranscription] Token request error', {
+             provider,
+             error: error instanceof Error ? error.message : String(error)
+         })
+-        return Response.json({ error: `${provider} realtime transcription token request failed` }, { status: 502 })
++        return Response.json({ error: `${provider} realtime transcription token request failed` }, { status: 500 })
+     }
+ }
+ 
+diff --git a/ios/Packages/HapiKit/Tests/HapiClientTests/Chat/ChatInteractorTests.swift b/ios/Packages/HapiKit/Tests/HapiClientTests/Chat/ChatInteractorTests.swift
+index 1a367fa4f..5da0ea227 100644
+--- a/ios/Packages/HapiKit/Tests/HapiClientTests/Chat/ChatInteractorTests.swift
++++ b/ios/Packages/HapiKit/Tests/HapiClientTests/Chat/ChatInteractorTests.swift
+@@ -1211,7 +1211,7 @@ struct ChatInteractorTests {
+         #expect(interactor.composerText == "Keep this draft")
+     }
+ 
+-    @Test(arguments: [(409, "stale_plan"), (409, "unavailable"), (502, "failed"), (503, "indeterminate")])
++    @Test(arguments: [(409, "stale_plan"), (409, "unavailable"), (500, "failed"), (503, "indeterminate")])
+     func planFailureRemainsVisibleAfterWithdrawalWithoutAutomaticResubmission(status: Int, code: String) async throws {
+         let harness = try await ChatInteractionHarness(detail: planSession(), activate: false)
+         await harness.performer.script("POST", "/api/sessions/sess-1/codex/plan/implement", status: status,
+@@ -1231,7 +1231,7 @@ struct ChatInteractorTests {
+ 
+     @Test func confirmedPlanFailureCanBeRetriedExplicitly() async throws {
+         let harness = try await ChatInteractionHarness(detail: planSession(), activate: false)
+-        await harness.performer.script("POST", "/api/sessions/sess-1/codex/plan/implement", status: 502,
++        await harness.performer.script("POST", "/api/sessions/sess-1/codex/plan/implement", status: 500,
+                                        json: #"{"ok":false,"code":"failed","error":"Try again"}"#)
+         harness.interactor.implementCodexPlan(planId: "plan-1")
+         #expect(await eventually { !harness.interactor.codexPlanActions(planId: "plan-1").pending })

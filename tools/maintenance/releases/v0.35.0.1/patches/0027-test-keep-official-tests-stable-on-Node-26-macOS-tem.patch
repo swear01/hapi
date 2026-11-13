@@ -1,0 +1,87 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 14 Nov 2026 01:37:06 +0800
+Subject: [PATCH 27/28] test: keep official tests stable on Node 26, macOS temp
+ paths and inside HAPI sessions
+
+- web: disable Node's built-in webstorage so jsdom's Storage is used
+- cli: pin platform for the ss parser test, canonicalize macOS temp dirs,
+  pin HAPI_INVOKED_CWD in claude resume tests
+---
+ cli/src/commands/claude.test.ts                      | 3 +++
+ cli/src/cursor/utils/cursorNotifyRuleOverlay.test.ts | 5 +++--
+ cli/src/opencode/utils/opencodeBackend.test.ts       | 1 +
+ web/vitest.config.ts                                 | 4 ++++
+ 4 files changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/cli/src/commands/claude.test.ts b/cli/src/commands/claude.test.ts
+index 91e1d2627..e826afd77 100644
+--- a/cli/src/commands/claude.test.ts
++++ b/cli/src/commands/claude.test.ts
+@@ -171,6 +171,8 @@ describe('claudeCommand resume identity', () => {
+         prepareSessionForLocalResumeMock.mockClear()
+         claudeConfigDir = mkdtempSync(join(tmpdir(), 'hapi-claude-resume-'))
+         process.env.CLAUDE_CONFIG_DIR = claudeConfigDir
++        // Running inside a HAPI session exports HAPI_INVOKED_CWD; pin it to the test directory.
++        vi.stubEnv('HAPI_INVOKED_CWD', directory)
+         const projectDir = getProjectPath(directory)
+         mkdirSync(projectDir, { recursive: true })
+         writeFileSync(join(projectDir, `${claudeId}.jsonl`), `${JSON.stringify({ uuid: 'm1' })}\n`)
+@@ -180,6 +182,7 @@ describe('claudeCommand resume identity', () => {
+         if (originalClaudeConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR
+         else process.env.CLAUDE_CONFIG_DIR = originalClaudeConfigDir
+         rmSync(claudeConfigDir, { recursive: true, force: true })
++        vi.unstubAllEnvs()
+     })
+ 
+     it('refuses an explicit resume whose transcript is gone instead of starting a fresh conversation', async () => {
+diff --git a/cli/src/cursor/utils/cursorNotifyRuleOverlay.test.ts b/cli/src/cursor/utils/cursorNotifyRuleOverlay.test.ts
+index 639ead180..bfcd391fb 100644
+--- a/cli/src/cursor/utils/cursorNotifyRuleOverlay.test.ts
++++ b/cli/src/cursor/utils/cursorNotifyRuleOverlay.test.ts
+@@ -7,6 +7,7 @@ import {
+     mkdtempSync,
+     readFileSync,
+     readdirSync,
++    realpathSync,
+     rmSync,
+     statSync,
+     symlinkSync,
+@@ -70,8 +71,8 @@ describe('installCursorNotifyRuleOverlay', () => {
+     let previousHapiHome: string | undefined;
+ 
+     beforeEach(() => {
+-        cwd = mkdtempSync(join(tmpdir(), 'hapi-notify-rule-'));
+-        hapiHome = mkdtempSync(join(tmpdir(), 'hapi-home-'));
++        cwd = realpathSync(mkdtempSync(join(tmpdir(), 'hapi-notify-rule-')));
++        hapiHome = realpathSync(mkdtempSync(join(tmpdir(), 'hapi-home-')));
+         previousHapiHome = process.env.HAPI_HOME;
+         process.env.HAPI_HOME = hapiHome;
+     });
+diff --git a/cli/src/opencode/utils/opencodeBackend.test.ts b/cli/src/opencode/utils/opencodeBackend.test.ts
+index dee7996c5..64b4b7912 100644
+--- a/cli/src/opencode/utils/opencodeBackend.test.ts
++++ b/cli/src/opencode/utils/opencodeBackend.test.ts
+@@ -237,6 +237,7 @@ describe('parseLsofListeners', () => {
+ describe('listLoopbackListeners', () => {
+     it('parses ss output on linux', async () => {
+         const listeners = await listLoopbackListeners({
++            platform: 'linux',
+             execImpl: async (command, args) => {
+                 expect(command).toBe('ss');
+                 expect(args).toEqual(['-tln']);
+diff --git a/web/vitest.config.ts b/web/vitest.config.ts
+index 8c99dbd5d..abf289966 100644
+--- a/web/vitest.config.ts
++++ b/web/vitest.config.ts
+@@ -9,6 +9,10 @@ export default mergeConfig(
+             environment: 'jsdom',
+             include: ['src/**/*.test.{ts,tsx}'],
+             setupFiles: ['./src/test/setup.ts'],
++            // Node 25+ ships its own localStorage global, which shadows jsdom's Storage.
++            execArgv: process.allowedNodeEnvironmentFlags.has('--no-experimental-webstorage')
++                ? ['--no-experimental-webstorage']
++                : [],
+         },
+     })
+ )

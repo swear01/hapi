@@ -1,0 +1,448 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Fri, 13 Nov 2026 03:50:34 +0800
+Subject: [PATCH 17/28] carry(upstream): PR #1921
+
+---
+ hub/src/sync/rpcGateway.test.ts        | 43 ++++++++++++-
+ hub/src/sync/rpcGateway.ts             | 86 ++++++++++++++++++--------
+ hub/src/web/routes/permissions.test.ts | 75 +++++++++++++++++++++-
+ hub/src/web/routes/permissions.ts      | 33 +++++++++-
+ hub/src/web/routes/sessions.test.ts    | 46 +++++++++++++-
+ hub/src/web/routes/sessions.ts         | 23 ++++++-
+ 6 files changed, 274 insertions(+), 32 deletions(-)
+
+diff --git a/hub/src/sync/rpcGateway.test.ts b/hub/src/sync/rpcGateway.test.ts
+index 2cfd79950..a8e5a2656 100644
+--- a/hub/src/sync/rpcGateway.test.ts
++++ b/hub/src/sync/rpcGateway.test.ts
+@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
+ import type { Server } from 'socket.io'
+ import { PERMISSION_REQUEST_NOT_FOUND_MESSAGE } from '@hapi/protocol/rpcMethods'
+ import type { RpcRegistry } from '../socket/rpcRegistry'
+-import { PermissionRequestNotFoundError, RpcGateway, RpcTargetMissingError } from './rpcGateway'
++import { PermissionRequestNotFoundError, RpcGateway, RpcTargetMissingError, RpcTimeoutError } from './rpcGateway'
+ 
+ function createGateway() {
+     const timeouts: number[] = []
+@@ -351,3 +351,44 @@ describe('RpcGateway permission RPC error surfacing (tiann/hapi#1735)', () => {
+         await expect(gateway.approvePermission('session-1', 'request-1')).resolves.toBeUndefined()
+     })
+ })
++
++// The ack-deadline rejection from socket.io (`Error('operation has timed out')`)
++// must surface as a typed RpcTimeoutError so HTTP layers can distinguish
++// "waited out the deadline, engine may be wedged" from any other failure.
++describe('RpcGateway ack-deadline wrapping', () => {
++    function createGatewayWithRejection(rejection: unknown) {
++        const socket = {
++            timeout() {
++                return {
++                    emitWithAck() {
++                        return Promise.reject(rejection)
++                    }
++                }
++            }
++        }
++        const io = {
++            of() {
++                return { sockets: { get() { return socket } } }
++            }
++        } as unknown as Server
++        const rpcRegistry = {
++            getSocketIdForMethod() { return 'socket-1' }
++        } as unknown as RpcRegistry
++        return new RpcGateway(io, rpcRegistry)
++    }
++
++    it('wraps the socket.io ack-deadline rejection as RpcTimeoutError', async () => {
++        const gateway = createGatewayWithRejection(new Error('operation has timed out'))
++        const error = await gateway.approvePermission('session-1', 'request-1').catch((e: unknown) => e)
++        expect(error).toBeInstanceOf(RpcTimeoutError)
++        expect((error as RpcTimeoutError).method).toBe('session-1:permission')
++        expect((error as RpcTimeoutError).timeoutMs).toBe(30_000)
++    })
++
++    it('passes unrelated RPC rejections through unchanged', async () => {
++        const boom = new Error('socket write failed')
++        const gateway = createGatewayWithRejection(boom)
++        const error = await gateway.denyPermission('session-1', 'request-1').catch((e: unknown) => e)
++        expect(error).toBe(boom)
++    })
++})
+diff --git a/hub/src/sync/rpcGateway.ts b/hub/src/sync/rpcGateway.ts
+index 913c7ef82..9803e3547 100644
+--- a/hub/src/sync/rpcGateway.ts
++++ b/hub/src/sync/rpcGateway.ts
+@@ -103,6 +103,27 @@ export class PermissionRequestNotFoundError extends Error {
+     }
+ }
+ 
++/**
++ * The target socket accepted the RPC frame but never acknowledged it within
++ * the deadline — most often an engine whose socket is still registered and
++ * transport-alive but no longer processing events (e.g. a wedged event loop).
++ * Distinct from {@link RpcTargetMissingError}: there the hub knows up front
++ * that nobody can answer, here the hub can only learn it by waiting out the
++ * deadline. Callers can narrow on this to respond with honest semantics
++ * (e.g. HTTP 504) instead of a generic 500.
++ */
++export class RpcTimeoutError extends Error {
++    readonly method: string
++    readonly timeoutMs: number
++
++    constructor(method: string, timeoutMs: number) {
++        super(`RPC timed out after ${Math.round(timeoutMs / 1000)}s without an ack: ${method}`)
++        this.name = 'RpcTimeoutError'
++        this.method = method
++        this.timeoutMs = timeoutMs
++    }
++}
++
+ // Matches on the specific shared message rather than treating any error on
+ // the Permission RPC method as "not found" — a future, unrelated throw in
+ // handlePermissionResponse's success path should surface as a genuine error,
+@@ -753,34 +774,47 @@ export class RpcGateway {
+             ...(requestId ? { requestId } : {})
+         }) as Promise<unknown>
+ 
+-        const response = requestId && signal
+-            ? await new Promise<unknown>((resolve, reject) => {
+-                let settled = false
+-                const cleanup = () => signal.removeEventListener('abort', onAbort)
+-                const onAbort = () => {
+-                    if (settled) return
+-                    settled = true
+-                    socket.emit('rpc-cancel', { requestId })
+-                    cleanup()
+-                    reject(createAbortError())
+-                }
++        let response: unknown
++        try {
++            response = requestId && signal
++                ? await new Promise<unknown>((resolve, reject) => {
++                    let settled = false
++                    const cleanup = () => signal.removeEventListener('abort', onAbort)
++                    const onAbort = () => {
++                        if (settled) return
++                        settled = true
++                        socket.emit('rpc-cancel', { requestId })
++                        cleanup()
++                        reject(createAbortError())
++                    }
+ 
+-                signal.addEventListener('abort', onAbort, { once: true })
+-                responsePromise.then((value) => {
+-                    if (settled) return
+-                    settled = true
+-                    cleanup()
+-                    resolve(value)
+-                }, (error: unknown) => {
+-                    if (settled) return
+-                    settled = true
+-                    cleanup()
+-                    reject(error)
++                    signal.addEventListener('abort', onAbort, { once: true })
++                    responsePromise.then((value) => {
++                        if (settled) return
++                        settled = true
++                        cleanup()
++                        resolve(value)
++                    }, (error: unknown) => {
++                        if (settled) return
++                        settled = true
++                        cleanup()
++                        reject(error)
++                    })
++
++                    if (signal.aborted) onAbort()
+                 })
+-
+-                if (signal.aborted) onAbort()
+-            })
+-            : await responsePromise
++                : await responsePromise
++        } catch (error) {
++            // socket.io rejects the emitWithAck promise with a plain
++            // `Error('operation has timed out')` when the ack deadline passes
++            // (it exports no typed error for this). Narrow on the message and
++            // rethrow as RpcTimeoutError so HTTP layers can distinguish
++            // "waited out the deadline" from any other transport failure.
++            if (error instanceof Error && error.message.includes('operation has timed out')) {
++                throw new RpcTimeoutError(method, timeoutMs)
++            }
++            throw error
++        }
+ 
+         if (typeof response !== 'string') {
+             return response
+diff --git a/hub/src/web/routes/permissions.test.ts b/hub/src/web/routes/permissions.test.ts
+index c39346fff..ac23d6494 100644
+--- a/hub/src/web/routes/permissions.test.ts
++++ b/hub/src/web/routes/permissions.test.ts
+@@ -1,8 +1,9 @@
+ import { describe, expect, it } from 'bun:test'
+ import { Hono } from 'hono'
++import { RPC_TARGET_MISSING_ERROR_CODE } from '@hapi/protocol/rpcMethods'
+ import type { Session, SyncEngine } from '../../sync/syncEngine'
+ import type { WebAppEnv } from '../middleware/auth'
+-import { PermissionRequestNotFoundError } from '../../sync/rpcGateway'
++import { PermissionRequestNotFoundError, RpcTargetMissingError, RpcTimeoutError } from '../../sync/rpcGateway'
+ import { createPermissionsRoutes } from './permissions'
+ 
+ function createSession(): Session {
+@@ -120,4 +121,76 @@ describe('permissions routes (tiann/hapi#1735)', () => {
+         // not a 409 — the route only special-cases PermissionRequestNotFoundError.
+         expect(res.status).toBe(500)
+     })
++
++    // Answering a permission on a session whose engine socket is gone used to
++    // surface as a bare 500 (RpcTargetMissingError was never mapped). It must
++    // fail fast with the same 503 + rpc_target_missing contract as the other
++    // RPC routes.
++    it('returns 503 rpc_target_missing when the engine socket is gone (approve)', async () => {
++        const app = createApp({
++            approvePermission: async () => { throw new RpcTargetMissingError('session-1:Permission', 'handler-not-registered') }
++        })
++        const res = await app.request('/api/sessions/session-1/permissions/request-1/approve', {
++            method: 'POST',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({})
++        })
++        expect(res.status).toBe(503)
++        expect(await res.json()).toEqual({
++            error: expect.stringContaining('RPC handler not registered'),
++            code: RPC_TARGET_MISSING_ERROR_CODE
++        })
++    })
++
++    it('returns 503 rpc_target_missing when the engine socket is gone (deny)', async () => {
++        const app = createApp({
++            denyPermission: async () => { throw new RpcTargetMissingError('session-1:Permission', 'socket-disconnected') }
++        })
++        const res = await app.request('/api/sessions/session-1/permissions/request-1/deny', {
++            method: 'POST',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({})
++        })
++        expect(res.status).toBe(503)
++        expect(await res.json()).toEqual({
++            error: expect.stringContaining('RPC socket disconnected'),
++            code: RPC_TARGET_MISSING_ERROR_CODE
++        })
++    })
++
++    // A socket that stays registered while the engine wedges never acks, so
++    // socket.io rejects after the full RPC deadline — that used to escape as a
++    // generic 500 ("operation has timed out"). It must surface as 504 +
++    // engine_unresponsive so the client knows the deadline was missed.
++    it('returns 504 engine_unresponsive when the engine never acks the approve', async () => {
++        const app = createApp({
++            approvePermission: async () => { throw new RpcTimeoutError('session-1:Permission', 30_000) }
++        })
++        const res = await app.request('/api/sessions/session-1/permissions/request-1/approve', {
++            method: 'POST',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({})
++        })
++        expect(res.status).toBe(504)
++        expect(await res.json()).toEqual({
++            error: expect.stringContaining('did not acknowledge'),
++            code: 'engine_unresponsive'
++        })
++    })
++
++    it('returns 504 engine_unresponsive when the engine never acks the deny', async () => {
++        const app = createApp({
++            denyPermission: async () => { throw new RpcTimeoutError('session-1:Permission', 30_000) }
++        })
++        const res = await app.request('/api/sessions/session-1/permissions/request-1/deny', {
++            method: 'POST',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({})
++        })
++        expect(res.status).toBe(504)
++        expect(await res.json()).toEqual({
++            error: expect.stringContaining('did not acknowledge'),
++            code: 'engine_unresponsive'
++        })
++    })
+ })
+diff --git a/hub/src/web/routes/permissions.ts b/hub/src/web/routes/permissions.ts
+index a4bb2d7e2..3ffb232e8 100644
+--- a/hub/src/web/routes/permissions.ts
++++ b/hub/src/web/routes/permissions.ts
+@@ -1,8 +1,9 @@
+ import { isPermissionModeAllowedForFlavor } from '@hapi/protocol'
+ import { PermissionModeSchema } from '@hapi/protocol/schemas'
++import { RPC_TARGET_MISSING_ERROR_CODE } from '@hapi/protocol/rpcMethods'
+ import { Hono } from 'hono'
+ import { z } from 'zod'
+-import { PermissionRequestNotFoundError } from '../../sync/rpcGateway'
++import { PermissionRequestNotFoundError, RpcTargetMissingError, RpcTimeoutError } from '../../sync/rpcGateway'
+ import type { SyncEngine } from '../../sync/syncEngine'
+ import type { WebAppEnv } from '../middleware/auth'
+ import { requireSessionFromParam, requireSyncEngine } from './guards'
+@@ -71,6 +72,24 @@ export function createPermissionsRoutes(getSyncEngine: () => SyncEngine | null):
+             if (error instanceof PermissionRequestNotFoundError) {
+                 return c.json({ error: error.message }, 409)
+             }
++            if (error instanceof RpcTargetMissingError) {
++                // The engine socket is gone (handler unregistered or socket
++                // disconnected): the answer can never be delivered. Fail in
++                // milliseconds instead of hanging the request into a 500, with
++                // the contract the other RPC routes already use.
++                return c.json({
++                    error: error.message,
++                    code: RPC_TARGET_MISSING_ERROR_CODE
++                }, 503)
++            }
++            if (error instanceof RpcTimeoutError) {
++                // The socket is still registered but the engine never acked:
++                // report the missed deadline honestly instead of a generic 500.
++                return c.json({
++                    error: `Session did not acknowledge the answer within ${Math.round(error.timeoutMs / 1000)}s; it may be unresponsive.`,
++                    code: 'engine_unresponsive'
++                }, 504)
++            }
+             throw error
+         }
+         return c.json({ ok: true })
+@@ -107,6 +126,18 @@ export function createPermissionsRoutes(getSyncEngine: () => SyncEngine | null):
+             if (error instanceof PermissionRequestNotFoundError) {
+                 return c.json({ error: error.message }, 409)
+             }
++            if (error instanceof RpcTargetMissingError) {
++                return c.json({
++                    error: error.message,
++                    code: RPC_TARGET_MISSING_ERROR_CODE
++                }, 503)
++            }
++            if (error instanceof RpcTimeoutError) {
++                return c.json({
++                    error: `Session did not acknowledge the answer within ${Math.round(error.timeoutMs / 1000)}s; it may be unresponsive.`,
++                    code: 'engine_unresponsive'
++                }, 504)
++            }
+             throw error
+         }
+         return c.json({ ok: true })
+diff --git a/hub/src/web/routes/sessions.test.ts b/hub/src/web/routes/sessions.test.ts
+index 463096c18..e8aa852d3 100644
+--- a/hub/src/web/routes/sessions.test.ts
++++ b/hub/src/web/routes/sessions.test.ts
+@@ -1,10 +1,11 @@
+ import { describe, expect, it } from 'bun:test'
+ import { Hono } from 'hono'
++import { RPC_TARGET_MISSING_ERROR_CODE } from '@hapi/protocol/rpcMethods'
+ import type { Session, SyncEngine } from '../../sync/syncEngine'
+ import type { WebAppEnv } from '../middleware/auth'
+ import { createSessionsRoutes } from './sessions'
+ import { ArchiveCleanupError } from '../../sync/archiveCleanupError'
+-import { RpcTargetMissingError } from '../../sync/rpcGateway'
++import { RpcTargetMissingError, RpcTimeoutError } from '../../sync/rpcGateway'
+ 
+ function createSession(overrides?: Partial<Session>): Session {
+     const baseMetadata = {
+@@ -61,6 +62,7 @@ type ReopenResultMock =
+ function createApp(session: Session, opts?: {
+     resumeSession?: (sessionId: string, namespace: string, resumeOpts?: { permissionMode?: string }) => Promise<{ type: string; sessionId?: string; message?: string; code?: string }>
+     reopenSession?: (sessionId: string, namespace: string) => Promise<ReopenResultMock>
++    abortSession?: SyncEngine['abortSession']
+     listSlashCommands?: SyncEngine['listSlashCommands']
+     getSessionExport?: (sessionId: string, session: Session, options?: { force?: boolean }) => unknown
+     sessionExists?: boolean
+@@ -170,6 +172,7 @@ function createApp(session: Session, opts?: {
+         listKimiModelsForSession,
+         resumeSession,
+         reopenSession,
++        abortSession: opts?.abortSession ?? (async () => {}),
+         getCursorChatStoreStatus: opts?.getCursorChatStoreStatus ?? (async () => ({
+             type: 'success' as const,
+             status: { onDisk: true, store: 'acp' as const }
+@@ -2332,3 +2335,44 @@ describe('sessions routes', () => {
+     })
+ 
+ })
++
++// Aborting a session whose engine socket is gone or wedged used to escape as a
++// bare 500 (RpcTargetMissingError / the socket.io ack deadline were never
++// mapped). It must fail fast with the same typed delivery contract the other
++// RPC routes already use.
++describe('session abort delivery errors', () => {
++    it('returns 503 rpc_target_missing when the engine socket is gone', async () => {
++        const { app } = createApp(createSession(), {
++            abortSession: async () => { throw new RpcTargetMissingError('session-1:abort', 'handler-not-registered') }
++        })
++        const res = await app.request('/api/sessions/session-1/abort', { method: 'POST' })
++        expect(res.status).toBe(503)
++        expect(await res.json()).toEqual({
++            error: expect.stringContaining('RPC handler not registered'),
++            code: RPC_TARGET_MISSING_ERROR_CODE
++        })
++    })
++
++    it('returns 504 engine_unresponsive when the engine never acks the abort', async () => {
++        const { app } = createApp(createSession(), {
++            abortSession: async () => { throw new RpcTimeoutError('session-1:abort', 30_000) }
++        })
++        const res = await app.request('/api/sessions/session-1/abort', { method: 'POST' })
++        expect(res.status).toBe(504)
++        expect(await res.json()).toEqual({
++            error: expect.stringContaining('did not acknowledge'),
++            code: 'engine_unresponsive'
++        })
++    })
++
++    it('returns ok when the abort is delivered', async () => {
++        let aborted: string | undefined
++        const { app } = createApp(createSession(), {
++            abortSession: async (sessionId: string) => { aborted = sessionId }
++        })
++        const res = await app.request('/api/sessions/session-1/abort', { method: 'POST' })
++        expect(res.status).toBe(200)
++        expect(await res.json()).toEqual({ ok: true })
++        expect(aborted).toBe('session-1')
++    })
++})
+diff --git a/hub/src/web/routes/sessions.ts b/hub/src/web/routes/sessions.ts
+index 00edd9861..ed0afe4b7 100644
+--- a/hub/src/web/routes/sessions.ts
++++ b/hub/src/web/routes/sessions.ts
+@@ -35,7 +35,7 @@ import type { SlashCommand } from '@hapi/protocol/apiTypes'
+ import { Hono, type Context } from 'hono'
+ import { bodyLimit } from 'hono/body-limit'
+ import type { SyncEngine, Session } from '../../sync/syncEngine'
+-import { RpcTargetMissingError } from '../../sync/rpcGateway'
++import { RpcTargetMissingError, RpcTimeoutError } from '../../sync/rpcGateway'
+ import type { WebAppEnv } from '../middleware/auth'
+ import { loadScratchlistAttachmentLimitsFromEnv } from '../../config/scratchlistAttachmentLimits'
+ import { validateScratchlistAttachmentsForWrite, scratchlistSessionBytesBeforeForPut } from '../../scratchlistAttachments/validate'
+@@ -569,7 +569,26 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
+             return sessionResult
+         }
+ 
+-        await engine.abortSession(sessionResult.sessionId)
++        try {
++            await engine.abortSession(sessionResult.sessionId)
++        } catch (error) {
++            if (error instanceof RpcTargetMissingError) {
++                // The engine socket is gone: the abort can never be delivered.
++                // Fail in milliseconds instead of hanging into a 500, with the
++                // same status/code contract the other RPC routes already use.
++                return c.json({
++                    error: error.message,
++                    code: RPC_TARGET_MISSING_ERROR_CODE
++                }, 503)
++            }
++            if (error instanceof RpcTimeoutError) {
++                return c.json({
++                    error: `Session did not acknowledge the abort within ${Math.round(error.timeoutMs / 1000)}s; it may be unresponsive.`,
++                    code: 'engine_unresponsive'
++                }, 504)
++            }
++            throw error
++        }
+         return c.json({ ok: true })
+     })
+ 
