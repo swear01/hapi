@@ -75,6 +75,8 @@ const HUB_OWNED_METADATA_KEYS = [
     'opencodeClearOperation',
     'titleSuggestionAutoAttemptedAt',
     'titleSuggestionTurn',
+    'forkTitleSeed',
+    'forkTitleGenerationAttemptedAt',
     'jobsAcceptedFromSessionIds',
     'jobsTransferredToSessionId',
     'jobKeyRedirects',
