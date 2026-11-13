@@ -1,0 +1,460 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sun, 25 Oct 2026 18:54:04 +0000
+Subject: [PATCH 22/29] fork: ship the hapi-session-control skill with HAPI
+
+Fork-only overlay, stacked on the spawn_peer / reply forwarding PR. It
+replaces the skill delivery that #1771 carried.
+
+- Bundle cli/skills/hapi-session-control/SKILL.md, rewritten for
+  spawn_peer, ping_peer waitForReply and inspect_peer.
+- Install it into each agent's native skill root on session bootstrap.
+  A failed install is logged and does not block the session.
+- Point HOME at the temp test home in the CLI test setup, so tests that
+  bootstrap sessions no longer write into the real ~/.claude and ~/.codex.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit 3efcb7ec68d861cec6156e1c54bbd2d15e838c76)
+---
+ cli/skills/hapi-session-control/SKILL.md      |  29 ++++
+ .../agent/backends/acp/agentCliGuard.test.ts  |   4 +-
+ cli/src/agent/sessionFactory.ts               |   9 ++
+ .../common/hapiSessionControlSkill.test.ts    |  67 +++++++++
+ .../modules/common/hapiSessionControlSkill.ts | 131 ++++++++++++++++++
+ cli/src/modules/common/skills.ts              |  17 +++
+ cli/src/runtime/assets.ts                     |   8 +-
+ cli/src/runtime/embeddedAssets.bun.ts         |   2 +
+ cli/src/test/setup.ts                         |   4 +
+ cli/src/types/assetImports.d.ts               |   5 +
+ 10 files changed, 273 insertions(+), 3 deletions(-)
+ create mode 100644 cli/skills/hapi-session-control/SKILL.md
+ create mode 100644 cli/src/modules/common/hapiSessionControlSkill.test.ts
+ create mode 100644 cli/src/modules/common/hapiSessionControlSkill.ts
+
+diff --git a/cli/skills/hapi-session-control/SKILL.md b/cli/skills/hapi-session-control/SKILL.md
+new file mode 100644
+index 000000000..2466a6d1e
+--- /dev/null
++++ b/cli/skills/hapi-session-control/SKILL.md
+@@ -0,0 +1,29 @@
++---
++name: hapi-session-control
++description: Delegate work to a new HAPI session, or message and read another HAPI session, and collect its reply. Use for delegated work, peer messages, and session links or IDs.
++---
++
++# HAPI session control
++
++Use the HAPI MCP tools. They use this session's hub credentials.
++
++## Delegate new work
++
++Call `spawn_peer` with the full task as `message`. The new session starts on this machine in this session's directory with this session's agent. Pass `directory` or `agent` only when the user asked for a different one.
++
++Then end your turn. Do not poll. The peer's reply is posted into this session as a new message when its turn ends, and you continue from there. To follow up, call `ping_peer` with `waitForReply: true` and end your turn again.
++
++## A session the user named
++
++Only touch an existing session when the user gave its ID or a `/sessions/<id>` link. Sessions you started with `spawn_peer` count as named.
++
++- Read it: `inspect_peer`.
++- Message it: `ping_peer`. Add `waitForReply: true` when you need the answer, then end your turn.
++
++Never pick a session from `list_peers` on your own, and never fall back to a different session after a failure. Report the failure instead.
++
++## Limits
++
++- A reply contains at most about 1,200 characters of the peer's last message. Use `inspect_peer` for context, or ask the peer to keep its final answer short.
++- A pending reply is lost if this session's CLI process restarts. Use `inspect_peer` to check on the peer.
++- Archiving and stopping sessions is done by the user in the HAPI web app.
+diff --git a/cli/src/agent/backends/acp/agentCliGuard.test.ts b/cli/src/agent/backends/acp/agentCliGuard.test.ts
+index f885d5c56..a65e42563 100644
+--- a/cli/src/agent/backends/acp/agentCliGuard.test.ts
++++ b/cli/src/agent/backends/acp/agentCliGuard.test.ts
+@@ -1,5 +1,5 @@
+ import { existsSync, mkdirSync, readFileSync, readdirSync, utimesSync, writeFileSync } from 'node:fs';
+-import { join } from 'node:path';
++import { join, sep } from 'node:path';
+ import { homedir, tmpdir } from 'node:os';
+ import { afterEach, describe, expect, test } from 'vitest';
+ import {
+@@ -190,7 +190,7 @@ describe('agentCliGuard', () => {
+         try {
+             const expected = join(homedir(), '.hapi', 'locks', 'agent-acp-active');
+             expect(getAgentAcpLockDir()).toBe(expected);
+-            expect(getAgentAcpLockDir()).not.toContain(join(tmpdir(), 'hapi'));
++            expect(getAgentAcpLockDir()).not.toContain(join(tmpdir(), 'hapi') + sep);
+         } finally {
+             // Restore isolated home before afterEach reset (belt + suspenders).
+             process.env.HAPI_HOME = testHome;
+diff --git a/cli/src/agent/sessionFactory.ts b/cli/src/agent/sessionFactory.ts
+index cab1a4c7e..e56b749f6 100644
+--- a/cli/src/agent/sessionFactory.ts
++++ b/cli/src/agent/sessionFactory.ts
+@@ -17,6 +17,7 @@ import { readWorktreeEnv } from '@/utils/worktreeEnv'
+ import { CURRENT_MACHINE_CAPABILITIES } from '@hapi/protocol/runnerCapabilities'
+ import { exportHapiSessionEnv } from '@/agent/hapiSessionEnv'
+ import packageJson from '../../package.json'
++import { ensureHapiSessionControlSkill } from '@/modules/common/hapiSessionControlSkill'
+ 
+ export { HAPI_SESSION_ID_ENV, exportHapiSessionEnv, exportHapiHubAuthEnv } from '@/agent/hapiSessionEnv'
+ 
+@@ -242,8 +243,14 @@ async function reportSessionStarted(sessionId: string, metadata: Metadata): Prom
+     }
+ }
+ 
++async function installSessionControlSkill(flavor: string, workingDirectory: string): Promise<void> {
++    await ensureHapiSessionControlSkill(flavor, workingDirectory)
++        .catch((error) => logger.debug('[session] hapi-session-control skill not installed:', error))
++}
++
+ export async function bootstrapSession(options: SessionBootstrapOptions): Promise<SessionBootstrapResult> {
+     const workingDirectory = options.workingDirectory ?? getInvokedCwd()
++    await installSessionControlSkill(options.flavor, workingDirectory)
+     const startedBy = options.startedBy ?? 'terminal'
+     const sessionTag = options.tag ?? randomUUID()
+     const agentState = options.agentState === undefined ? {} : options.agentState
+@@ -302,6 +309,7 @@ export async function bootstrapSession(options: SessionBootstrapOptions): Promis
+ 
+ export async function bootstrapLazySession(options: SessionBootstrapOptions): Promise<SessionBootstrapResult> {
+     const workingDirectory = options.workingDirectory ?? getInvokedCwd()
++    await installSessionControlSkill(options.flavor, workingDirectory)
+     const startedBy = options.startedBy ?? 'terminal'
+     if (startedBy !== 'terminal') {
+         throw new Error('Lazy session bootstrap is only supported for terminal sessions')
+@@ -396,6 +404,7 @@ export async function bootstrapExistingSession(options: {
+     metadataOverrides?: Partial<Metadata>
+     requireMetadataFlush?: (metadata: Metadata | null | undefined) => boolean
+ }): Promise<SessionBootstrapResult> {
++    await installSessionControlSkill(options.flavor, options.workingDirectory)
+     const startedBy = options.startedBy ?? 'terminal'
+     const api = await ApiClient.create()
+     const machineId = await getMachineIdOrExit()
+diff --git a/cli/src/modules/common/hapiSessionControlSkill.test.ts b/cli/src/modules/common/hapiSessionControlSkill.test.ts
+new file mode 100644
+index 000000000..bfa8350f1
+--- /dev/null
++++ b/cli/src/modules/common/hapiSessionControlSkill.test.ts
+@@ -0,0 +1,67 @@
++import { afterEach, beforeEach, describe, expect, it } from 'vitest'
++import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import { CREATABLE_AGENT_FLAVORS } from '@hapi/protocol/modes'
++import { listSkills, resolveSkill } from './skills'
++import {
++    HAPI_SESSION_CONTROL_SKILL_DESCRIPTION,
++    HAPI_SESSION_CONTROL_SKILL_NAME,
++    ensureHapiSessionControlSkill,
++    nativeSkillRoot
++} from './hapiSessionControlSkill'
++
++const ENV_KEYS = ['HOME', 'USERPROFILE', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'GROK_HOME', 'DSH_HOME', 'OPENCODE_CONFIG_DIR'] as const
++
++describe('canonical hapi-session-control delivery', () => {
++    let sandbox: string
++    let workingDirectory: string
++    let originalEnv: Partial<Record<typeof ENV_KEYS[number], string | undefined>>
++
++    beforeEach(async () => {
++        sandbox = await mkdtemp(join(tmpdir(), 'hapi-session-control-'))
++        workingDirectory = join(sandbox, 'repo')
++        await mkdir(join(workingDirectory, '.git'), { recursive: true })
++        originalEnv = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]))
++        process.env.HOME = join(sandbox, 'home')
++        delete process.env.USERPROFILE
++        delete process.env.CLAUDE_CONFIG_DIR
++        delete process.env.CODEX_HOME
++        delete process.env.GROK_HOME
++        delete process.env.DSH_HOME
++        delete process.env.OPENCODE_CONFIG_DIR
++    })
++
++    afterEach(async () => {
++        for (const key of ENV_KEYS) {
++            const value = originalEnv[key]
++            if (value === undefined) delete process.env[key]
++            else process.env[key] = value
++        }
++        await rm(sandbox, { recursive: true, force: true })
++    })
++
++    it.each(CREATABLE_AGENT_FLAVORS)('installs and verifies the %s runtime catalog', async (flavor) => {
++        const target = await ensureHapiSessionControlSkill(flavor, workingDirectory)
++        expect(target).toBe(join(nativeSkillRoot(flavor), HAPI_SESSION_CONTROL_SKILL_NAME, 'SKILL.md'))
++        expect(await readFile(target, 'utf8')).toContain(`name: ${HAPI_SESSION_CONTROL_SKILL_NAME}`)
++
++        const catalog = await listSkills(workingDirectory, { flavor })
++        expect(catalog).toContainEqual({
++            name: HAPI_SESSION_CONTROL_SKILL_NAME,
++            description: HAPI_SESSION_CONTROL_SKILL_DESCRIPTION
++        })
++        const loaded = await resolveSkill(HAPI_SESSION_CONTROL_SKILL_NAME, workingDirectory, { flavor })
++        expect(loaded?.body).toContain('spawn_peer')
++    })
++
++    it('rejects an unmanaged skill file without overwriting it', async () => {
++        const target = join(nativeSkillRoot('codex'), HAPI_SESSION_CONTROL_SKILL_NAME, 'SKILL.md')
++        await mkdir(join(nativeSkillRoot('codex'), HAPI_SESSION_CONTROL_SKILL_NAME), { recursive: true })
++        await writeFile(target, 'user-managed skill')
++
++        await expect(ensureHapiSessionControlSkill('codex', workingDirectory)).rejects.toThrow(/user-managed/)
++
++        expect(await readFile(target, 'utf8')).toBe('user-managed skill')
++    })
++})
+diff --git a/cli/src/modules/common/hapiSessionControlSkill.ts b/cli/src/modules/common/hapiSessionControlSkill.ts
+new file mode 100644
+index 000000000..a53769f5c
+--- /dev/null
++++ b/cli/src/modules/common/hapiSessionControlSkill.ts
+@@ -0,0 +1,131 @@
++import { lstat, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
++import { randomUUID } from 'node:crypto'
++import { homedir } from 'node:os'
++import { join } from 'node:path'
++import { withSettingsFileLock } from '@hapi/protocol/settingsFileLock'
++import { parse as parseYaml } from 'yaml'
++import { runtimePath } from '@/projectPath'
++import { resolveSkill } from './skills'
++
++export const HAPI_SESSION_CONTROL_SKILL_NAME = 'hapi-session-control'
++export const HAPI_SESSION_CONTROL_SKILL_DESCRIPTION =
++    'Delegate work to a new HAPI session, or message and read another HAPI session, and collect its reply. Use for delegated work, peer messages, and session links or IDs.'
++
++function homeDirectory(): string {
++    return process.env.HOME ?? process.env.USERPROFILE ?? homedir()
++}
++
++export function nativeSkillRoot(flavor: string): string {
++    const home = homeDirectory()
++    switch (flavor) {
++        case 'claude':
++            return join(process.env.CLAUDE_CONFIG_DIR || join(home, '.claude'), 'skills')
++        case 'codex':
++            return join(process.env.CODEX_HOME || join(home, '.codex'), 'skills')
++        case 'grok':
++            return join(process.env.GROK_HOME || join(home, '.grok'), 'skills')
++        case 'dsh':
++            return join(process.env.DSH_HOME || join(home, '.dsh'), 'skills')
++        case 'cursor':
++            return join(home, '.cursor', 'skills')
++        case 'opencode':
++            // HAPI gives local OpenCode an isolated OPENCODE_CONFIG_DIR per
++            // session; the runtime's native Agent Skills compatibility root
++            // remains stable across local, remote, and resumed launches.
++            return join(home, '.agents', 'skills')
++        case 'kimi':
++            return join(home, '.kimi', 'skills')
++        case 'copilot':
++            return join(home, '.copilot', 'skills')
++        case 'agy':
++            return join(home, '.gemini', 'antigravity-cli', 'skills')
++        case 'pi':
++            return join(home, '.pi', 'agent', 'skills')
++        default:
++            return join(home, '.agents', 'skills')
++    }
++}
++
++function parseCanonicalSkill(source: string): { description: string; body: string } {
++    const match = source.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/)
++    if (!match) throw new Error('Bundled hapi-session-control skill has no frontmatter')
++    const frontmatter = parseYaml(match[1]!) as Record<string, unknown>
++    if (frontmatter.name !== HAPI_SESSION_CONTROL_SKILL_NAME || typeof frontmatter.description !== 'string') {
++        throw new Error('Bundled hapi-session-control skill has invalid metadata')
++    }
++    return { description: frontmatter.description.trim(), body: match[2]!.trim() }
++}
++
++export async function ensureHapiSessionControlSkill(flavor: string, workingDirectory: string): Promise<string> {
++    const sourcePath = join(runtimePath(), 'skills', HAPI_SESSION_CONTROL_SKILL_NAME, 'SKILL.md')
++    const source = await readFile(sourcePath, 'utf8').catch((error) => {
++        throw new Error(`Canonical ${HAPI_SESSION_CONTROL_SKILL_NAME} skill is unavailable: ${error instanceof Error ? error.message : String(error)}`)
++    })
++    const canonical = parseCanonicalSkill(source)
++    const skillRoot = nativeSkillRoot(flavor)
++    const targetDir = join(skillRoot, HAPI_SESSION_CONTROL_SKILL_NAME)
++    const targetPath = join(targetDir, 'SKILL.md')
++    const markerPath = join(targetDir, '.hapi-managed')
++
++    await mkdir(skillRoot, { recursive: true, mode: 0o700 })
++    await withSettingsFileLock(targetDir, async () => {
++        const targetDirStat = await lstat(targetDir).catch(() => null)
++        if (targetDirStat?.isSymbolicLink()) {
++            throw new Error(`Refusing to replace user-managed skill directory symlink at ${targetDir}`)
++        }
++        if (targetDirStat && !targetDirStat.isDirectory()) {
++            throw new Error(`Refusing to replace user-managed skill path at ${targetDir}`)
++        }
++
++        const created = !targetDirStat
++        if (created) {
++            await mkdir(targetDir, { mode: 0o700 })
++        }
++
++        const markerStat = await lstat(markerPath).catch(() => null)
++        if (markerStat?.isSymbolicLink() || (markerStat && !markerStat.isFile())) {
++            throw new Error(`Refusing invalid HAPI skill ownership marker at ${markerPath}`)
++        }
++        if (created) {
++            await writeFile(markerPath, HAPI_SESSION_CONTROL_SKILL_NAME, { encoding: 'utf8', mode: 0o600, flag: 'wx' })
++        }
++        const managed = created || (
++            markerStat?.isFile()
++            && await readFile(markerPath, 'utf8').catch(() => null) === HAPI_SESSION_CONTROL_SKILL_NAME
++        )
++
++        const targetStat = await lstat(targetPath).catch(() => null)
++        if (targetStat?.isSymbolicLink()) {
++            throw new Error(`Refusing to replace user-managed skill file symlink at ${targetPath}`)
++        }
++        if (targetStat && !targetStat.isFile()) {
++            throw new Error(`Refusing to replace user-managed skill path at ${targetPath}`)
++        }
++        const installed = targetStat?.isFile()
++            ? await readFile(targetPath, 'utf8').catch(() => null)
++            : null
++        if (installed !== source && !managed) {
++            throw new Error(`Refusing to overwrite user-managed skill at ${targetPath}`)
++        }
++        if (installed !== source) {
++            const temporaryPath = join(targetDir, `.SKILL.md.${process.pid}.${randomUUID()}.tmp`)
++            try {
++                await writeFile(temporaryPath, source, { encoding: 'utf8', mode: 0o600 })
++                await rename(temporaryPath, targetPath)
++            } finally {
++                await unlink(temporaryPath).catch(() => {})
++            }
++        }
++    })
++
++    const effective = await resolveSkill(HAPI_SESSION_CONTROL_SKILL_NAME, workingDirectory, { flavor })
++    if (
++        !effective
++        || canonical.description !== HAPI_SESSION_CONTROL_SKILL_DESCRIPTION
++        || effective.description !== HAPI_SESSION_CONTROL_SKILL_DESCRIPTION
++        || effective.body !== canonical.body
++    ) {
++        throw new Error(`Canonical ${HAPI_SESSION_CONTROL_SKILL_NAME} skill is shadowed or could not be verified`)
++    }
++    return targetPath
++}
+diff --git a/cli/src/modules/common/skills.ts b/cli/src/modules/common/skills.ts
+index 80466dc20..4fa9222b0 100644
+--- a/cli/src/modules/common/skills.ts
++++ b/cli/src/modules/common/skills.ts
+@@ -58,6 +58,12 @@ function getAgentConfigDir(flavor?: string): string {
+         case 'dsh':
+             // DSH resolves its harness home from $DSH_HOME, then ~/.dsh.
+             return process.env.DSH_HOME || join(getHomeDirectory(), '.dsh');
++        case 'opencode':
++            return process.env.OPENCODE_CONFIG_DIR || join(getHomeDirectory(), '.config', 'opencode');
++        case 'agy':
++            return join(getHomeDirectory(), '.gemini', 'antigravity-cli');
++        case 'pi':
++            return join(getHomeDirectory(), '.pi', 'agent');
+         default:
+             return join(getHomeDirectory(), `.${normalizedFlavor}`);
+     }
+@@ -81,6 +87,11 @@ function getUserSkillsRoots(flavor?: string): string[] {
+             break;
+         case 'dsh':
+             // Mirrors DSH's own skill-filesystem provider: $DSH_HOME/skills.
++        case 'cursor':
++        case 'opencode':
++        case 'kimi':
++        case 'agy':
++        case 'pi':
+             roots.push(join(getAgentConfigDir(flavor), 'skills'));
+             break;
+     }
+@@ -111,6 +122,12 @@ function getProjectSkillsRoots(directory: string, flavor?: string): string[] {
+             // Mirrors DSH's own skill-filesystem provider: <project>/.dsh/skills.
+             roots.push(join(directory, '.dsh', 'skills'));
+             break;
++        case 'cursor':
++        case 'opencode':
++        case 'kimi':
++        case 'pi':
++            roots.push(join(directory, `.${normalizeFlavor(flavor)}`, 'skills'));
++            break;
+     }
+     return roots;
+ }
+diff --git a/cli/src/runtime/assets.ts b/cli/src/runtime/assets.ts
+index 32262570e..4b71fab49 100644
+--- a/cli/src/runtime/assets.ts
++++ b/cli/src/runtime/assets.ts
+@@ -74,6 +74,10 @@ function isTunwgReady(runtimeRoot: string): boolean {
+     return existsSync(tunwgPath);
+ }
+ 
++function isCanonicalSkillReady(runtimeRoot: string): boolean {
++    return existsSync(join(runtimeRoot, 'skills', 'hapi-session-control', 'SKILL.md'));
++}
++
+ function ensureTunwgExecutable(runtimeRoot: string): void {
+     if (platform() === 'win32') {
+         return;
+@@ -132,7 +136,9 @@ function unpackTools(runtimeRoot: string): void {
+ }
+ 
+ function runtimeAssetsReady(runtimeRoot: string): boolean {
+-    return areToolsUnpacked(join(runtimeRoot, 'tools', 'unpacked')) && isTunwgReady(runtimeRoot);
++    return areToolsUnpacked(join(runtimeRoot, 'tools', 'unpacked'))
++        && isTunwgReady(runtimeRoot)
++        && isCanonicalSkillReady(runtimeRoot);
+ }
+ 
+ export async function ensureRuntimeAssets(): Promise<void> {
+diff --git a/cli/src/runtime/embeddedAssets.bun.ts b/cli/src/runtime/embeddedAssets.bun.ts
+index 72a9638dc..45da3b8f4 100644
+--- a/cli/src/runtime/embeddedAssets.bun.ts
++++ b/cli/src/runtime/embeddedAssets.bun.ts
+@@ -5,6 +5,7 @@ import ripgrepArchiveLicense from '../../tools/archives/ripgrep-LICENSE' assert
+ import difftasticLicense from '../../tools/licenses/difftastic-LICENSE' assert { type: 'file' };
+ import ripgrepLicense from '../../tools/licenses/ripgrep-LICENSE' assert { type: 'file' };
+ import tunwgLicense from '../../../shared/tools/tunwg/LICENSE' assert { type: 'file' };
++import hapiSessionControlSkill from '../../skills/hapi-session-control/SKILL.md' assert { type: 'file' };
+ 
+ export interface EmbeddedAsset {
+     relativePath: string;
+@@ -19,6 +20,7 @@ function asset(relativePath: string, sourcePath: string): EmbeddedAsset {
+ }
+ 
+ const COMMON_ASSETS: EmbeddedAsset[] = [
++    asset('skills/hapi-session-control/SKILL.md', hapiSessionControlSkill),
+     asset('tools/archives/difftastic-LICENSE', difftasticArchiveLicense),
+     asset('tools/archives/ripgrep-LICENSE', ripgrepArchiveLicense),
+     asset('tools/licenses/difftastic-LICENSE', difftasticLicense),
+diff --git a/cli/src/test/setup.ts b/cli/src/test/setup.ts
+index d1387ac64..aee375e52 100644
+--- a/cli/src/test/setup.ts
++++ b/cli/src/test/setup.ts
+@@ -24,6 +24,10 @@ try {
+ process.env.HAPI_API_URL = `http://127.0.0.1:${config.port}`
+ process.env.CLI_API_TOKEN = config.token
+ process.env.HAPI_HOME = config.tmpHome
++// Keep agent config writes (e.g. the bundled hapi-session-control skill) out of the real home.
++process.env.HOME = join(config.tmpHome, 'home')
++delete process.env.CLAUDE_CONFIG_DIR
++delete process.env.CODEX_HOME
+ process.env.HAPI_BUN_EXEC = config.bunExec
+ // The runner agent-availability preflight must see an installable Claude CLI
+ // even on machines (CI) without one; globalSetup provides a stub binary.
+diff --git a/cli/src/types/assetImports.d.ts b/cli/src/types/assetImports.d.ts
+index ed8032beb..f7f0923d9 100644
+--- a/cli/src/types/assetImports.d.ts
++++ b/cli/src/types/assetImports.d.ts
+@@ -8,6 +8,11 @@ declare module '*.tar.gz' {
+     export default path;
+ }
+ 
++declare module '*.md' {
++    const path: string;
++    export default path;
++}
++
+ declare module '*-LICENSE' {
+     const path: string;
+     export default path;
