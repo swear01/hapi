@@ -237,6 +237,7 @@ describe('parseLsofListeners', () => {
 describe('listLoopbackListeners', () => {
     it('parses ss output on linux', async () => {
         const listeners = await listLoopbackListeners({
+            platform: 'linux',
             execImpl: async (command, args) => {
                 expect(command).toBe('ss');
                 expect(args).toEqual(['-tln']);

@@ -171,6 +171,8 @@ describe('claudeCommand resume identity', () => {
         prepareSessionForLocalResumeMock.mockClear()
         claudeConfigDir = mkdtempSync(join(tmpdir(), 'hapi-claude-resume-'))
         process.env.CLAUDE_CONFIG_DIR = claudeConfigDir
+        // Running inside a HAPI session exports HAPI_INVOKED_CWD; pin it to the test directory.
+        vi.stubEnv('HAPI_INVOKED_CWD', directory)
         const projectDir = getProjectPath(directory)
         mkdirSync(projectDir, { recursive: true })
         writeFileSync(join(projectDir, `${claudeId}.jsonl`), `${JSON.stringify({ uuid: 'm1' })}\n`)
@@ -180,6 +182,7 @@ describe('claudeCommand resume identity', () => {
         if (originalClaudeConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR
         else process.env.CLAUDE_CONFIG_DIR = originalClaudeConfigDir
         rmSync(claudeConfigDir, { recursive: true, force: true })
+        vi.unstubAllEnvs()
     })
 
     it('refuses an explicit resume whose transcript is gone instead of starting a fresh conversation', async () => {
