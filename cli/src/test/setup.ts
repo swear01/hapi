@@ -24,7 +24,7 @@ try {
 process.env.HAPI_API_URL = `http://127.0.0.1:${config.port}`
 process.env.CLI_API_TOKEN = config.token
 process.env.HAPI_HOME = config.tmpHome
-// Keep agent config writes (e.g. the bundled hapi-session-control skill) out of the real home.
+// Keep agent config writes out of the real home.
 process.env.HOME = join(config.tmpHome, 'home')
 delete process.env.CLAUDE_CONFIG_DIR
 delete process.env.CODEX_HOME

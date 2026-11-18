@@ -74,10 +74,6 @@ function isTunwgReady(runtimeRoot: string): boolean {
     return existsSync(tunwgPath);
 }
 
-function isCanonicalSkillReady(runtimeRoot: string): boolean {
-    return existsSync(join(runtimeRoot, 'skills', 'hapi-session-control', 'SKILL.md'));
-}
-
 function ensureTunwgExecutable(runtimeRoot: string): void {
     if (platform() === 'win32') {
         return;
@@ -136,9 +132,7 @@ function unpackTools(runtimeRoot: string): void {
 }
 
 function runtimeAssetsReady(runtimeRoot: string): boolean {
-    return areToolsUnpacked(join(runtimeRoot, 'tools', 'unpacked'))
-        && isTunwgReady(runtimeRoot)
-        && isCanonicalSkillReady(runtimeRoot);
+    return areToolsUnpacked(join(runtimeRoot, 'tools', 'unpacked')) && isTunwgReady(runtimeRoot);
 }
 
 export async function ensureRuntimeAssets(): Promise<void> {
