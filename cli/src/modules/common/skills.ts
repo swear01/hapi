@@ -58,6 +58,12 @@ function getAgentConfigDir(flavor?: string): string {
         case 'dsh':
             // DSH resolves its harness home from $DSH_HOME, then ~/.dsh.
             return process.env.DSH_HOME || join(getHomeDirectory(), '.dsh');
+        case 'opencode':
+            return process.env.OPENCODE_CONFIG_DIR || join(getHomeDirectory(), '.config', 'opencode');
+        case 'agy':
+            return join(getHomeDirectory(), '.gemini', 'antigravity-cli');
+        case 'pi':
+            return join(getHomeDirectory(), '.pi', 'agent');
         default:
             return join(getHomeDirectory(), `.${normalizedFlavor}`);
     }
@@ -81,6 +87,11 @@ function getUserSkillsRoots(flavor?: string): string[] {
             break;
         case 'dsh':
             // Mirrors DSH's own skill-filesystem provider: $DSH_HOME/skills.
+        case 'cursor':
+        case 'opencode':
+        case 'kimi':
+        case 'agy':
+        case 'pi':
             roots.push(join(getAgentConfigDir(flavor), 'skills'));
             break;
     }
@@ -110,6 +121,12 @@ function getProjectSkillsRoots(directory: string, flavor?: string): string[] {
         case 'dsh':
             // Mirrors DSH's own skill-filesystem provider: <project>/.dsh/skills.
             roots.push(join(directory, '.dsh', 'skills'));
+            break;
+        case 'cursor':
+        case 'opencode':
+        case 'kimi':
+        case 'pi':
+            roots.push(join(directory, `.${normalizeFlavor(flavor)}`, 'skills'));
             break;
     }
     return roots;
