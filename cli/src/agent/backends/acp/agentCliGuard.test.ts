@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, utimesSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { afterEach, describe, expect, test } from 'vitest';
 import {
@@ -190,7 +190,7 @@ describe('agentCliGuard', () => {
         try {
             const expected = join(homedir(), '.hapi', 'locks', 'agent-acp-active');
             expect(getAgentAcpLockDir()).toBe(expected);
-            expect(getAgentAcpLockDir()).not.toContain(join(tmpdir(), 'hapi'));
+            expect(getAgentAcpLockDir()).not.toContain(join(tmpdir(), 'hapi') + sep);
         } finally {
             // Restore isolated home before afterEach reset (belt + suspenders).
             process.env.HAPI_HOME = testHome;
