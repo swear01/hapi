@@ -442,6 +442,7 @@ vi.mock('@/ui/logger', () => ({
 }));
 
 import { classifyCursorAcpLoadError, cursorAcpRemoteLauncher } from './cursorAcpRemoteLauncher';
+import { cursorTodosBySession } from './utils/cursorTodoSnapshot';
 import { CursorConversationHistory } from './cursorConversationHistory';
 import { createCursorAcpBackend } from './utils/cursorAcpBackend';
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
@@ -779,11 +780,50 @@ describe('cursorAcpRemoteLauncher', () => {
             session.queue.push('next prompt', { permissionMode: 'default' }, 'next');
             await expect(rewind({ cursorCommittedSessionId: 'wrong', messageLocalId })).rejects.toThrow('No matching');
             expect(harness.promptSends).toBe(0);
-            await expect(rewind({ cursorCommittedSessionId: 'loaded-acp-session', messageLocalId })).resolves.toMatchObject({ success: true });
+            const retained = [{ id: 'keep', content: 'Retained', priority: 'medium', status: 'completed' }];
+            await expect(rewind({ cursorCommittedSessionId: 'loaded-acp-session', cursorTodoSnapshot: retained, messageLocalId })).resolves.toMatchObject({ success: true });
+            expect(cursorTodosBySession.get(session.client)).toEqual({ revision: 'loaded-acp-session', items: retained });
             await vi.waitFor(() => expect(harness.promptSends).toBe(1));
             expect(session.onSessionFoundWithProtocol).toHaveBeenCalledWith('loaded-acp-session', 'acp');
             const candidate = vi.mocked(createCursorAcpBackend).mock.results.at(-1)!.value;
             expect(vi.mocked(candidate.prompt).mock.calls[0][0]).toBe('loaded-acp-session');
+        } finally {
+            await session.kill();
+            await running;
+            fork.mockRestore();
+        }
+    });
+
+    it('disposes only the matching uncommitted candidate and dispatches waiting input to the original', async () => {
+        const fork = vi.spyOn(CursorConversationHistory.prototype, 'fork').mockReturnValue('loaded-acp-session');
+        const session = makeSession(null, { keepQueueOpen: true });
+        const { handlers } = session.client.rpcHandlerManager as unknown as {
+            handlers: Map<string, (payload: unknown) => Promise<unknown>>
+        };
+        const running = cursorAcpRemoteLauncher(session);
+        try {
+            await vi.waitFor(() => expect(handlers.has(RPC_METHODS.RewindConversation)).toBe(true));
+            const rewind = handlers.get(RPC_METHODS.RewindConversation)!;
+            const source = vi.mocked(createCursorAcpBackend).mock.results.at(-1)!.value;
+            const messageLocalId = 'synthetic-turn';
+            const prepare = { cursorSourceSessionId: 'new-acp-session', messageLocalId };
+            const abort = { cursorAbortOperationId: 'first', messageLocalId };
+            await rewind({ ...prepare, cursorPrepareOperationId: 'first' });
+            const candidate = vi.mocked(createCursorAcpBackend).mock.results.at(-1)!.value;
+            await expect(rewind({ ...abort, cursorAbortOperationId: 'unrelated' })).rejects.toThrow();
+            expect(candidate.disconnect).not.toHaveBeenCalled();
+            await expect(rewind(abort)).resolves.toMatchObject({ success: true });
+            expect(candidate.disconnect).toHaveBeenCalledOnce();
+            expect(source.disconnect).not.toHaveBeenCalled();
+            expect(vi.mocked(source.setSessionInfoUpdateListener).mock.calls.at(-1)?.[0]).toEqual(expect.any(Function));
+            await expect(rewind(abort)).resolves.toMatchObject({ success: true });
+            await rewind({ ...prepare, cursorPrepareOperationId: 'second' });
+            await expect(rewind(abort)).rejects.toThrow();
+            session.queue.push('next prompt', { permissionMode: 'default' }, 'next');
+            await rewind({ ...abort, cursorAbortOperationId: 'second' });
+            await vi.waitFor(() => expect(harness.promptSends).toBe(1));
+            expect(vi.mocked(source.prompt).mock.calls.at(-1)?.[0]).toBe('new-acp-session');
+            expect(session.onSessionFoundWithProtocol).not.toHaveBeenCalledWith('loaded-acp-session', 'acp');
         } finally {
             await session.kill();
             await running;

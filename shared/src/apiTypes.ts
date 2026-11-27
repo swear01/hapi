@@ -957,6 +957,15 @@ export const OpenCodeRewindReportSchema = z.object({
 })
 export type OpenCodeRewindReport = z.infer<typeof OpenCodeRewindReportSchema>
 
+export type CursorRewindRpcParams = {
+    messageLocalId: string
+    cursorSourceSessionId?: string
+    cursorPrepareOperationId?: string
+    cursorAbortOperationId?: string
+    cursorCommittedSessionId?: string
+    cursorTodoSnapshot?: import('./schemas').CursorTodoSnapshot
+}
+
 export type RewindConversationRpcResult = {
     success: true
     /** Exact ACP-loaded Cursor copy, prepared before the Hub commits a rewind. */

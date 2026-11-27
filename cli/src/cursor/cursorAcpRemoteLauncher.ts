@@ -1,5 +1,7 @@
+import type { CursorRewindRpcParams } from '@hapi/protocol/apiTypes';
 import React from 'react';
 import { settleAcpLauncherShutdown } from '@/modules/common/remote/settleAcpLauncherShutdown';
+import { cursorTodosBySession } from './utils/cursorTodoSnapshot';
 import { restoreCursorRewindSettings } from './utils/restoreCursorRewindSettings';
 import { CursorConversationHistory, loadCursorHistoryStore } from './cursorConversationHistory';
 import { randomUUID } from 'node:crypto';
@@ -173,7 +175,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     private history: CursorConversationHistory | null = null;
     private processingBatch = false;
     private historyGate: ReturnType<typeof Promise.withResolvers<void>> | null = null;
-    private preparedRewind: { id: string; localId: string; backend: AcpSdkBackend; mode: PermissionMode } | null = null;
+    private preparedRewind: { operationId?: string; id: string; localId: string; backend: AcpSdkBackend; mode: PermissionMode } | null = null;
     /**
      * Set in handleAbort before session/cancel. Cursor often rejects the
      * in-flight prompt as `Error: T: [canceled] Operation aborted`, which the
@@ -612,9 +614,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             if (payload?.cursorSourceSessionId !== sourceId) throw new Error('Update the Hub to fork Cursor sessions');
             return { nativeSessionId: this.history!.fork(sourceId, payload.messageLocalId) };
         }));
-        session.client.rpcHandlerManager.registerHandler(RPC_METHODS.RewindConversation, (payload: {
-            messageLocalId: string; cursorSourceSessionId?: string; cursorCommittedSessionId?: string
-        }) => this.rewindConversation(payload));
+        session.client.rpcHandlerManager.registerHandler(RPC_METHODS.RewindConversation, (payload: CursorRewindRpcParams) => this.rewindConversation(payload));
 
         session.client.emitSessionReady();
 
@@ -1590,12 +1590,29 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
         return this.acpSessionId;
     }
 
-    private async rewindConversation(params: {
-        messageLocalId: string; cursorSourceSessionId?: string; cursorCommittedSessionId?: string
-    }) {
+    private async rewindConversation(params: CursorRewindRpcParams) {
         return this.sessionConfigLock.inLock(async () => {
             const { messageLocalId, cursorCommittedSessionId } = params;
             if (!messageLocalId || this.shouldExit || this.sessionTeardownStarted) throw new Error('Cursor rewind unavailable');
+            if (params.cursorAbortOperationId) {
+                const prepared = this.preparedRewind;
+                if (prepared) {
+                    if (prepared.operationId !== params.cursorAbortOperationId || prepared.localId !== messageLocalId) {
+                        throw new Error('No matching prepared Cursor rewind to cancel');
+                    }
+                    try {
+                        await this.disconnectBackend(prepared.backend);
+                    } finally {
+                        if (this.backend && !this.sessionTeardownStarted) {
+                            registerAcpSessionTitleSync(this.backend, this.session.client, this.titleSync);
+                        }
+                        this.preparedRewind = null;
+                        this.historyGate?.resolve();
+                        this.historyGate = null;
+                    }
+                }
+                return { success: true };
+            }
             if (cursorCommittedSessionId) {
                 const prepared = this.preparedRewind;
                 if (!prepared || prepared.localId !== messageLocalId || prepared.id !== cursorCommittedSessionId) {
@@ -1605,6 +1622,11 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 // the transcript. Until this callback succeeds, keep input fenced.
                 await this.disconnectBackend();
                 if (this.shouldExit) throw new Error('Cursor session ended during rewind');
+                cursorTodosBySession.set(this.session.client, { revision: prepared.id, items: params.cursorTodoSnapshot ?? [] });
+                if (!params.cursorTodoSnapshot) {
+                    // Older Hubs only send the new binding. Discard their stale snapshot on cold resume too.
+                    this.session.client.updateAgentState(state => ({ ...state, cursorTodoRevision: prepared.id, cursorTodoSnapshot: [] }));
+                }
                 this.wireReplacementBackend(prepared.backend, () => {});
                 this.activateLoadedBackend(prepared.backend, prepared.id, prepared.mode);
                 this.session.onSessionFoundWithProtocol(prepared.id, 'acp');
@@ -1648,7 +1670,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 if (this.shouldExit || this.sessionTeardownStarted) throw new Error('Cursor session ended during rewind');
                 // No more source-side title rows after the Hub begins its cut.
                 this.backend?.setSessionInfoUpdateListener(null);
-                this.preparedRewind = { id, localId: messageLocalId, backend: candidate, mode };
+                this.preparedRewind = { id, operationId: params.cursorPrepareOperationId, localId: messageLocalId, backend: candidate, mode };
                 return { success: true, nativeSessionId: id, truncateFromLocalId: messageLocalId, messages: [] };
             } catch (error) {
                 try {

@@ -10,7 +10,7 @@ import { SyncEngine } from './syncEngine'
 
 const previewSchema = z.object({ boundary: ForkBoundarySchema })
 
-function fixture() {
+function fixture(plans?: { retained: unknown[]; discarded: unknown[] }) {
     const store = new Store(':memory:')
     const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
     const source = engine.getOrCreateSession('cursor-history', {
@@ -24,6 +24,10 @@ function fixture() {
     for (const localId of ['first', 'second']) {
         store.messages.addMessage(source.id, { role: 'user', content: localId }, localId)
         store.messages.markMessagesInvoked(source.id, [localId], Date.now())
+        if (plans) {
+            const entries = localId === 'first' ? plans.retained : plans.discarded
+            store.messages.addMessage(source.id, { role: 'agent', content: { type: 'codex', data: { type: 'plan', entries } } })
+        }
     }
     const app = new Hono<WebAppEnv>()
     app.use('*', async (c, next) => {
@@ -46,6 +50,23 @@ function fixture() {
 describe('Cursor native history', () => {
     let f: ReturnType<typeof fixture>
     afterEach(() => f.engine.stop())
+
+    it.each([false, true])('restores only retained todo entries for activation and cold resume (empty: %s)', async empty => {
+        const retained: import('@hapi/protocol/schemas').CursorTodoSnapshot = empty ? [] : [{ id: 'keep', content: 'Retained', priority: 'medium', status: 'cancelled' }]
+        const discarded = [{ id: 'later', content: 'Discarded', priority: 'medium', status: 'completed' }]
+        f = fixture({ retained, discarded })
+        const saved = f.store.sessions.getSession(f.id)!
+        f.store.sessions.updateSessionAgentState(f.id, { controlledByUser: true, cursorTodoSnapshot: discarded }, saved.agentStateVersion, 'default')
+        f.rpc.rewindConversation = async (_id, params) => {
+            if (!params.cursorCommittedSessionId) return { success: true, nativeSessionId: 'copy', truncateFromLocalId: 'second' }
+            expect(params.cursorTodoSnapshot).toEqual(retained)
+            return { success: true, truncateFromLocalId: 'second' }
+        }
+        expect(await f.rewind()).toEqual({ type: 'success' })
+        expect(f.store.sessions.getSession(f.id)?.agentState).toMatchObject({
+            controlledByUser: true, cursorTodoRevision: 'copy', cursorTodoSnapshot: retained
+        })
+    })
 
     it('spawns an ACP child with the exclusive transcript prefix and fresh history points', async () => {
         f = fixture()
@@ -105,6 +126,55 @@ describe('Cursor native history', () => {
         expect((await f.rewind()).type).toBe('error')
         expect(f.rows().slice(0, 2)).toEqual(['first', 'second'])
         expect(f.engine.getSession(f.id)?.metadata?.cursorSessionId).toBe('original')
+    })
+
+    it.each(['rollback', 'lost prepare reply'])('releases the matching prepared rewind after %s and permits a retry', async failure => {
+        f = fixture()
+        const calls: string[] = []
+        let preparedOperation: string | undefined
+        let firstAttempt = true
+        f.rpc.rewindConversation = async (_, params) => {
+            if (params.cursorAbortOperationId) {
+                expect(preparedOperation).toBe(params.cursorAbortOperationId)
+                expect(f.rows()).toEqual(['first', 'second'])
+                expect(f.store.sessions.getSession(f.id)?.metadata).toMatchObject({ cursorSessionId: 'original' })
+                calls.push('abort')
+                preparedOperation = undefined
+            } else if (params.cursorCommittedSessionId) {
+                calls.push('activate')
+            } else {
+                expect(preparedOperation).toBeUndefined()
+                expect(params.cursorPrepareOperationId).toEqual(expect.any(String))
+                preparedOperation = params.cursorPrepareOperationId
+                calls.push('prepare')
+                if (failure === 'lost prepare reply' && firstAttempt) throw new Error('lost reply')
+            }
+            return { success: true, truncateFromLocalId: 'second', nativeSessionId: 'copy' }
+        }
+        const cut = f.store.messages.truncateMessagesFromLocalId.bind(f.store.messages)
+        f.store.messages.truncateMessagesFromLocalId = (...args) => {
+            if (firstAttempt) throw new Error('synthetic failed history cut')
+            return cut(...args)
+        }
+        expect(await f.rewind()).toMatchObject({ type: 'error', message: expect.stringContaining(failure === 'rollback' ? 'synthetic failed history cut' : 'lost reply') })
+        expect(calls).toEqual(['prepare', 'abort'])
+        firstAttempt = false
+        expect(await f.rewind()).toEqual({ type: 'success' })
+        expect(calls).toEqual(['prepare', 'abort', 'prepare', 'activate'])
+        expect(f.rows()).toEqual(['first'])
+    })
+
+    it('never releases a prepared runner when the database binding changed unexpectedly', async () => {
+        f = fixture()
+        const calls: string[] = []
+        f.rpc.rewindConversation = async (_, params) => {
+            calls.push(params.cursorAbortOperationId ? 'abort' : 'prepare')
+            const src = f.engine.getSession(f.id)!
+            f.store.sessions.updateSessionMetadata(f.id, { ...src.metadata, cursorSessionId: 'another' }, src.metadataVersion, 'default')
+            throw new Error('lost reply')
+        }
+        expect((await f.rewind()).type).toBe('error')
+        expect(calls).toEqual(['prepare'])
     })
 
     it('preserves the committed cut when activation loses its reply', async () => {
