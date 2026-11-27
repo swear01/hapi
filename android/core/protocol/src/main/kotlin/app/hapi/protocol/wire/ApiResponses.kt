@@ -396,6 +396,7 @@ data class TranscriptionProviderInfo(
 @Serializable
 data class HubSettingsResponse(
     val translateInputByDefault: Boolean = false,
+    val autoBridgeTransientModelErrors: Boolean? = null,
 )
 
 /** `inputTranslation` in `GET /api/features` — true when the hub has a translation provider. */
