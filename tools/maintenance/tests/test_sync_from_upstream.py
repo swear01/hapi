@@ -230,6 +230,31 @@ class SyncFromUpstreamTest(unittest.TestCase):
         self.assertNotEqual(0, result.returncode)
         self.assertIn('REPLAY_TREE_MISMATCH', result.stderr)
 
+    def test_inherits_release_records_from_pinned_origin(self):
+        record = self.seed / 'tools/maintenance/releases/v0.1.0.1/audit.md'
+        record.parent.mkdir(parents=True)
+        record.write_text('Archived audit\n')
+        run('git', '-C', str(self.seed), 'add', str(record))
+        run('git', '-C', str(self.seed), 'commit', '-m', 'archive release record')
+        origin = run('git', '-C', str(self.seed), 'rev-parse', 'HEAD').stdout.strip()
+        tree = run('git', '-C', str(self.seed), 'rev-parse', 'HEAD^{tree}').stdout.strip()
+        run('git', '-C', str(self.seed), 'push', 'origin', 'HEAD:main')
+        self.manifest.write_text(
+            f'# previous_origin_main={origin}\n'
+            f'# expected_source_tree={tree}\n'
+            '# previous_release_records=inherit\n'
+            f'0001.patch\tcarry\ttest\t{self.fork_commit}\n'
+            f'-\tdrop\tinherited-record\t{origin}\n'
+        )
+
+        result = run(
+            str(SCRIPT), '--repo', str(self.repo), '--patch-dir', str(self.patch_dir),
+            '--manifest', str(self.manifest), '--skip-tests',
+        )
+
+        self.assertIn(f'REPLAY_TREE_MATCHES={tree}', result.stdout)
+        self.assertIn('TREE_MATCHES_ORIGIN_MAIN', result.stdout)
+
     def test_rejects_unrecorded_fork_commit(self):
         (self.seed / 'unknown.txt').write_text('unknown\n')
         run('git', '-C', str(self.seed), 'add', 'unknown.txt')

@@ -86,6 +86,12 @@ self-referential hash. Root `.gitattributes` disables
 whitespace diagnostics for `*.patch` artifacts because unified-diff context
 markers are significant; source files remain checked.
 
+Set `# previous_release_records=inherit` when carrying forward the previous
+release records unchanged. Leave `tools/maintenance/releases/` out of the
+generated patches. Rehearsal restores the archived records from the pinned
+`previous_origin_main` before validating the source tree, which avoids
+embedding the old patch queues recursively.
+
 Release-manifest detection resolves physical paths so macOS `/var` and
 `/private/var` aliases cannot bypass audit or header-pin enforcement.
 

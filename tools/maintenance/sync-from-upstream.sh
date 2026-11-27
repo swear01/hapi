@@ -89,6 +89,7 @@ old_origin_main=$(git -C "$repo" rev-parse origin/main)
 manifest_upstream_sha=$(sed -n 's/^# upstream_sha=//p' "$manifest")
 manifest_origin_sha=$(sed -n 's/^# previous_origin_main=//p' "$manifest")
 expected_source_tree=$(sed -n 's/^# expected_source_tree=//p' "$manifest")
+inherit_release_records=$(sed -n 's/^# previous_release_records=//p' "$manifest")
 if [ -n "$manifest_upstream_sha" ] && [ "$manifest_upstream_sha" != "$upstream_sha" ]; then
     echo "MANIFEST_UPSTREAM_SHA_MISMATCH expected=$manifest_upstream_sha actual=$upstream_sha" >&2
     exit 4
@@ -101,6 +102,12 @@ if [ -n "$is_release_manifest" ]; then
     [ -n "$manifest_upstream_sha" ] || { echo "MISSING_MANIFEST_PIN: upstream_sha" >&2; exit 4; }
     [ -n "$manifest_origin_sha" ] || { echo "MISSING_MANIFEST_PIN: previous_origin_main" >&2; exit 4; }
     [ -n "$expected_source_tree" ] || { echo "MISSING_MANIFEST_PIN: expected_source_tree" >&2; exit 4; }
+fi
+if [ -n "$inherit_release_records" ]; then
+    if [ "$inherit_release_records" != inherit ] || [ -z "$manifest_origin_sha" ]; then
+        echo "INVALID_PREVIOUS_RELEASE_RECORDS: expected inherit with a pinned previous_origin_main" >&2
+        exit 4
+    fi
 fi
 
 allowed_file=$(mktemp)
@@ -338,6 +345,14 @@ while IFS=$'\t' read -r patch state upstream_ref source_commits; do
         *) echo "Invalid manifest state for $patch: $state" >&2; exit 6 ;;
     esac
 done < "$manifest"
+
+if [ "$inherit_release_records" = inherit ]; then
+    git -C "$worktree" restore --source="$old_origin_main" --staged --worktree -- tools/maintenance/releases
+    if ! git -C "$worktree" diff --cached --quiet; then
+        git -C "$worktree" -c user.name=swear01 -c user.email=stanley.yellow1@gmail.com \
+            commit -m "Retain the pinned previous release records" >/dev/null
+    fi
+fi
 
 if [ -n "$expected_source_tree" ]; then
     actual_source_tree=$(git -C "$worktree" rev-parse 'HEAD^{tree}')
