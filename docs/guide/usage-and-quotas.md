@@ -10,7 +10,7 @@ HAPI answers three different questions about how much your agents are doing:
 |----------|-------|-------|
 | When were agents working, and for how long? | `hapi usage` (CLI) | Your namespace |
 | How many tokens did they process? | **Settings → Token usage** (web), **Settings → Usage** (iOS / Android) | Hub owner only |
-| How much of my plan's rate limit is left? | **Settings → Token usage → CLI account quotas** and the quota chip next to the composer (web) | Hub owner for Settings; any session for the chip |
+| How much of my plan's rate limit is left? | The [CLI account quotas](#cli-account-quotas) section in Settings, or the quota chip next to the web composer | Hub owner for Settings; any session for the chip |
 
 ## Agent activity: `hapi usage`
 
@@ -72,6 +72,8 @@ The **CLI account quotas** section at the top of **Settings → Token usage** as
 
 **Refresh quotas** forces a fresh read on every machine. Otherwise the runner caches results for about a minute, and the page does not refetch on its own.
 
+On Android, open **Settings → Usage → CLI account quotas** and tap **Refresh** for a fresh reading.
+
 ### Which agents report quotas
 
 | Agent | Source | Notes |
@@ -93,8 +95,6 @@ In a web chat, a compact chip next to the context meter shows the current agent'
 - It refreshes every 2 minutes and hides itself if a read fails rather than show stale numbers.
 - Claude Code and Codex show account-wide 5-hour and weekly windows when reported. Cursor shows the included pool for its current billing cycle. Antigravity's per-model-group windows stay in Settings.
 - It needs a runner with quota support on the session's machine.
-
-The iOS and Android apps do not show account quotas yet.
 
 ## Related
 
