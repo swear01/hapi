@@ -176,6 +176,7 @@ export class CursorExtensionAdapter {
                         createdAt: requestEntry?.createdAt ?? Date.now(),
                         completedAt: Date.now(),
                         status,
+                        ...(pending.tool === 'CursorAskQuestion' && decision === 'denied' ? { reason: 'Skipped' } : {}),
                         ...(answers ? { answers } : {}),
                         decision
                     }
