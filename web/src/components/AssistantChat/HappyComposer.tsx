@@ -205,6 +205,7 @@ export function useRichComposerBridge(
 }
 
 const defaultSuggestionHandler = async (): Promise<Suggestion[]> => []
+const TEXTAREA_PASTE_HISTORY_LIMIT = 20
 
 /** True when composer text/attachment ids match a pre-park snapshot. */
 export function composerParkSnapshotUnchanged(
@@ -548,14 +549,14 @@ export function HappyComposer(props: {
 
     const textareaRef = useRef<HTMLTextAreaElement>(null)
     const textareaPasteHistory = useRef<{
-        before: TextInputState
-        after: TextInputState
-        applied: boolean
+        edits: { before: TextInputState; after: TextInputState }[]
+        position: number
     } | null>(null)
 
     useEffect(() => {
         const history = textareaPasteHistory.current
-        if (history && composerText !== (history.applied ? history.after.text : history.before.text)) {
+        const current = history?.edits[history.position - 1]?.after ?? history?.edits[0]?.before
+        if (current && composerText !== current.text) {
             textareaPasteHistory.current = null
         }
     }, [composerText])
@@ -1308,11 +1309,11 @@ export function HappyComposer(props: {
             const shortcut = key.toLowerCase()
             const undo = shortcut === 'z' && !e.shiftKey
             const redo = (shortcut === 'z' && e.shiftKey) || (shortcut === 'y' && !e.shiftKey)
-            const from = history.applied ? history.after : history.before
-            if ((history.applied ? undo : redo) && input.value === from.text) {
+            const edit = undo ? history.edits[history.position - 1] : redo ? history.edits[history.position] : undefined
+            if (edit && input.value === (undo ? edit.after.text : edit.before.text)) {
                 e.preventDefault()
-                history.applied = redo
-                applyTextareaEdit(input, redo ? history.after : history.before)
+                history.position += undo ? -1 : 1
+                applyTextareaEdit(input, undo ? edit.before : edit.after)
                 return
             }
         }
@@ -1531,11 +1532,16 @@ export function HappyComposer(props: {
                     text: currentText.slice(0, start) + pastedText + currentText.slice(end),
                     selection: { start: cursor, end: cursor },
                 }
-                textareaPasteHistory.current = {
+                const history = textareaPasteHistory.current
+                const edits = history?.edits.slice(0, history.position) ?? []
+                if (edits.at(-1)?.after.text !== currentText) edits.length = 0
+                edits.push({
                     before: { text: currentText, selection: { start, end } },
                     after,
-                    applied: true,
-                }
+                })
+                // A single paste can be large, so retain only the most recent edits.
+                if (edits.length > TEXTAREA_PASTE_HISTORY_LIMIT) edits.shift()
+                textareaPasteHistory.current = { edits, position: edits.length }
                 applyTextareaEdit(input, after)
             })
             if (handled) e.preventDefault()

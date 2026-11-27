@@ -1762,7 +1762,8 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
 
     private wireAvailableCommands(backend: AcpSdkBackend, sessionId: string): void {
         const session = this.session;
-        session.availableSlashCommands ??= new Set(session.client.getMetadata()?.slashCommands);
+        const cachedCommands = session.client.getMetadata()?.slashCommands;
+        if (cachedCommands) session.availableSlashCommands ??= new Set(cachedCommands);
         const publish = (reported: boolean) => {
             if (this.backend !== backend || this.sessionTeardownStarted) return;
             const commands = new Set(backend.getAvailableCommands(sessionId)

@@ -15,6 +15,9 @@ try {
     const uuid = 'test-session'
     const workspacePath = join(home, 'workspace')
     const mode = process.argv[1]
+    delete process.env.CURSOR_CONFIG_DIR
+    delete process.env.XDG_CONFIG_HOME
+    const configured = mode.startsWith('config-root-')
     const requestedPath = mode === 'relative' ? 'workspace' : workspacePath
     const drawer = createHash('md5').update(requestedPath).digest('hex')
     const legacy = join(home, '.cursor', 'chats', drawer, uuid)
@@ -27,6 +30,18 @@ try {
     if (mode === 'retry-wal-source') db.exec('PRAGMA journal_mode=WAL')
     db.exec("CREATE TABLE blobs (data TEXT); INSERT INTO blobs VALUES ('synthetic history')")
     db.close()
+    if (configured) {
+        const alternate = join(home, 'alternate')
+        const alternateRoot = mode === 'config-root-cursor' ? alternate : join(alternate, 'cursor')
+        if (mode === 'config-root-cursor') process.env.CURSOR_CONFIG_DIR = alternate
+        else process.env.XDG_CONFIG_HOME = alternate
+        if (mode === 'config-root-default') process.env.CURSOR_CONFIG_DIR = join(home, '.cursor')
+        const otherStore = join(alternateRoot, 'acp-sessions', uuid)
+        mkdirSync(otherStore, { recursive: true })
+        const other = new Database(join(otherStore, 'store.db'), { create: true })
+        other.exec("CREATE TABLE blobs (data TEXT); INSERT INTO blobs VALUES ('different conversation')")
+        other.close()
+    }
     const original = readFileSync(source)
     if (mode === 'symlink') {
         renameSync(source, join(home, 'unrelated.db'))
@@ -48,14 +63,25 @@ try {
             content: { type: 'text', text: mode === 'empty' ? ' ' : 'synthetic history' }
         }
     }
+    let probedText
     const prepare = () => prepareCursorImportOnDisk({
         uuid, home, workspacePath: mode === 'drawer' ? home : requestedPath,
         knownMessageCount: mode === 'shrunken' ? 1000 : 10,
         deps: {
             tmpDir: () => home,
-            createProbe: () => ({
+            createProbe: (env) => ({
                 start() {}, async stop() {}, async initialize() { return { ok: true } },
-                async loadSession() { return { response: { ok: true } } },
+                async loadSession() {
+                    if (configured) {
+                        const root = env.CURSOR_CONFIG_DIR
+                            || (env.XDG_CONFIG_HOME ? join(env.XDG_CONFIG_HOME, 'cursor') : join(env.HOME, '.cursor'))
+                        const probeDb = new Database(join(root, 'acp-sessions', uuid, 'store.db'), { readonly: true })
+                        try { probedText = probeDb.query('SELECT data FROM blobs').get().data }
+                        finally { probeDb.close() }
+                        params.update.content.text = probedText
+                    }
+                    return { response: { ok: true } }
+                },
                 clearNotifications() {},
                 getNotifications() { return [{ method: 'session/update', params }] }
             })
@@ -92,7 +118,7 @@ try {
     console.log(JSON.stringify({
         result, originalPreserved: original.equals(readFileSync(source)),
         copyMatches: placed?.equals(original) ?? false, existingPreserved: placed?.toString() === 'unrelated',
-        destinationExists: existsSync(destination), retry, retryPreserved
+        destinationExists: existsSync(destination), probedText, retry, retryPreserved
     }))
 } finally {
     rmSync(home, { recursive: true, force: true })
@@ -116,6 +142,24 @@ describe('legacy resume on the owning Cursor runner', () => {
     it.each(['drawer', 'relative', 'symlink', 'symlink-drawer', 'empty', 'config', 'wrong-replay-id', 'shrunken'])('refuses %s', (mode) => {
         expect(run(mode)).toMatchObject({
             result: { success: false }, originalPreserved: true, destinationExists: false
+        })
+    })
+
+    it.each(['config-root-cursor', 'config-root-xdg'])(
+        'refuses to verify a different conversation in a configured Cursor root (%s)',
+        (mode) => {
+            const actual = run(mode)
+            expect(actual).toMatchObject({
+                result: { success: false }, originalPreserved: true, destinationExists: false
+            })
+            expect(actual.probedText).toBeUndefined()
+        }
+    )
+
+    it('probes only the isolated copy when the configured Cursor root is the standard path', () => {
+        expect(run('config-root-default')).toMatchObject({
+            result: { success: true, verifiedLegacyCopy: true },
+            originalPreserved: true, copyMatches: true, probedText: 'synthetic history'
         })
     })
 

@@ -1,0 +1,49 @@
+From 7b3e2697736d3d187317f1aa4fcd49e13a7dc45c Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 28 Nov 2026 06:27:20 +0800
+Subject: [PATCH] Preserve rejected permission response details through
+ Cloudflare
+
+---
+ hub/src/web/routes/permissions.test.ts | 2 +-
+ hub/src/web/routes/permissions.ts      | 4 ++--
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/hub/src/web/routes/permissions.test.ts b/hub/src/web/routes/permissions.test.ts
+index 9f925c2e7..728ef32fa 100644
+--- a/hub/src/web/routes/permissions.test.ts
++++ b/hub/src/web/routes/permissions.test.ts
+@@ -69,7 +69,7 @@ describe('permissions routes (tiann/hapi#1735)', () => {
+             method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({})
+         })
+         const failure = await send()
+-        expect(failure.status).toBe(502)
++        expect(failure.status).toBe(500)
+         expect(await failure.json()).toEqual({ error: reason })
+         rejected = false
+         expect((await send()).status).toBe(200)
+diff --git a/hub/src/web/routes/permissions.ts b/hub/src/web/routes/permissions.ts
+index b6632f88a..efad6ddcb 100644
+--- a/hub/src/web/routes/permissions.ts
++++ b/hub/src/web/routes/permissions.ts
+@@ -72,7 +72,7 @@ export function createPermissionsRoutes(getSyncEngine: () => SyncEngine | null):
+                 return c.json({ error: error.message }, 409)
+             }
+             if (error instanceof PermissionResponseRejectedError) {
+-                return c.json({ error: error.message }, 502)
++                return c.json({ error: error.message }, 500)
+             }
+             throw error
+         }
+@@ -111,7 +111,7 @@ export function createPermissionsRoutes(getSyncEngine: () => SyncEngine | null):
+                 return c.json({ error: error.message }, 409)
+             }
+             if (error instanceof PermissionResponseRejectedError) {
+-                return c.json({ error: error.message }, 502)
++                return c.json({ error: error.message }, 500)
+             }
+             throw error
+         }
+-- 
+2.54.0 (Apple Git-157)
+

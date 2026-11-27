@@ -1,0 +1,171 @@
+From ab87dbac186716cbbad5ce6b4b8589f3f626d45d Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 28 Nov 2026 06:32:20 +0800
+Subject: [PATCH] Isolate Cursor legacy resume verification from configured
+ stores
+
+---
+ .../common/cursorImportSessions.test.ts       | 50 +++++++++++++++++--
+ .../modules/common/cursorImportSessions.ts    | 17 ++++++-
+ docs/guide/agents.md                          |  2 +-
+ 3 files changed, 63 insertions(+), 6 deletions(-)
+
+diff --git a/cli/src/modules/common/cursorImportSessions.test.ts b/cli/src/modules/common/cursorImportSessions.test.ts
+index e383c90fa..df551e9f2 100644
+--- a/cli/src/modules/common/cursorImportSessions.test.ts
++++ b/cli/src/modules/common/cursorImportSessions.test.ts
+@@ -15,6 +15,9 @@ try {
+     const uuid = 'test-session'
+     const workspacePath = join(home, 'workspace')
+     const mode = process.argv[1]
++    delete process.env.CURSOR_CONFIG_DIR
++    delete process.env.XDG_CONFIG_HOME
++    const configured = mode.startsWith('config-root-')
+     const requestedPath = mode === 'relative' ? 'workspace' : workspacePath
+     const drawer = createHash('md5').update(requestedPath).digest('hex')
+     const legacy = join(home, '.cursor', 'chats', drawer, uuid)
+@@ -27,6 +30,18 @@ try {
+     if (mode === 'retry-wal-source') db.exec('PRAGMA journal_mode=WAL')
+     db.exec("CREATE TABLE blobs (data TEXT); INSERT INTO blobs VALUES ('synthetic history')")
+     db.close()
++    if (configured) {
++        const alternate = join(home, 'alternate')
++        const alternateRoot = mode === 'config-root-cursor' ? alternate : join(alternate, 'cursor')
++        if (mode === 'config-root-cursor') process.env.CURSOR_CONFIG_DIR = alternate
++        else process.env.XDG_CONFIG_HOME = alternate
++        if (mode === 'config-root-default') process.env.CURSOR_CONFIG_DIR = join(home, '.cursor')
++        const otherStore = join(alternateRoot, 'acp-sessions', uuid)
++        mkdirSync(otherStore, { recursive: true })
++        const other = new Database(join(otherStore, 'store.db'), { create: true })
++        other.exec("CREATE TABLE blobs (data TEXT); INSERT INTO blobs VALUES ('different conversation')")
++        other.close()
++    }
+     const original = readFileSync(source)
+     if (mode === 'symlink') {
+         renameSync(source, join(home, 'unrelated.db'))
+@@ -48,14 +63,25 @@ try {
+             content: { type: 'text', text: mode === 'empty' ? ' ' : 'synthetic history' }
+         }
+     }
++    let probedText
+     const prepare = () => prepareCursorImportOnDisk({
+         uuid, home, workspacePath: mode === 'drawer' ? home : requestedPath,
+         knownMessageCount: mode === 'shrunken' ? 1000 : 10,
+         deps: {
+             tmpDir: () => home,
+-            createProbe: () => ({
++            createProbe: (env) => ({
+                 start() {}, async stop() {}, async initialize() { return { ok: true } },
+-                async loadSession() { return { response: { ok: true } } },
++                async loadSession() {
++                    if (configured) {
++                        const root = env.CURSOR_CONFIG_DIR
++                            || (env.XDG_CONFIG_HOME ? join(env.XDG_CONFIG_HOME, 'cursor') : join(env.HOME, '.cursor'))
++                        const probeDb = new Database(join(root, 'acp-sessions', uuid, 'store.db'), { readonly: true })
++                        try { probedText = probeDb.query('SELECT data FROM blobs').get().data }
++                        finally { probeDb.close() }
++                        params.update.content.text = probedText
++                    }
++                    return { response: { ok: true } }
++                },
+                 clearNotifications() {},
+                 getNotifications() { return [{ method: 'session/update', params }] }
+             })
+@@ -92,7 +118,7 @@ try {
+     console.log(JSON.stringify({
+         result, originalPreserved: original.equals(readFileSync(source)),
+         copyMatches: placed?.equals(original) ?? false, existingPreserved: placed?.toString() === 'unrelated',
+-        destinationExists: existsSync(destination), retry, retryPreserved
++        destinationExists: existsSync(destination), probedText, retry, retryPreserved
+     }))
+ } finally {
+     rmSync(home, { recursive: true, force: true })
+@@ -119,6 +145,24 @@ describe('legacy resume on the owning Cursor runner', () => {
+         })
+     })
+ 
++    it.each(['config-root-cursor', 'config-root-xdg'])(
++        'refuses to verify a different conversation in a configured Cursor root (%s)',
++        (mode) => {
++            const actual = run(mode)
++            expect(actual).toMatchObject({
++                result: { success: false }, originalPreserved: true, destinationExists: false
++            })
++            expect(actual.probedText).toBeUndefined()
++        }
++    )
++
++    it('probes only the isolated copy when the configured Cursor root is the standard path', () => {
++        expect(run('config-root-default')).toMatchObject({
++            result: { success: true, verifiedLegacyCopy: true },
++            originalPreserved: true, copyMatches: true, probedText: 'synthetic history'
++        })
++    })
++
+     it('refuses to select or overwrite an existing destination', () => {
+         expect(run('existing')).toMatchObject({
+             result: { success: false, reason: 'target_already_exists' },
+diff --git a/cli/src/modules/common/cursorImportSessions.ts b/cli/src/modules/common/cursorImportSessions.ts
+index 58a8dfcbe..30773a8ce 100644
+--- a/cli/src/modules/common/cursorImportSessions.ts
++++ b/cli/src/modules/common/cursorImportSessions.ts
+@@ -21,7 +21,7 @@ import {
+     writeFileSync
+ } from 'node:fs'
+ import { hostname, tmpdir } from 'node:os'
+-import { dirname, isAbsolute, join, relative } from 'node:path'
++import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+ 
+ import type { PrepareCursorImportRpcResponse } from '@hapi/protocol/apiTypes'
+ import { AcpVerifyProbe, type AcpProbeOptions } from '@/cursor/acpVerifyProbe'
+@@ -440,6 +440,8 @@ async function verifyCursorStore(args: {
+             ...process.env,
+             HOME: tmpRoot,
+             HAPI_HOME: tmpRoot,
++            // Cursor config overrides take precedence over HOME.
++            ...(args.knownMessageCount !== undefined ? { CURSOR_CONFIG_DIR: fakeCursor } : {}),
+             NO_COLOR: '1'
+         }
+         if (process.platform === 'win32') {
+@@ -621,13 +623,24 @@ export async function prepareCursorImportOnDisk(options: {
+         return failure('missing_on_disk_store', `cursor uuid '${options.uuid}' fails basename validation`)
+     }
+ 
+-    const acpSessionDir = join(options.home, '.cursor', 'acp-sessions', options.uuid)
++    const cursorRoot = join(options.home, '.cursor')
++    const acpSessionDir = join(cursorRoot, 'acp-sessions', options.uuid)
+     const acpStorePath = join(acpSessionDir, 'store.db')
+     const acpMetaPath = join(acpSessionDir, 'meta.json')
+     let sourceFormat: CursorImportSourceFormat
+     let sourceStorePath: string
+     let resolvedWorkspacePath: string | null = options.workspacePath ?? null
+     const strict = options.knownMessageCount !== undefined
++    if (strict) {
++        const override = process.env.CURSOR_CONFIG_DIR
++        const xdgConfigHome = process.env.XDG_CONFIG_HOME
++        const configuredRoot = override?.trim()
++            ? override
++            : xdgConfigHome?.trim() ? join(xdgConfigHome, 'cursor') : cursorRoot
++        if (!isAbsolute(configuredRoot) || resolve(configuredRoot) !== resolve(cursorRoot)) {
++            return failure('missing_on_disk_store', 'Verified legacy resume requires the standard Cursor config directory')
++        }
++    }
+     const retryVerifiedCopy = strict && existsSync(acpSessionDir)
+     if (retryVerifiedCopy && !lstatSync(join(acpSessionDir, LEGACY_COPY_RECEIPT), { throwIfNoEntry: false })?.isFile()) {
+         return failure('target_already_exists', 'Legacy resume requires a new or unchanged verified ACP destination')
+diff --git a/docs/guide/agents.md b/docs/guide/agents.md
+index 0c0a5cf01..594736569 100644
+--- a/docs/guide/agents.md
++++ b/docs/guide/agents.md
+@@ -261,7 +261,7 @@ Cursor sometimes reports a transient model error inside a turn instead of failin
+ 
+ - **Multitask UI** - `/multitask` is slash-driven; HAPI does not yet provide an Agents Window-style fleet pane. Subagent `cursor/task` notifications show as CursorTask cards when the agent emits them.
+ - **Legacy session resume** - When you resume an inactive stream-json session, HAPI tries to upgrade it to ACP so you can steer a turn and answer Cursor's questions in the same chat. On a different host from the hub, the owning runner copies the legacy store for the recorded Cursor session and workspace, preserves the original, and verifies that ACP can replay history from the copy before HAPI switches protocols.
+-- **When the upgrade is skipped** - Active sessions keep their current protocol. An older runner, an existing ACP destination, or a copy with no verifiable history leaves the cross-host session on the legacy resume path. Set `HAPI_CURSOR_LEGACY_AUTO_MIGRATE=0` on the hub to disable automatic upgrades.
++- **When the upgrade is skipped** - Active sessions keep their current protocol. The cross-host session keeps using legacy resume if the runner is older, uses a custom Cursor config directory, has an unverified ACP destination, or cannot verify the copied history. Set `HAPI_CURSOR_LEGACY_AUTO_MIGRATE=0` on the hub to disable automatic upgrades.
+ 
+ #### Legacy stream-json safety: AskQuestion behavior
+ 
+-- 
+2.54.0 (Apple Git-157)
+

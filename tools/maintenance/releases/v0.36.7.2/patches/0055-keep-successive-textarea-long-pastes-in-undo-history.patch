@@ -1,0 +1,136 @@
+From d34c574ff160f28c67b313ca56b75b7eef3f338a Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 28 Nov 2026 06:33:29 +0800
+Subject: [PATCH] Keep successive textarea long pastes in undo history
+
+---
+ .github/workflows/test.yml                    |  1 +
+ e2e/composer-long-paste.spec.ts               | 36 +++++++++++++++++++
+ .../AssistantChat/HappyComposer.tsx           | 28 +++++++++------
+ 3 files changed, 54 insertions(+), 11 deletions(-)
+ create mode 100644 e2e/composer-long-paste.spec.ts
+
+diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
+index e6a5e97c6..f01adb95c 100644
+--- a/.github/workflows/test.yml
++++ b/.github/workflows/test.yml
+@@ -20,6 +20,7 @@ jobs:
+                   terminal-wrap-fidelity.spec.ts
+                   session-list-fork-menu.spec.ts
+                   composer-copy.spec.ts
++                  composer-long-paste.spec.ts
+                   session-list-scroll.spec.ts
+                   session-activity.spec.ts
+                   cold-initial-tail.spec.ts
+diff --git a/e2e/composer-long-paste.spec.ts b/e2e/composer-long-paste.spec.ts
+new file mode 100644
+index 000000000..0ae4278f7
+--- /dev/null
++++ b/e2e/composer-long-paste.spec.ts
+@@ -0,0 +1,36 @@
++import { expect, test, type Locator } from '@playwright/test'
++
++async function paste(input: Locator, text: string) {
++    await input.evaluate((element, content) => {
++        const clipboardData = new DataTransfer()
++        clipboardData.setData('text/plain', content)
++        element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData }))
++    }, text)
++}
++
++test('keeps both successive long-paste edits in the textarea undo history', async ({ page }) => {
++    await page.goto('/e2e-fixtures/codex-fast-theme.html?richMentions=0')
++    const input = page.locator('textarea:visible')
++    const draft = 'saved draft: '
++    const first = 'a'.repeat(5500)
++    const second = 'b'.repeat(6000)
++    const insert = page.getByRole('button', { name: 'Paste as text' })
++    const length = () => input.evaluate(el => (el as HTMLTextAreaElement).value.length)
++    await input.focus()
++    await page.keyboard.insertText(draft)
++    await expect(input).toHaveValue(draft)
++    await paste(input, first)
++    await insert.click()
++    await expect.poll(length).toBe(draft.length + first.length)
++    await paste(input, second)
++    await insert.click()
++    await expect.poll(length).toBe(draft.length + first.length + second.length)
++    await page.keyboard.press('ControlOrMeta+z')
++    await expect.poll(length).toBe(draft.length + first.length)
++    await page.keyboard.press('ControlOrMeta+z')
++    await expect(input).toHaveValue(draft)
++    await page.keyboard.press('ControlOrMeta+Shift+z')
++    await expect.poll(length).toBe(draft.length + first.length)
++    await page.keyboard.press('ControlOrMeta+Shift+z')
++    await expect.poll(length).toBe(draft.length + first.length + second.length)
++})
+diff --git a/web/src/components/AssistantChat/HappyComposer.tsx b/web/src/components/AssistantChat/HappyComposer.tsx
+index c0f05b78b..e7b6f35e2 100644
+--- a/web/src/components/AssistantChat/HappyComposer.tsx
++++ b/web/src/components/AssistantChat/HappyComposer.tsx
+@@ -205,6 +205,7 @@ export function useRichComposerBridge(
+ }
+ 
+ const defaultSuggestionHandler = async (): Promise<Suggestion[]> => []
++const TEXTAREA_PASTE_HISTORY_LIMIT = 20
+ 
+ /** True when composer text/attachment ids match a pre-park snapshot. */
+ export function composerParkSnapshotUnchanged(
+@@ -548,14 +549,14 @@ export function HappyComposer(props: {
+ 
+     const textareaRef = useRef<HTMLTextAreaElement>(null)
+     const textareaPasteHistory = useRef<{
+-        before: TextInputState
+-        after: TextInputState
+-        applied: boolean
++        edits: { before: TextInputState; after: TextInputState }[]
++        position: number
+     } | null>(null)
+ 
+     useEffect(() => {
+         const history = textareaPasteHistory.current
+-        if (history && composerText !== (history.applied ? history.after.text : history.before.text)) {
++        const current = history?.edits[history.position - 1]?.after ?? history?.edits[0]?.before
++        if (current && composerText !== current.text) {
+             textareaPasteHistory.current = null
+         }
+     }, [composerText])
+@@ -1308,11 +1309,11 @@ export function HappyComposer(props: {
+             const shortcut = key.toLowerCase()
+             const undo = shortcut === 'z' && !e.shiftKey
+             const redo = (shortcut === 'z' && e.shiftKey) || (shortcut === 'y' && !e.shiftKey)
+-            const from = history.applied ? history.after : history.before
+-            if ((history.applied ? undo : redo) && input.value === from.text) {
++            const edit = undo ? history.edits[history.position - 1] : redo ? history.edits[history.position] : undefined
++            if (edit && input.value === (undo ? edit.after.text : edit.before.text)) {
+                 e.preventDefault()
+-                history.applied = redo
+-                applyTextareaEdit(input, redo ? history.after : history.before)
++                history.position += undo ? -1 : 1
++                applyTextareaEdit(input, undo ? edit.before : edit.after)
+                 return
+             }
+         }
+@@ -1531,11 +1532,16 @@ export function HappyComposer(props: {
+                     text: currentText.slice(0, start) + pastedText + currentText.slice(end),
+                     selection: { start: cursor, end: cursor },
+                 }
+-                textareaPasteHistory.current = {
++                const history = textareaPasteHistory.current
++                const edits = history?.edits.slice(0, history.position) ?? []
++                if (edits.at(-1)?.after.text !== currentText) edits.length = 0
++                edits.push({
+                     before: { text: currentText, selection: { start, end } },
+                     after,
+-                    applied: true,
+-                }
++                })
++                // A single paste can be large, so retain only the most recent edits.
++                if (edits.length > TEXTAREA_PASTE_HISTORY_LIMIT) edits.shift()
++                textareaPasteHistory.current = { edits, position: edits.length }
+                 applyTextareaEdit(input, after)
+             })
+             if (handled) e.preventDefault()
+-- 
+2.54.0 (Apple Git-157)
+

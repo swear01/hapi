@@ -69,7 +69,7 @@ describe('permissions routes (tiann/hapi#1735)', () => {
             method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({})
         })
         const failure = await send()
-        expect(failure.status).toBe(502)
+        expect(failure.status).toBe(500)
         expect(await failure.json()).toEqual({ error: reason })
         rejected = false
         expect((await send()).status).toBe(200)

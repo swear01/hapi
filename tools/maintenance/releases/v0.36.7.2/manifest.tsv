@@ -1,6 +1,6 @@
 # upstream_sha=6f7420aa6ec87878391fa0b4535711ba04e0b0ba
 # previous_origin_main=cb99878a5289072fe6c5c04254617c31c4d88504
-# expected_source_tree=86eab0d7301b0ad54fbc6adff67696aa94e60d58
+# expected_source_tree=cadc2c08382f150124b4230dde8dca5d399eb2ab
 # previous_release_records=inherit
 0001-keep-skill-discovery-roots-and-test-home-isolation.patch	regenerate	overlay	fd6ab0a0d8a0081a9026c64bedadd0a520dbf9f2
 0002-carry-upstream-pr-1418.patch	carry	pr-1418	a465365cd54d11fb3dfe030171c99c01660d466a
@@ -50,6 +50,13 @@
 0046-verify-migration-logs-include-the-chat-folder-schema.patch	regenerate	overlay	-
 0047-retry-verified-cursor-legacy-copies-after-an-uncommitted-resume.patch	regenerate	overlay	-
 0048-space-the-session-folder-dialog-title-and-form.patch	regenerate	overlay	-
+0049-preserve-rejected-permission-response-details-through-cloudflare.patch	regenerate	overlay	-
+0050-rehearse-upstream-project-group-persistence.patch	regenerate	independently-reviewed-pr-2168	-
+0051-preserve-project-preferences-edited-by-other-tabs.patch	regenerate	overlay	-
+0052-isolate-possible-cursor-commands-before-the-first-acp-catalog.patch	regenerate	overlay	-
+0053-document-persistent-project-expansion-in-the-maintained-release.patch	regenerate	overlay	-
+0054-isolate-cursor-legacy-resume-verification-from-configured-stores.patch	regenerate	overlay	-
+0055-keep-successive-textarea-long-pastes-in-undo-history.patch	regenerate	overlay	-
 -	integrated	pr-2627	922953a4abaffd1f32ebdc14da425f552cba483c
 -	integrated	pr-2628	eb852d99acf0432133d7a2f416a15e0f308a1a99
 -	integrated	pr-2629	12a9ec425b27aaebd5b6e022841f5e5732f4a0a8

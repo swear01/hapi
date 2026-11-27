@@ -1,0 +1,1030 @@
+From 3955fa01e5da9ee342ed443486203499429af9a2 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 28 Nov 2026 06:26:38 +0800
+Subject: [PATCH] Rehearse upstream project group persistence
+
+---
+ .github/workflows/test.yml                    |   1 +
+ e2e/project-expansion.spec.ts                 | 131 +++++++++++
+ web/README.md                                 |   4 +
+ .../project-expansion-fixture.html            |   5 +
+ .../project-expansion-fixture.tsx             |  53 +++++
+ .../SessionList.directory-action.test.tsx     |  40 ++++
+ .../SessionList.persistence.test.tsx          | 215 ++++++++++++++++++
+ web/src/components/SessionList.test.ts        |  27 ---
+ web/src/components/SessionList.tsx            |  99 +++-----
+ .../hooks/useProjectGroupCollapse.test.tsx    |  93 ++++++++
+ web/src/hooks/useProjectGroupCollapse.ts      | 106 +++++++++
+ web/src/lib/settingsTransfer.test.ts          |   1 +
+ web/src/router.tsx                            |   7 +-
+ 13 files changed, 691 insertions(+), 91 deletions(-)
+ create mode 100644 e2e/project-expansion.spec.ts
+ create mode 100644 web/e2e-fixtures/project-expansion-fixture.html
+ create mode 100644 web/e2e-fixtures/project-expansion-fixture.tsx
+ create mode 100644 web/src/components/SessionList.persistence.test.tsx
+ create mode 100644 web/src/hooks/useProjectGroupCollapse.test.tsx
+ create mode 100644 web/src/hooks/useProjectGroupCollapse.ts
+
+diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
+index 30396cd54..e6a5e97c6 100644
+--- a/.github/workflows/test.yml
++++ b/.github/workflows/test.yml
+@@ -31,6 +31,7 @@ jobs:
+                   composer-attachment-controls.spec.ts
+                   image-preview-back.spec.ts
+                   opencode-fork-buttons.spec.ts
++                  project-expansion.spec.ts
+                   auth-network-recovery.spec.ts
+             # playwright.config.ts already sets `trace: 'retain-on-failure'` and
+             # the html reporter on CI, but nothing collected the output, so every
+diff --git a/e2e/project-expansion.spec.ts b/e2e/project-expansion.spec.ts
+new file mode 100644
+index 000000000..d659ecffa
+--- /dev/null
++++ b/e2e/project-expansion.spec.ts
+@@ -0,0 +1,131 @@
++import { expect, test, type Page } from '@playwright/test'
++
++const fixture = '/e2e-fixtures/project-expansion-fixture.html'
++const header = (page: Page) => page.locator('[title="/work/project"]')
++const panel = (page: Page) => header(page).locator('xpath=following-sibling::*[1]')
++const saved = (page: Page) => page.evaluate(() => Object.fromEntries(
++    Object.entries(localStorage).filter(([key]) => key.startsWith('hapi.projectGroupCollapse.v1.')),
++))
++
++for (const viewport of [{ width: 1280, height: 900 }, { width: 393, height: 852 }]) {
++    test.describe(`project preference at ${viewport.width}px`, () => {
++        test.use({ viewport })
++
++        test('restores manual choices after reload, remount and browser-context reopen', async ({ page, browser }) => {
++            await page.goto(fixture)
++            await expect(panel(page)).not.toHaveAttribute('data-open')
++            await header(page).click()
++            await expect(panel(page)).toHaveAttribute('data-open', 'true')
++            await page.reload()
++            await expect(panel(page)).toHaveAttribute('data-open', 'true')
++            const screenshots = process.env.HAPI_REVIEW_SCREENSHOT_DIR
++            if (screenshots && viewport.width === 393) {
++                await page.screenshot({ path: `${screenshots}/project-expanded-after-reload.png` })
++            }
++            await page.getByRole('button', { name: 'Toggle list', exact: true }).click()
++            await page.getByRole('button', { name: 'Toggle list', exact: true }).click()
++            await expect(panel(page)).toHaveAttribute('data-open', 'true')
++
++            // Recreate the browser context with only its saved local storage.
++            const context = await browser.newContext({ storageState: await page.context().storageState(), viewport })
++            try {
++                const reopened = await context.newPage()
++                await reopened.goto(new URL(fixture, page.url()).toString())
++                await expect(panel(reopened)).toHaveAttribute('data-open', 'true')
++                await header(reopened).click()
++                await reopened.reload()
++                await expect(panel(reopened)).not.toHaveAttribute('data-open')
++            } finally { await context.close() }
++        })
++
++        test('search and selected-session reveal do not replace the saved manual collapse', async ({ page }) => {
++            await page.goto(fixture)
++            await header(page).click()
++            await header(page).click()
++            const before = await saved(page)
++            await page.getByRole('button', { name: /^Search sessions/ }).click()
++            const input = page.getByPlaceholder('Search title/path/Agent/machine/ID…')
++            await input.fill('Archived task')
++            await expect(panel(page)).toHaveAttribute('data-open', 'true')
++            await input.fill('no-matches')
++            await expect(header(page)).toHaveCount(0)
++            await input.fill('')
++            await expect(panel(page)).not.toHaveAttribute('data-open')
++            await page.getByRole('button', { name: 'Reveal archived', exact: true }).click()
++            await expect(panel(page)).toHaveAttribute('data-open', 'true')
++            expect(await saved(page)).toEqual(before)
++            await header(page).click()
++            await page.getByRole('button', { name: 'Live update', exact: true }).click()
++            await expect(panel(page)).not.toHaveAttribute('data-open')
++            await page.reload()
++            await expect(panel(page)).not.toHaveAttribute('data-open')
++        })
++
++        test('isolates Hub, namespace and machine and survives absent project data', async ({ page }) => {
++            await page.goto(fixture)
++            await header(page).click()
++            for (const suffix of ['?hub=https://other.test', '?namespace=tenant', '?machine=machine-b']) {
++                await page.goto(fixture + suffix)
++                await expect(panel(page)).not.toHaveAttribute('data-open')
++            }
++            await page.goto(fixture)
++            await expect(panel(page)).toHaveAttribute('data-open', 'true')
++            await page.getByRole('button', { name: 'Toggle data', exact: true }).click()
++            await page.getByRole('button', { name: 'Toggle data', exact: true }).click()
++            await expect(panel(page)).toHaveAttribute('data-open', 'true')
++        })
++
++        test('keeps defaults for untouched groups and never saves an automatic expansion', async ({ page }) => {
++            await page.goto(fixture)
++            await page.getByRole('button', { name: 'Reveal archived', exact: true }).click()
++            await expect(panel(page)).toHaveAttribute('data-open', 'true')
++            expect(await saved(page)).toEqual({})
++            await page.reload()
++            await expect(panel(page)).not.toHaveAttribute('data-open')
++        })
++
++        test('search-time header clicks cannot silently replace a saved expansion', async ({ page }) => {
++            await page.goto(fixture)
++            await header(page).click()
++            const before = await saved(page)
++            await page.getByRole('button', { name: /^Search sessions/ }).click()
++            const input = page.getByPlaceholder('Search title/path/Agent/machine/ID…')
++            await input.fill('Archived task')
++            await header(page).click()
++            await page.getByRole('button', { name: 'Clear search', exact: true }).click()
++            await expect(panel(page)).toHaveAttribute('data-open', 'true')
++            expect(await saved(page)).toEqual(before)
++            await page.reload()
++            await expect(panel(page)).toHaveAttribute('data-open', 'true')
++        })
++
++        test('continues working with unavailable local storage', async ({ page }) => {
++            await page.addInitScript(() => {
++                const original = Storage.prototype.setItem
++                Storage.prototype.setItem = function(key, value) {
++                    if (key.startsWith('hapi.projectGroupCollapse.v1.')) throw new DOMException('Full', 'QuotaExceededError')
++                    original.call(this, key, value)
++                }
++            })
++            await page.goto(fixture)
++            await header(page).click()
++            await expect(panel(page)).toHaveAttribute('data-open', 'true')
++            await header(page).click()
++            await expect(panel(page)).not.toHaveAttribute('data-open')
++        })
++
++        test('keeps a selected project collapsed after search hides and restores it', async ({ page }) => {
++            await page.goto(fixture)
++            await page.getByRole('button', { name: 'Reveal archived', exact: true }).click()
++            await header(page).click()
++            const before = await saved(page)
++            await page.getByRole('button', { name: /^Search sessions/ }).click()
++            const input = page.getByPlaceholder('Search title/path/Agent/machine/ID…')
++            await input.fill('no-matches')
++            await expect(header(page)).toHaveCount(0)
++            await input.fill('')
++            await expect(panel(page)).not.toHaveAttribute('data-open')
++            expect(await saved(page)).toEqual(before)
++        })
++    })
++}
+diff --git a/web/README.md b/web/README.md
+index bffc291e7..c76417785 100644
+--- a/web/README.md
++++ b/web/README.md
+@@ -5,6 +5,10 @@ React Mini App / PWA for monitoring and controlling hapi sessions.
+ ## What it does
+ 
+ - Session list with status, pending approvals, todos, and summaries.
++- Manual project-group expansion/collapse is remembered in this browser across
++  reloads, separately for each Hub, user/namespace, machine, and project. Search
++  and selected-session reveal do not overwrite saved choices. Untouched groups
++  keep their existing default behavior; preferences do not sync across devices.
+ - Chat view with streaming updates and message sending.
+ - Permission approval and denial workflows.
+ - Codex `request_user_input` choices honor `isOther`: **None of the above**
+diff --git a/web/e2e-fixtures/project-expansion-fixture.html b/web/e2e-fixtures/project-expansion-fixture.html
+new file mode 100644
+index 000000000..3e0f35999
+--- /dev/null
++++ b/web/e2e-fixtures/project-expansion-fixture.html
+@@ -0,0 +1,5 @@
++<!doctype html>
++<html lang="en">
++<head><meta charset="UTF-8" /><title>Project expansion persistence fixture</title></head>
++<body><div id="root"></div><script type="module" src="./project-expansion-fixture.tsx"></script></body>
++</html>
+diff --git a/web/e2e-fixtures/project-expansion-fixture.tsx b/web/e2e-fixtures/project-expansion-fixture.tsx
+new file mode 100644
+index 000000000..066652e81
+--- /dev/null
++++ b/web/e2e-fixtures/project-expansion-fixture.tsx
+@@ -0,0 +1,53 @@
++import React, { useState } from 'react'
++import { createRoot } from 'react-dom/client'
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
++import { SessionList } from '../src/components/SessionList'
++import { getProjectGroupCollapseStorageKey } from '../src/hooks/useProjectGroupCollapse'
++import { I18nProvider } from '../src/lib/i18n-context'
++import { ToastProvider } from '../src/lib/toast-context'
++import type { SessionSummary } from '../src/types/api'
++import '../src/index.css'
++
++const params = new URLSearchParams(location.search)
++const token = `header.${btoa(JSON.stringify({ uid: 1, ns: params.get('namespace') ?? 'default' }))}.signature`
++const storageKey = getProjectGroupCollapseStorageKey(params.get('hub') ?? 'https://hub.test', token)
++const machineId = params.get('machine') ?? 'machine-a'
++const archived: SessionSummary = {
++    id: 'archived', active: false, thinking: false, activeAt: 0, updatedAt: 100,
++    metadataVersion: 0, agentStateVersion: 0, todosUpdatedAt: 0, todoProgress: null,
++    pendingRequestsCount: 0, pendingRequestKinds: [], pendingRequests: [], backgroundTaskCount: 0,
++    futureScheduledMessageCount: 0, nextScheduledAt: null, model: null, effort: null,
++    metadata: { path: '/work/project', machineId, name: 'Archived task', flavor: 'codex' },
++}
++const initialSessions = [
++    archived,
++    { ...archived, id: 'running', active: true, thinking: true,
++        metadata: { ...archived.metadata!, name: 'Running task' } },
++    { ...archived, id: 'other', metadata: { ...archived.metadata!, path: '/work/other', name: 'Other task' } },
++]
++localStorage.setItem('hapi-pin-in-progress-sessions', 'true')
++const queryClient = new QueryClient()
++
++function Fixture() {
++    const [selected, setSelected] = useState<string | null>(null)
++    const [mounted, setMounted] = useState(true)
++    const [sessions, setSessions] = useState(initialSessions)
++    return <>
++        <button onClick={() => setMounted(value => !value)}>Toggle list</button>
++        <button onClick={() => setSelected('archived')}>Reveal archived</button>
++        <button onClick={() => setSelected(null)}>Clear selection</button>
++        <button onClick={() => setSessions(value => value.map(s => ({ ...s, updatedAt: s.updatedAt + 1 })))}>Live update</button>
++        <button onClick={() => setSessions(value => value.length ? [] : initialSessions)}>Toggle data</button>
++        <div style={{ width: 'min(360px, 100%)', height: 600, display: 'flex', flexDirection: 'column' }}>
++            {mounted && <SessionList sessions={sessions} selectedSessionId={selected}
++                collapseStorageKey={storageKey} onSelect={setSelected} onNewSession={() => {}}
++                onRefresh={() => {}} isLoading={false} renderHeader={false} api={null} />}
++        </div>
++    </>
++}
++
++createRoot(document.getElementById('root')!).render(
++    <React.StrictMode><QueryClientProvider client={queryClient}>
++        <ToastProvider><I18nProvider><Fixture /></I18nProvider></ToastProvider>
++    </QueryClientProvider></React.StrictMode>,
++)
+diff --git a/web/src/components/SessionList.directory-action.test.tsx b/web/src/components/SessionList.directory-action.test.tsx
+index b40c04e47..665542d31 100644
+--- a/web/src/components/SessionList.directory-action.test.tsx
++++ b/web/src/components/SessionList.directory-action.test.tsx
+@@ -1672,6 +1672,46 @@ describe('SessionList collapse behavior', () => {
+         })
+     })
+ 
++    it('reveals a temporarily collapsed matching group when selection changes into it during search', () => {
++        const sessions = [
++            makeSession({
++                id: 'session-a',
++                updatedAt: 100,
++                metadata: { path: '/work/proj-a', name: 'Task Alpha', flavor: 'codex' },
++            }),
++            makeSession({
++                id: 'session-b',
++                updatedAt: 90,
++                metadata: { path: '/work/proj-b', name: 'Task Beta', flavor: 'codex' },
++            }),
++        ]
++        const view = render(renderSessionList(sessions, 'session-a'))
++
++        // Start search matching both tasks
++        fireEvent.click(screen.getByRole('button', { name: SEARCH_LABEL }))
++        const searchInput = screen.getByPlaceholderText(SEARCH_PLACEHOLDER)
++        fireEvent.change(searchInput, { target: { value: 'Task' } })
++
++        const headerA = screen.getByTitle('/work/proj-a')
++        const panelA = headerA.nextElementSibling
++        expect(panelA?.getAttribute('data-open')).toBe('true')
++
++        // Switch selection to session-b
++        view.rerender(renderSessionList(sessions, 'session-b'))
++        const headerB = screen.getByTitle('/work/proj-b')
++        const panelB = headerB.nextElementSibling
++        expect(panelB?.getAttribute('data-open')).toBe('true')
++
++        // Collapse proj-a temporarily while searching
++        fireEvent.click(headerA)
++        expect(panelA?.getAttribute('data-open')).toBeNull()
++
++        // Switch selection back to session-a (e.g. browser back navigation)
++        view.rerender(renderSessionList(sessions, 'session-a'))
++        // Proj-a should be revealed again
++        expect(panelA?.getAttribute('data-open')).toBe('true')
++    })
++
+     it('toggles the running section with the keyboard', () => {
+         localStorage.setItem('hapi-pin-in-progress-sessions', 'all')
+         const sessions = [
+diff --git a/web/src/components/SessionList.persistence.test.tsx b/web/src/components/SessionList.persistence.test.tsx
+new file mode 100644
+index 000000000..be9e7bc4c
+--- /dev/null
++++ b/web/src/components/SessionList.persistence.test.tsx
+@@ -0,0 +1,215 @@
++import { StrictMode } from 'react'
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
++import { cleanup, fireEvent, render, screen } from '@testing-library/react'
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++import { I18nProvider } from '@/lib/i18n-context'
++import { ToastProvider } from '@/lib/toast-context'
++import type { SessionSummary } from '@/types/api'
++import { SessionList } from './SessionList'
++
++const storageKey = 'hapi.projectGroupCollapse.v1.test'
++const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
++
++function session(id: string, path = '/work/project', machineId = 'machine-a'): SessionSummary {
++    return {
++        id, active: false, thinking: false, activeAt: 0, updatedAt: 100,
++        metadataVersion: 0, agentStateVersion: 0, todosUpdatedAt: 0,
++        attachedJob: null, attachedJobUpdatedAt: 0, todoProgress: null, pendingRequestsCount: 0, pendingRequestKinds: [],
++        pendingRequests: [], backgroundTaskCount: 0, futureScheduledMessageCount: 0,
++        nextScheduledAt: null, model: null, effort: null,
++        metadata: { path, machineId, name: id, flavor: 'codex' },
++    }
++}
++
++function list(options: {
++    sessions?: SessionSummary[]; selected?: string | null; scope?: string; loading?: boolean
++} = {}) {
++    return <StrictMode><QueryClientProvider client={queryClient}>
++        <ToastProvider><I18nProvider>
++            <SessionList sessions={options.sessions ?? [session('task')]}
++                selectedSessionId={options.selected ?? null}
++                collapseStorageKey={options.scope ?? storageKey}
++                isLoading={options.loading ?? false} api={null} renderHeader={false}
++                onSelect={vi.fn()} onNewSession={vi.fn()} onRefresh={vi.fn()} />
++        </I18nProvider></ToastProvider>
++    </QueryClientProvider></StrictMode>
++}
++
++function header(path = '/work/project') { return screen.getByTitle(path) }
++function isOpen(path = '/work/project') {
++    return header(path).nextElementSibling?.getAttribute('data-open') === 'true'
++}
++
++beforeEach(() => localStorage.clear())
++afterEach(() => { cleanup(); vi.restoreAllMocks() })
++
++describe('SessionList manual project preferences', () => {
++    it('restores an explicit expansion after remounting', () => {
++        const view = render(list())
++        expect(isOpen()).toBe(false)
++        fireEvent.click(header())
++        expect(isOpen()).toBe(true)
++        view.unmount()
++        render(list())
++        expect(isOpen()).toBe(true)
++    })
++
++    it('restores an explicit collapse of an active project', () => {
++        const sessions = [{ ...session('task'), active: true }]
++        const view = render(list({ sessions }))
++        expect(isOpen()).toBe(true)
++        fireEvent.click(header())
++        view.unmount()
++        render(list({ sessions }))
++        expect(isOpen()).toBe(false)
++    })
++
++    it('reveals a selected session without replacing a saved collapse', () => {
++        const view = render(list())
++        fireEvent.click(header())
++        fireEvent.click(header())
++        const saved = localStorage.getItem(storageKey)
++        view.rerender(list({ selected: 'task' }))
++        expect(isOpen()).toBe(true)
++        expect(localStorage.getItem(storageKey)).toBe(saved)
++        view.unmount()
++        render(list())
++        expect(isOpen()).toBe(false)
++    })
++
++    it('keeps a manual collapse during selected-session live updates', () => {
++        const view = render(list({ selected: 'task' }))
++        fireEvent.click(header())
++        view.rerender(list({ selected: 'task', sessions: [{ ...session('task'), updatedAt: 200 }] }))
++        expect(isOpen()).toBe(false)
++        view.unmount()
++        render(list())
++        expect(isOpen()).toBe(false)
++    })
++
++    it('does not persist selection-driven expansion of untouched groups', () => {
++        const view = render(list({ selected: 'task' }))
++        expect(isOpen()).toBe(true)
++        expect(localStorage.getItem(storageKey)).toBeNull()
++        view.unmount()
++        render(list())
++        expect(isOpen()).toBe(false)
++    })
++
++    it('does not overwrite preferences while searching or filtering out all sessions', () => {
++        const view = render(list())
++        fireEvent.click(header())
++        fireEvent.click(header())
++        const saved = localStorage.getItem(storageKey)
++        fireEvent.click(screen.getByRole('button', { name: /^Search sessions/ }))
++        const input = screen.getByPlaceholderText('Search title/path/Agent/machine/ID…')
++        fireEvent.change(input, { target: { value: 'task' } })
++        expect(isOpen()).toBe(true)
++        fireEvent.change(input, { target: { value: 'no-matches' } })
++        fireEvent.change(input, { target: { value: '' } })
++        expect(isOpen()).toBe(false)
++        expect(localStorage.getItem(storageKey)).toBe(saved)
++        view.unmount()
++        render(list())
++        expect(isOpen()).toBe(false)
++    })
++
++    it('keeps saved expansions while initial data is empty or a project temporarily disappears', () => {
++        const view = render(list())
++        fireEvent.click(header())
++        view.unmount()
++        const next = render(list({ sessions: [], loading: true }))
++        next.rerender(list())
++        expect(isOpen()).toBe(true)
++        next.rerender(list({ sessions: [] }))
++        next.rerender(list())
++        expect(isOpen()).toBe(true)
++    })
++
++    it('does not save a hidden toggle while search forces the group open', () => {
++        render(list())
++        fireEvent.click(header())
++        const saved = localStorage.getItem(storageKey)
++        fireEvent.click(screen.getByRole('button', { name: /^Search sessions/ }))
++        const input = screen.getByPlaceholderText('Search title/path/Agent/machine/ID…')
++        fireEvent.change(input, { target: { value: 'task' } })
++        fireEvent.click(header())
++        fireEvent.change(input, { target: { value: '' } })
++        expect(isOpen()).toBe(true)
++        expect(localStorage.getItem(storageKey)).toBe(saved)
++    })
++
++    it('restores a collapsed selected project after search temporarily excludes it', () => {
++        render(list({ selected: 'task' }))
++        fireEvent.click(header())
++        const saved = localStorage.getItem(storageKey)
++        fireEvent.click(screen.getByRole('button', { name: /^Search sessions/ }))
++        const input = screen.getByPlaceholderText('Search title/path/Agent/machine/ID…')
++        fireEvent.change(input, { target: { value: 'no-matches' } })
++        fireEvent.change(input, { target: { value: '' } })
++        expect(isOpen()).toBe(false)
++        expect(localStorage.getItem(storageKey)).toBe(saved)
++    })
++
++    it('isolates preferences when the Hub or user storage scope changes', () => {
++        const view = render(list())
++        fireEvent.click(header())
++        view.rerender(list({ scope: 'another-scope' }))
++        expect(isOpen()).toBe(false)
++        view.rerender(list())
++        expect(isOpen()).toBe(true)
++        expect(localStorage.getItem('another-scope')).toBeNull()
++    })
++
++    it('does not apply a saved project preference to another machine or directory', () => {
++        const view = render(list())
++        fireEvent.click(header())
++        view.rerender(list({ sessions: [session('task', '/work/project', 'machine-b')] }))
++        expect(isOpen()).toBe(false)
++        view.rerender(list({ sessions: [session('task', '/work/other')] }))
++        expect(isOpen('/work/other')).toBe(false)
++        view.rerender(list())
++        expect(isOpen()).toBe(true)
++    })
++
++    it('restores the inactive project expanded beneath the pinned active session', () => {
++        localStorage.setItem('hapi-pin-in-progress-sessions', 'true')
++        const sessions = [session('task'), { ...session('running'), active: true, thinking: true }]
++        const view = render(list({ sessions, selected: 'running' }))
++        expect(isOpen()).toBe(false)
++        fireEvent.click(header())
++        view.unmount()
++        render(list({ sessions, selected: 'running' }))
++        expect(isOpen()).toBe(true)
++    })
++
++    it('keeps toggles functional when browser storage fails', () => {
++        vi.spyOn(localStorage, 'getItem').mockImplementation(() => { throw new Error('blocked') })
++        vi.spyOn(localStorage, 'setItem').mockImplementation(() => { throw new Error('quota') })
++        render(list())
++        fireEvent.click(header())
++        expect(isOpen()).toBe(true)
++        fireEvent.click(header())
++        expect(isOpen()).toBe(false)
++    })
++
++    it('preserves manual preferences with user-activity ordering', () => {
++        localStorage.setItem('hapi-session-list-active-first', 'false')
++        const sessions = [
++            { ...session('older'), createdAt: 100, lastUserMessageAt: 100, updatedAt: 999, active: true },
++            { ...session('newer'), createdAt: 200, lastUserMessageAt: 200, updatedAt: 1 },
++        ]
++        const view = render(list({ sessions }))
++        expect(screen.queryByTitle('In progress')).toBeNull()
++        expect(isOpen()).toBe(true)
++        const project = header().nextElementSibling!
++        expect(Array.from(project.querySelectorAll('button')).slice(0, 2).map(button => button.textContent))
++            .toEqual([expect.stringContaining('newer'), expect.stringContaining('older')])
++        fireEvent.click(header())
++        view.unmount()
++        const reopened = render(list({ sessions }))
++        expect(isOpen()).toBe(false)
++        reopened.rerender(list({ sessions: sessions.map(item => ({ ...item, updatedAt: 2000 })) }))
++        expect(isOpen()).toBe(false)
++    })
++})
+diff --git a/web/src/components/SessionList.test.ts b/web/src/components/SessionList.test.ts
+index 20f382908..ab3f87c35 100644
+--- a/web/src/components/SessionList.test.ts
++++ b/web/src/components/SessionList.test.ts
+@@ -4,7 +4,6 @@ import type { SessionSummary } from '@/types/api'
+ import { sessionIsUnread } from '@/lib/sessionAttention'
+ import {
+     deduplicateSessionsByAgentId,
+-    expandSelectedSessionCollapseOverrides,
+     groupSessionsByDirectory,
+     filterActiveSessionsOnly,
+     filterScratchlistSessionsOnly,
+@@ -833,32 +832,6 @@ describe('getPreviousSessionVisibleCount', () => {
+     })
+ })
+ 
+-describe('expandSelectedSessionCollapseOverrides', () => {
+-    it('expands the collapsed project group, but preserves session preview folding', () => {
+-        const overrides = new Map<string, boolean>([
+-            ['machine-1::/work/hapi', true],
+-            ['sessions::machine-1::/work/hapi', true]
+-        ])
+-
+-        const result = expandSelectedSessionCollapseOverrides(overrides, {
+-            key: 'machine-1::/work/hapi'
+-        })
+-
+-        expect(result.get('machine-1::/work/hapi')).toBe(false)
+-        expect(result.get('sessions::machine-1::/work/hapi')).toBe(true)
+-    })
+-
+-    it('leaves missing session preview override unset', () => {
+-        const overrides = new Map<string, boolean>()
+-
+-        const result = expandSelectedSessionCollapseOverrides(overrides, {
+-            key: 'machine-1::/work/hapi'
+-        })
+-
+-        expect(result.has('sessions::machine-1::/work/hapi')).toBe(false)
+-    })
+-})
+-
+ describe('getPullToRefreshState', () => {
+     it('requires a deliberate pull past the trigger distance', () => {
+         expect(getPullToRefreshState(15)).toBe('idle')
+diff --git a/web/src/components/SessionList.tsx b/web/src/components/SessionList.tsx
+index 612450393..b4aa8e720 100644
+--- a/web/src/components/SessionList.tsx
++++ b/web/src/components/SessionList.tsx
+@@ -13,6 +13,7 @@ import {
+     sortSessionsBySearchRelevance,
+ } from '@/lib/sessionListSearch'
+ import { useLongPress } from '@/hooks/useLongPress'
++import { useProjectGroupCollapse } from '@/hooks/useProjectGroupCollapse'
+ import { useLowRateAnimation } from '@/hooks/useLowRateAnimation'
+ import { usePlatform } from '@/hooks/usePlatform'
+ import { SESSION_MENTION_DRAG_MIME } from '@/lib/sessionMentionDrag'
+@@ -622,15 +623,6 @@ export function groupSessionsByDirectory(
+         })
+ }
+ 
+-
+-function readClosedProjects(storageKey: string | null): Set<string> {
+-    if (!storageKey) return new Set()
+-    try {
+-        const stored: unknown = JSON.parse(localStorage.getItem(storageKey) ?? '[]')
+-        return new Set(Array.isArray(stored) ? stored.filter((key): key is string => typeof key === 'string') : [])
+-    } catch { return new Set() }
+-}
+-
+ export function expandSelectedSessionCollapseOverrides(
+     overrides: Map<string, boolean>,
+     group: { key: string }
+@@ -2002,6 +1994,7 @@ export function SessionList(props: {
+     machineLabelsById?: Record<string, string>
+     machinesById?: Record<string, Machine>
+     selectedSessionId?: string | null
++    collapseStorageKey?: string | null
+ }) {
+     const { t } = useTranslation()
+     const {
+@@ -2641,20 +2634,17 @@ export function SessionList(props: {
+         const visibleKeys = new Set(groups.map((group) => group.key))
+         return allDirectoryGroups.filter((group) => !visibleKeys.has(group.key))
+     }, [groups, allDirectoryGroups, effectivePinInProgressMode])
+-    // Save explicit folds only, never temporary search expansion or inferred liveness.
++    const collapseStorageKey = props.collapseStorageKey ?? null
+     const identity = api?.getReadStateScope?.()
+-    const foldKey = identity ? `hapi.closed-projects.v1:${identity}` : null
+-    const [foldRevision, setFoldRevision] = useState(0)
+-    const savedFolds = useMemo(() => readClosedProjects(foldKey), [foldKey, foldRevision])
+-    const [collapseOverrides, setCollapseOverrides] = useState<Map<string, boolean>>(
+-        () => new Map()
+-    )
++    const legacyFoldKey = identity && props.collapseStorageKey !== null ? `hapi.closed-projects.v1:${identity}` : null
++    const { collapseOverrides, setManualCollapse, revealGroup } = useProjectGroupCollapse(collapseStorageKey, legacyFoldKey)
+     const [filterCollapseOverrides, setFilterCollapseOverrides] = useState<Map<string, boolean>>(
+         () => new Map()
+     )
+     const [runningSectionCollapsed, setRunningSectionCollapsed] = useState(false)
+     const [pinnedSectionCollapsed, setPinnedSectionCollapsed] = useState(false)
+     const autoExpandedSelectedSessionKeyRef = useRef<string | null>(null)
++    const autoExpandedFilterSelectedSessionKeyRef = useRef<string | null>(null)
+     const previousSelection = useRef(selectedSessionId)
+     const groupOverrides = ephemeralFilter ? filterCollapseOverrides : collapseOverrides
+     const isGroupCollapsed = (group: SessionGroup): boolean => {
+@@ -2663,7 +2653,6 @@ export function SessionList(props: {
+         // Keep matching groups open by default while filtering. Explicit
+         // header clicks use a temporary override for the active filter.
+         if (ephemeralFilter) return false
+-        if (savedFolds.has(group.key)) return true
+         // Archived-only would otherwise collapse every group (none has an
+         // active session), hiding exactly what was asked for.
+         if (listView.status === 'archived') return false
+@@ -2676,25 +2665,20 @@ export function SessionList(props: {
+     }
+ 
+     const toggleGroup = (groupKey: string, isCollapsed: boolean) => {
+-        if (foldKey && !ephemeralFilter) {
+-            const closed = readClosedProjects(foldKey)
+-            if (isCollapsed) closed.delete(groupKey)
+-            else closed.add(groupKey)
+-            try {
+-                localStorage.setItem(foldKey, JSON.stringify([...closed]))
+-                setFoldRevision(n => n + 1)
+-            } catch { /* in-memory override still works */ }
+-        }
+-        const setOverrides = ephemeralFilter ? setFilterCollapseOverrides : setCollapseOverrides
+-        setOverrides(prev => {
+-            const next = new Map(prev)
+-            next.set(groupKey, !isCollapsed)
+-            return next
+-        })
++        if (ephemeralFilter) {
++            setFilterCollapseOverrides(prev => {
++                const next = new Map(prev)
++                next.set(groupKey, !isCollapsed)
++                return next
++            })
++            return
++        }
++        setManualCollapse(groupKey, !isCollapsed)
+     }
+ 
+     useEffect(() => {
+         if (ephemeralFilter) return
++        autoExpandedFilterSelectedSessionKeyRef.current = null
+         setFilterCollapseOverrides(prev => prev.size === 0 ? prev : new Map())
+     }, [ephemeralFilter])
+ 
+@@ -3036,6 +3020,7 @@ export function SessionList(props: {
+     // session) reopens a path the user just collapsed.
+     useEffect(() => {
+         if (!selectedSessionId) {
++            autoExpandedFilterSelectedSessionKeyRef.current = null
+             autoExpandedSelectedSessionKeyRef.current = null
+             previousSelection.current = selectedSessionId
+             return
+@@ -3052,20 +3037,28 @@ export function SessionList(props: {
+             // Selecting a row in a floating bucket is real navigation now,
+             // not a second navigation when the job expires and the row moves.
+             if (machineFilteredSessions.some(s => s.id === selectedSessionId)) previousSelection.current = selectedSessionId
+-            if (!isFiltering) autoExpandedSelectedSessionKeyRef.current = null
++            if (ephemeralFilter) autoExpandedFilterSelectedSessionKeyRef.current = null
++            else autoExpandedSelectedSessionKeyRef.current = null
++            return
++        }
++
++        if (ephemeralFilter) {
++            const filterAutoExpandKey = `${selectedSessionId}::${group.key}`
++            if (autoExpandedFilterSelectedSessionKeyRef.current === filterAutoExpandKey) return
++            autoExpandedFilterSelectedSessionKeyRef.current = filterAutoExpandKey
++            setFilterCollapseOverrides(prev => expandSelectedSessionCollapseOverrides(prev, group))
+             return
+         }
+ 
+-        const autoExpandKey = `${selectedSessionId}::${group.key}`
++        const autoExpandKey = JSON.stringify([collapseStorageKey, selectedSessionId, group.key])
+         if (autoExpandedSelectedSessionKeyRef.current === autoExpandKey) return
+         autoExpandedSelectedSessionKeyRef.current = autoExpandKey
+ 
+         const movedWithoutNavigation = previousSelection.current === selectedSessionId
+         previousSelection.current = selectedSessionId
+-        if (movedWithoutNavigation && (groupOverrides.get(group.key) === true || (!ephemeralFilter && savedFolds.has(group.key)))) return
+-        const setOverrides = ephemeralFilter ? setFilterCollapseOverrides : setCollapseOverrides
+-        setOverrides(prev => expandSelectedSessionCollapseOverrides(prev, group))
+-    }, [selectedSessionId, groups, machineFilteredSessions, isFiltering, ephemeralFilter, savedFolds, groupOverrides])
++        if (movedWithoutNavigation && collapseOverrides.get(group.key) === true) return
++        revealGroup(group.key)
++    }, [selectedSessionId, groups, machineFilteredSessions, ephemeralFilter, collapseStorageKey, collapseOverrides, revealGroup])
+ 
+     // Keep a keyboard-unpinned row reachable when it moves into a collapsed or
+     // truncated destination section, or fall back to a visible row if removed.
+@@ -3106,8 +3099,11 @@ export function SessionList(props: {
+             let expanding = false
+             if (collapsed) {
+                 expanding = true
+-                const setOverrides = ephemeralFilter ? setFilterCollapseOverrides : setCollapseOverrides
+-                setOverrides((prev) => expandSelectedSessionCollapseOverrides(prev, targetGroup))
++                if (ephemeralFilter) {
++                    setFilterCollapseOverrides((prev) => expandSelectedSessionCollapseOverrides(prev, targetGroup))
++                } else {
++                    revealGroup(targetGroup.key)
++                }
+             }
+ 
+             const targetIndex = targetGroup.sessions.findIndex((session) => session.id === target.sessionId)
+@@ -3146,30 +3142,9 @@ export function SessionList(props: {
+     }, [
+         globalPinnedSessions, runningSessions, groups, runningSectionCollapsed,
+         collapseOverrides, filterCollapseOverrides, sessionVisibleCounts,
+-        isFiltering, ephemeralFilter, selectedSessionId, sessionPreviewLimit, previewIsUnread,
++        isFiltering, ephemeralFilter, selectedSessionId, sessionPreviewLimit, previewIsUnread, revealGroup,
+     ])
+ 
+-    // Clean up stale collapse overrides
+-    useEffect(() => {
+-        setCollapseOverrides(prev => {
+-            if (prev.size === 0) return prev
+-            const next = new Map(prev)
+-            const knownKeys = new Set<string>()
+-            for (const g of allGroups) {
+-                knownKeys.add(g.key)
+-                knownKeys.add(`sessions::${g.key}`)
+-            }
+-            let changed = false
+-            for (const key of next.keys()) {
+-                if (!knownKeys.has(key)) {
+-                    next.delete(key)
+-                    changed = true
+-                }
+-            }
+-            return changed ? next : prev
+-        })
+-    }, [allGroups])
+-
+     // Clean up reveal caps for groups that no longer exist.
+     useEffect(() => {
+         setSessionVisibleCounts(prev => {
+diff --git a/web/src/hooks/useProjectGroupCollapse.test.tsx b/web/src/hooks/useProjectGroupCollapse.test.tsx
+new file mode 100644
+index 000000000..dbe78afea
+--- /dev/null
++++ b/web/src/hooks/useProjectGroupCollapse.test.tsx
+@@ -0,0 +1,93 @@
++import { act, renderHook } from '@testing-library/react'
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++import { getProjectGroupCollapseStorageKey, useProjectGroupCollapse } from './useProjectGroupCollapse'
++
++function token(ns: string, uid = 1, exp = 100) {
++    const payload = JSON.stringify({ ns, uid, exp })
++    const bytes = new TextEncoder().encode(payload)
++    return `header.${btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')}.signature`
++}
++
++beforeEach(() => localStorage.clear())
++afterEach(() => vi.restoreAllMocks())
++
++describe('project collapse storage identity', () => {
++    it('isolates Hubs, namespaces and users, while surviving token refresh', () => {
++        const key = getProjectGroupCollapseStorageKey('https://hub.test/', token('default'))
++        expect(key).not.toBeNull()
++        expect(getProjectGroupCollapseStorageKey('https://hub.test', token('default', 1, 999))).toBe(key)
++        expect(getProjectGroupCollapseStorageKey('https://other.test', token('default'))).not.toBe(key)
++        expect(getProjectGroupCollapseStorageKey('https://hub.test', token('tenant'))).not.toBe(key)
++        expect(getProjectGroupCollapseStorageKey('https://hub.test', token('default', 2))).not.toBe(key)
++        expect(key).not.toContain('signature')
++    })
++
++    it('decodes non-ASCII namespaces and keeps Hub subpaths distinct', () => {
++        expect(getProjectGroupCollapseStorageKey('https://hub.test', token('用户'))).toContain('用户')
++        expect(getProjectGroupCollapseStorageKey('https://hub.test/hapi', token('default')))
++            .not.toBe(getProjectGroupCollapseStorageKey('https://hub.test', token('default')))
++    })
++
++    it.each(['', 'broken', 'header.not-json.signature', 'header.e30.signature'])(
++        'disables persistence rather than sharing an unknown identity: %s', value => {
++            expect(getProjectGroupCollapseStorageKey('https://hub.test', value)).toBeNull()
++        },
++    )
++})
++
++describe('project collapse storage failures', () => {
++    it.each(['broken-json', '[]', 'null', 'true', '"text"'])(
++        'ignores malformed saved state: %s', value => {
++            localStorage.setItem('scope', value)
++            const { result } = renderHook(() => useProjectGroupCollapse('scope'))
++            expect(result.current.collapseOverrides.size).toBe(0)
++        },
++    )
++
++    it('accepts only boolean choices and safely handles unusual project keys', () => {
++        localStorage.setItem('scope', '{"open":false,"closed":true,"invalid":"false","__proto__":true}')
++        const { result } = renderHook(() => useProjectGroupCollapse('scope'))
++        expect([...result.current.collapseOverrides]).toEqual([['open', false], ['closed', true], ['__proto__', true]])
++        act(() => result.current.setManualCollapse('constructor', false))
++        expect(JSON.parse(localStorage.getItem('scope')!).constructor).toBe(false)
++    })
++
++    it('keeps existing closed projects until explicitly reopened in the same scope', () => {
++        const legacy = 'hapi.closed-projects.v1:scope'
++        localStorage.setItem(legacy, JSON.stringify(['manual-reopen', 'keep-closed']))
++        const { result, unmount } = renderHook(() => useProjectGroupCollapse('scope', legacy))
++        expect(result.current.collapseOverrides.get('manual-reopen')).toBe(true)
++        act(() => result.current.setManualCollapse('manual-reopen', false))
++        unmount()
++        const reloaded = renderHook(() => useProjectGroupCollapse('scope', legacy))
++        expect(reloaded.result.current.collapseOverrides.get('manual-reopen')).toBe(false)
++        expect(reloaded.result.current.collapseOverrides.get('keep-closed')).toBe(true)
++        expect(localStorage.getItem(legacy)).toBe('["manual-reopen","keep-closed"]')
++    })
++
++    it('never writes automatic reveals, including after a later manual toggle', () => {
++        const { result } = renderHook(() => useProjectGroupCollapse('scope'))
++        act(() => result.current.revealGroup('auto'))
++        act(() => result.current.setManualCollapse('manual', false))
++        expect(JSON.parse(localStorage.getItem('scope')!)).toEqual({ manual: false })
++    })
++
++    it('bounds saved history without pruning groups absent from current results', () => {
++        const saved = Object.fromEntries(Array.from({ length: 2001 }, (_, i) => [`group-${i}`, false]))
++        localStorage.setItem('scope', JSON.stringify(saved))
++        const { result } = renderHook(() => useProjectGroupCollapse('scope'))
++        expect(result.current.collapseOverrides.size).toBe(2000)
++        act(() => result.current.setManualCollapse('new', true))
++        const restored = JSON.parse(localStorage.getItem('scope')!)
++        expect(Object.keys(restored)).toHaveLength(2000)
++        expect(restored['group-1']).toBeUndefined()
++        expect(restored.new).toBe(true)
++    })
++
++    it('keeps an unscoped list usable without storing preferences', () => {
++        const { result } = renderHook(() => useProjectGroupCollapse(null))
++        act(() => result.current.setManualCollapse('group', false))
++        expect(result.current.collapseOverrides.get('group')).toBe(false)
++        expect(localStorage.length).toBe(0)
++    })
++})
+diff --git a/web/src/hooks/useProjectGroupCollapse.ts b/web/src/hooks/useProjectGroupCollapse.ts
+new file mode 100644
+index 000000000..708763a33
+--- /dev/null
++++ b/web/src/hooks/useProjectGroupCollapse.ts
+@@ -0,0 +1,106 @@
++import { useCallback, useState } from 'react'
++
++const STORAGE_PREFIX = 'hapi.projectGroupCollapse.v1.'
++const MAX_SAVED_GROUPS = 2000
++
++// Decode only stable identity claims, never store the JWT or access token.
++// This partitions a display preference; authentication remains the Hub's job.
++export function getProjectGroupCollapseStorageKey(baseUrl: string, token: string): string | null {
++    try {
++        const payload = token.split('.')[1]
++        if (!payload) return null
++        const base64 = payload.replace(/-/g, '+').replace(/_/g, '/')
++        const bytes = Uint8Array.from(atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, '=')), c => c.charCodeAt(0))
++        const claims: unknown = JSON.parse(new TextDecoder().decode(bytes))
++        if (!claims || typeof claims !== 'object') return null
++        const { uid, ns } = claims as { uid?: unknown; ns?: unknown }
++        if (typeof uid !== 'number' || !Number.isFinite(uid) || typeof ns !== 'string') return null
++        const hubUrl = new URL(baseUrl)
++        hubUrl.hash = ''
++        hubUrl.search = ''
++        const hub = hubUrl.toString().replace(/\/+$/, '')
++        return STORAGE_PREFIX + JSON.stringify([hub, uid, ns])
++    } catch {
++        return null
++    }
++}
++
++function readOverrides(key: string | null): Map<string, boolean> {
++    try {
++        if (!key) return new Map()
++        const parsed: unknown = JSON.parse(localStorage.getItem(key) ?? 'null')
++        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return new Map()
++        return new Map(Object.entries(parsed)
++            .filter((entry): entry is [string, boolean] => typeof entry[1] === 'boolean')
++            .slice(-MAX_SAVED_GROUPS))
++    } catch {
++        return new Map()
++    }
++}
++
++function readLegacyFolds(key: string | null): Array<[string, boolean]> {
++    try {
++        if (!key) return []
++        const stored: unknown = JSON.parse(localStorage.getItem(key) ?? '[]')
++        return Array.isArray(stored)
++            ? stored.filter((value): value is string => typeof value === 'string').slice(-MAX_SAVED_GROUPS).map(value => [value, true])
++            : []
++    } catch {
++        return []
++    }
++}
++
++function loadState(storageKey: string | null, legacyFoldKey: string | null) {
++    // Honor existing main-branch closed projects. Explicit choices (including
++    // reopening one of those projects) take precedence without rewriting the old key.
++    const legacy = readLegacyFolds(legacyFoldKey)
++    const manual = readOverrides(storageKey)
++    const overrides = new Map([...legacy, ...manual])
++    return { storageKey, legacyFoldKey, manual, overrides }
++}
++
++export function useProjectGroupCollapse(storageKey: string | null, legacyFoldKey: string | null = null) {
++    const [state, setState] = useState(() => loadState(storageKey, legacyFoldKey))
++    // Restore the new identity before rendering it; never expose or write the
++    // previous Hub/user's choices under the new storage key.
++    if (state.storageKey !== storageKey || state.legacyFoldKey !== legacyFoldKey) {
++        setState(loadState(storageKey, legacyFoldKey))
++    }
++
++    const setManualCollapse = (groupKey: string, collapsed: boolean) => {
++        const manual = new Map(state.manual)
++        manual.delete(groupKey)
++        manual.set(groupKey, collapsed)
++        // Keep absent projects (loading/filtering can hide them), but bound
++        // storage growth as users visit new directories over time.
++        if (manual.size > MAX_SAVED_GROUPS) manual.delete(manual.keys().next().value!)
++        const overrides = new Map(state.overrides)
++        overrides.set(groupKey, collapsed)
++        setState({ storageKey, legacyFoldKey, manual, overrides })
++        try {
++            if (storageKey) {
++                localStorage.setItem(storageKey, JSON.stringify(Object.fromEntries(manual)))
++            } else if (legacyFoldKey) {
++                // Non-router callers still use the upstream closed-project list.
++                // Temporary reveals are not persisted in either format.
++                const closed = new Set(readLegacyFolds(legacyFoldKey).map(([key]) => key))
++                if (collapsed) closed.add(groupKey)
++                else closed.delete(groupKey)
++                localStorage.setItem(legacyFoldKey, JSON.stringify([...closed].slice(-MAX_SAVED_GROUPS)))
++            }
++        } catch {
++            // A blocked/full store must not prevent in-memory toggles.
++        }
++    }
++
++    const revealGroup = useCallback((groupKey: string) => {
++        setState(previous => {
++            if (previous.overrides.get(groupKey) === false) return previous
++            const overrides = new Map(previous.overrides)
++            overrides.set(groupKey, false)
++            return { ...previous, overrides }
++        })
++    }, [])
++
++    return { collapseOverrides: state.overrides, setManualCollapse, revealGroup }
++}
+diff --git a/web/src/lib/settingsTransfer.test.ts b/web/src/lib/settingsTransfer.test.ts
+index 23d2b8196..3c4f5eccd 100644
+--- a/web/src/lib/settingsTransfer.test.ts
++++ b/web/src/lib/settingsTransfer.test.ts
+@@ -43,6 +43,7 @@ const NOT_SETTINGS_KEYS = new Set([
+     'hapi-mention-inactive-collapsed',
+     'hapi-session-list-machine-filter',
+     'hapi.scratchlist-collapsed.v1.',
++    'hapi.projectGroupCollapse.v1.',
+     // Onboarding and dismissals
+     'hapi.nativeAppPromo.v1',
+     'hapi.fue.v1.',
+diff --git a/web/src/router.tsx b/web/src/router.tsx
+index 6d1f51b76..48fc8069f 100644
+--- a/web/src/router.tsx
++++ b/web/src/router.tsx
+@@ -35,6 +35,7 @@ import { useSidebarResize } from '@/hooks/useSidebarResize'
+ import { useMessages } from '@/hooks/queries/useMessages'
+ import { useMachines } from '@/hooks/queries/useMachines'
+ import { useMachineLabels } from '@/hooks/useMachineLabels'
++import { getProjectGroupCollapseStorageKey } from '@/hooks/useProjectGroupCollapse'
+ import { useMentionInactiveCollapsed } from '@/hooks/useMentionInactiveCollapsed'
+ import { useSession } from '@/hooks/queries/useSession'
+ import { useCursorChatStoreStatus } from '@/hooks/queries/useCursorChatStoreStatus'
+@@ -148,7 +149,8 @@ function SettingsIcon(props: { className?: string }) {
+ }
+ 
+ function SessionsPage() {
+-    const { api, baseUrl, titleSuggestionAvailable = false } = useAppContext()
++    const { api, baseUrl, token, titleSuggestionAvailable = false } = useAppContext()
++    const collapseStorageKey = useMemo(() => getProjectGroupCollapseStorageKey(baseUrl, token), [baseUrl, token])
+     const navigate = useNavigate()
+     const router = useRouter()
+     const pathname = useLocation({ select: location => location.pathname })
+@@ -314,7 +316,8 @@ function SessionsPage() {
+                         </div>
+                     ) : null}
+                     <SessionList
+-                        key={initializedHub === baseUrl ? 'last-seen-ready' : 'last-seen-pending'}
++                        key={JSON.stringify([collapseStorageKey, initializedHub === baseUrl])}
++                        collapseStorageKey={collapseStorageKey}
+                         sessions={sessions}
+                         selectedSessionId={selectedSessionId}
+                         onSelect={handleSelectSession}
+-- 
+2.54.0 (Apple Git-157)
+

@@ -1,0 +1,82 @@
+From 6b608d92639eae1196c7b69113fe6a1090a92945 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 28 Nov 2026 06:29:00 +0800
+Subject: [PATCH] Isolate possible Cursor commands before the first ACP catalog
+
+---
+ cli/src/cursor/cursorAcpRemoteLauncher.ts     |  3 ++-
+ cli/src/cursor/cursorUserMessageQueue.test.ts | 14 ++++++++++++++
+ cli/src/cursor/cursorUserMessageQueue.ts      |  5 +++++
+ cli/src/cursor/runCursor.ts                   |  2 +-
+ 4 files changed, 22 insertions(+), 2 deletions(-)
+
+diff --git a/cli/src/cursor/cursorAcpRemoteLauncher.ts b/cli/src/cursor/cursorAcpRemoteLauncher.ts
+index 04ce073dd..0f8a57d9a 100644
+--- a/cli/src/cursor/cursorAcpRemoteLauncher.ts
++++ b/cli/src/cursor/cursorAcpRemoteLauncher.ts
+@@ -1762,7 +1762,8 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
+ 
+     private wireAvailableCommands(backend: AcpSdkBackend, sessionId: string): void {
+         const session = this.session;
+-        session.availableSlashCommands ??= new Set(session.client.getMetadata()?.slashCommands);
++        const cachedCommands = session.client.getMetadata()?.slashCommands;
++        if (cachedCommands) session.availableSlashCommands ??= new Set(cachedCommands);
+         const publish = (reported: boolean) => {
+             if (this.backend !== backend || this.sessionTeardownStarted) return;
+             const commands = new Set(backend.getAvailableCommands(sessionId)
+diff --git a/cli/src/cursor/cursorUserMessageQueue.test.ts b/cli/src/cursor/cursorUserMessageQueue.test.ts
+index 830544eec..9aafaa54a 100644
+--- a/cli/src/cursor/cursorUserMessageQueue.test.ts
++++ b/cli/src/cursor/cursorUserMessageQueue.test.ts
+@@ -40,6 +40,20 @@ describe('enqueueCursorUserMessage', () => {
+         expect(second?.message).toBe('next task');
+     });
+ 
++    it('isolates a possible command while the first catalog is unknown', async () => {
++        const queue = new MessageQueue2<EnhancedMode>((m) => m.permissionMode);
++        enqueueCursorUserMessage(queue, 'before startup', mode, 'a');
++        enqueueCursorUserMessage(queue, '/rename-chat my task', mode, 'b');
++        enqueueCursorUserMessage(queue, 'next task', mode, 'c');
++
++        expect((await queue.waitForMessagesAndGetAsString())?.message).toBe('before startup');
++        expect(await queue.waitForMessagesAndGetAsString()).toMatchObject({
++            message: '/rename-chat my task',
++            isolate: true
++        });
++        expect((await queue.waitForMessagesAndGetAsString())?.message).toBe('next task');
++    });
++
+     it('preserves a normal prompt queued before a slash command', async () => {
+         const queue = new MessageQueue2<EnhancedMode>((m) => m.permissionMode);
+         enqueueCursorUserMessage(queue, 'first work', mode, 'a');
+diff --git a/cli/src/cursor/cursorUserMessageQueue.ts b/cli/src/cursor/cursorUserMessageQueue.ts
+index 61b4dde82..2dee6aefd 100644
+--- a/cli/src/cursor/cursorUserMessageQueue.ts
++++ b/cli/src/cursor/cursorUserMessageQueue.ts
+@@ -20,5 +20,10 @@ export function enqueueCursorUserMessage(
+         messageQueue.pushIsolated(formattedText.trim(), enhancedMode, localId);
+         return;
+     }
++    // Before the first catalog, a newly advertised command may already be queued.
++    if (availableSlashCommands === undefined && isCursorSlashCommand(formattedText, undefined, true)) {
++        messageQueue.pushIsolated(formattedText, enhancedMode, localId);
++        return;
++    }
+     messageQueue.push(formattedText, enhancedMode, localId);
+ }
+diff --git a/cli/src/cursor/runCursor.ts b/cli/src/cursor/runCursor.ts
+index 3f7a523e9..274f1d562 100644
+--- a/cli/src/cursor/runCursor.ts
++++ b/cli/src/cursor/runCursor.ts
+@@ -63,7 +63,7 @@ export async function runCursor(opts: {
+             reservedSessionId: opts.reservedSessionId
+         });
+     const { api, session, metadata } = bootstrap;
+-    const previousSlashCommands = new Set(metadata.slashCommands);
++    const previousSlashCommands = metadata.slashCommands && new Set(metadata.slashCommands);
+ 
+     const startingMode: 'local' | 'remote' = startedBy === 'runner' ? 'remote' : 'local';
+ 
+-- 
+2.54.0 (Apple Git-157)
+

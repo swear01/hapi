@@ -63,7 +63,7 @@ export async function runCursor(opts: {
             reservedSessionId: opts.reservedSessionId
         });
     const { api, session, metadata } = bootstrap;
-    const previousSlashCommands = new Set(metadata.slashCommands);
+    const previousSlashCommands = metadata.slashCommands && new Set(metadata.slashCommands);
 
     const startingMode: 'local' | 'remote' = startedBy === 'runner' ? 'remote' : 'local';
 

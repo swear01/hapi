@@ -1,0 +1,80 @@
+From 932410dbdaf2769cf7711e444ca7e0d4c7836782 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 28 Nov 2026 06:28:20 +0800
+Subject: [PATCH] Preserve project preferences edited by other tabs
+
+---
+ e2e/project-expansion.spec.ts            | 16 ++++++++++++++++
+ web/src/hooks/useProjectGroupCollapse.ts | 11 ++++++-----
+ 2 files changed, 22 insertions(+), 5 deletions(-)
+
+diff --git a/e2e/project-expansion.spec.ts b/e2e/project-expansion.spec.ts
+index d659ecffa..8f02a87a8 100644
+--- a/e2e/project-expansion.spec.ts
++++ b/e2e/project-expansion.spec.ts
+@@ -129,3 +129,19 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 393, height: 852
+         })
+     })
+ }
++
++test('keeps unrelated preferences when two open tabs edit separate projects', async ({ page, context }) => {
++    const secondTab = await context.newPage()
++    for (const tab of [page, secondTab]) {
++        await tab.goto(fixture)
++        await expect(tab.locator('[title="/work/project"]')).toBeVisible()
++    }
++    await header(page).click()
++    await expect(panel(page)).toHaveAttribute('data-open', 'true')
++    const other = secondTab.locator('[title="/work/other"]')
++    await other.click()
++    await page.reload()
++    await expect(panel(page)).toHaveAttribute('data-open', 'true')
++    await secondTab.reload()
++    await expect(other.locator('xpath=following-sibling::*[1]')).toHaveAttribute('data-open', 'true')
++})
+diff --git a/web/src/hooks/useProjectGroupCollapse.ts b/web/src/hooks/useProjectGroupCollapse.ts
+index 708763a33..0221b9df2 100644
+--- a/web/src/hooks/useProjectGroupCollapse.ts
++++ b/web/src/hooks/useProjectGroupCollapse.ts
+@@ -25,16 +25,16 @@ export function getProjectGroupCollapseStorageKey(baseUrl: string, token: string
+     }
+ }
+ 
+-function readOverrides(key: string | null): Map<string, boolean> {
++function readOverrides(key: string | null): Map<string, boolean> | undefined {
+     try {
+-        if (!key) return new Map()
++        if (!key) return
+         const parsed: unknown = JSON.parse(localStorage.getItem(key) ?? 'null')
+         if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return new Map()
+         return new Map(Object.entries(parsed)
+             .filter((entry): entry is [string, boolean] => typeof entry[1] === 'boolean')
+             .slice(-MAX_SAVED_GROUPS))
+     } catch {
+-        return new Map()
++        return
+     }
+ }
+ 
+@@ -54,7 +54,7 @@ function loadState(storageKey: string | null, legacyFoldKey: string | null) {
+     // Honor existing main-branch closed projects. Explicit choices (including
+     // reopening one of those projects) take precedence without rewriting the old key.
+     const legacy = readLegacyFolds(legacyFoldKey)
+-    const manual = readOverrides(storageKey)
++    const manual = readOverrides(storageKey) ?? new Map<string, boolean>()
+     const overrides = new Map([...legacy, ...manual])
+     return { storageKey, legacyFoldKey, manual, overrides }
+ }
+@@ -68,7 +68,8 @@ export function useProjectGroupCollapse(storageKey: string | null, legacyFoldKey
+     }
+ 
+     const setManualCollapse = (groupKey: string, collapsed: boolean) => {
+-        const manual = new Map(state.manual)
++        // Another tab may have written choices since this list mounted.
++        const manual = new Map(readOverrides(storageKey) ?? state.manual)
+         manual.delete(groupKey)
+         manual.set(groupKey, collapsed)
+         // Keep absent projects (loading/filtering can hide them), but bound
+-- 
+2.54.0 (Apple Git-157)
+

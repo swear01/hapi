@@ -40,6 +40,20 @@ describe('enqueueCursorUserMessage', () => {
         expect(second?.message).toBe('next task');
     });
 
+    it('isolates a possible command while the first catalog is unknown', async () => {
+        const queue = new MessageQueue2<EnhancedMode>((m) => m.permissionMode);
+        enqueueCursorUserMessage(queue, 'before startup', mode, 'a');
+        enqueueCursorUserMessage(queue, '/rename-chat my task', mode, 'b');
+        enqueueCursorUserMessage(queue, 'next task', mode, 'c');
+
+        expect((await queue.waitForMessagesAndGetAsString())?.message).toBe('before startup');
+        expect(await queue.waitForMessagesAndGetAsString()).toMatchObject({
+            message: '/rename-chat my task',
+            isolate: true
+        });
+        expect((await queue.waitForMessagesAndGetAsString())?.message).toBe('next task');
+    });
+
     it('preserves a normal prompt queued before a slash command', async () => {
         const queue = new MessageQueue2<EnhancedMode>((m) => m.permissionMode);
         enqueueCursorUserMessage(queue, 'first work', mode, 'a');

@@ -72,7 +72,7 @@ export function createPermissionsRoutes(getSyncEngine: () => SyncEngine | null):
                 return c.json({ error: error.message }, 409)
             }
             if (error instanceof PermissionResponseRejectedError) {
-                return c.json({ error: error.message }, 502)
+                return c.json({ error: error.message }, 500)
             }
             throw error
         }
@@ -111,7 +111,7 @@ export function createPermissionsRoutes(getSyncEngine: () => SyncEngine | null):
                 return c.json({ error: error.message }, 409)
             }
             if (error instanceof PermissionResponseRejectedError) {
-                return c.json({ error: error.message }, 502)
+                return c.json({ error: error.message }, 500)
             }
             throw error
         }

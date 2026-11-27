@@ -20,6 +20,7 @@ jobs:
                   terminal-wrap-fidelity.spec.ts
                   session-list-fork-menu.spec.ts
                   composer-copy.spec.ts
+                  composer-long-paste.spec.ts
                   session-list-scroll.spec.ts
                   session-activity.spec.ts
                   cold-initial-tail.spec.ts
@@ -31,6 +32,7 @@ jobs:
                   composer-attachment-controls.spec.ts
                   image-preview-back.spec.ts
                   opencode-fork-buttons.spec.ts
+                  project-expansion.spec.ts
                   auth-network-recovery.spec.ts
             # playwright.config.ts already sets `trace: 'retain-on-failure'` and
             # the html reporter on CI, but nothing collected the output, so every

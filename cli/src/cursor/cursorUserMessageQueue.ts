@@ -20,5 +20,10 @@ export function enqueueCursorUserMessage(
         messageQueue.pushIsolated(formattedText.trim(), enhancedMode, localId);
         return;
     }
+    // Before the first catalog, a newly advertised command may already be queued.
+    if (availableSlashCommands === undefined && isCursorSlashCommand(formattedText, undefined, true)) {
+        messageQueue.pushIsolated(formattedText, enhancedMode, localId);
+        return;
+    }
     messageQueue.push(formattedText, enhancedMode, localId);
 }

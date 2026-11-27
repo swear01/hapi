@@ -21,7 +21,7 @@ import {
     writeFileSync
 } from 'node:fs'
 import { hostname, tmpdir } from 'node:os'
-import { dirname, isAbsolute, join, relative } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 
 import type { PrepareCursorImportRpcResponse } from '@hapi/protocol/apiTypes'
 import { AcpVerifyProbe, type AcpProbeOptions } from '@/cursor/acpVerifyProbe'
@@ -440,6 +440,8 @@ async function verifyCursorStore(args: {
             ...process.env,
             HOME: tmpRoot,
             HAPI_HOME: tmpRoot,
+            // Cursor config overrides take precedence over HOME.
+            ...(args.knownMessageCount !== undefined ? { CURSOR_CONFIG_DIR: fakeCursor } : {}),
             NO_COLOR: '1'
         }
         if (process.platform === 'win32') {
@@ -621,13 +623,24 @@ export async function prepareCursorImportOnDisk(options: {
         return failure('missing_on_disk_store', `cursor uuid '${options.uuid}' fails basename validation`)
     }
 
-    const acpSessionDir = join(options.home, '.cursor', 'acp-sessions', options.uuid)
+    const cursorRoot = join(options.home, '.cursor')
+    const acpSessionDir = join(cursorRoot, 'acp-sessions', options.uuid)
     const acpStorePath = join(acpSessionDir, 'store.db')
     const acpMetaPath = join(acpSessionDir, 'meta.json')
     let sourceFormat: CursorImportSourceFormat
     let sourceStorePath: string
     let resolvedWorkspacePath: string | null = options.workspacePath ?? null
     const strict = options.knownMessageCount !== undefined
+    if (strict) {
+        const override = process.env.CURSOR_CONFIG_DIR
+        const xdgConfigHome = process.env.XDG_CONFIG_HOME
+        const configuredRoot = override?.trim()
+            ? override
+            : xdgConfigHome?.trim() ? join(xdgConfigHome, 'cursor') : cursorRoot
+        if (!isAbsolute(configuredRoot) || resolve(configuredRoot) !== resolve(cursorRoot)) {
+            return failure('missing_on_disk_store', 'Verified legacy resume requires the standard Cursor config directory')
+        }
+    }
     const retryVerifiedCopy = strict && existsSync(acpSessionDir)
     if (retryVerifiedCopy && !lstatSync(join(acpSessionDir, LEGACY_COPY_RECEIPT), { throwIfNoEntry: false })?.isFile()) {
         return failure('target_already_exists', 'Legacy resume requires a new or unchanged verified ACP destination')
