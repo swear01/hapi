@@ -230,6 +230,10 @@ These commands are isolated in the queue and forwarded to the agent (ACP prompt 
 
 Interactive TUI-only commands (`/config`, `/mcp`, `/sandbox`, `/btw`, `/rewind`, …) are not supported remotely.
 
+### Native conversation history
+
+On Cursor Agent `2026.11.22-e9042b2`, an idle remote ACP session can fork a verified native chat store. Historical fork and conversation-only rewind need a checkpoint for the selected user message. See [Conversation history](./conversation-history.md#rewind) for checkpoint lifetime and recovery.
+
 ### Modes
 
 - **Local mode** - Run `hapi cursor` from terminal. Full interactive experience.
