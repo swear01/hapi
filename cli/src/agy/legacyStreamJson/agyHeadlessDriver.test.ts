@@ -1160,22 +1160,20 @@ describe('AgyHeadlessDriver', () => {
 
         queue.push('hello', { permissionMode: 'request-review' }, 'local-1');
         const launchPromise = driver.launch();
-        await new Promise((r) => setTimeout(r, 400));
-        // Cancel the queued message (web Cancel path) while the batch sits in
-        // retry backoff: the queue has nothing (batch is outside it), but the
-        // driver-owned retry state must remove it so the retry never spawns.
-        const removed = session.queue.cancelByLocalId('local-1');
-        const retryRemoved = cancelQueued(client, 'local-1');
-        await new Promise((r) => setTimeout(r, 2000));
-        queue.close();
-        session.stopKeepAlive();
-        await launchPromise;
-
-        // No retry spawn after the cancel; queue-level cancel found nothing
-        // (batch was outside the queue), the retry-state cancel removed it.
-        expect(removed).toBe(false);
-        expect(retryRemoved).toBe(true);
-        expect(spawnCount).toBe(1);
+        try {
+            // Wait for the first child to close and hand the message to the retry state.
+            await vi.waitFor(() => {
+                expect(driver['retryDelivery']?.localIds).toContain('local-1');
+            }, { timeout: 5000 });
+            expect(session.queue.cancelByLocalId('local-1')).toBe(false);
+            expect(cancelQueued(client, 'local-1')).toBe(true);
+            await new Promise((r) => setTimeout(r, 2000));
+            expect(spawnCount).toBe(1);
+        } finally {
+            queue.close();
+            session.stopKeepAlive();
+            await launchPromise;
+        }
     }, 15000);
 
     it('adopts the conversation id from a step_update when init is absent', async () => {
