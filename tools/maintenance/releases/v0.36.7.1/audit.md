@@ -8,8 +8,8 @@
 
 - Web session header labels (#1158), drag-to-mention (#1418), reasoning collapse (#1592), autocomplete (#1660), generated media (#1666), cancellation of stale file search (#1702), and expanded composer Enter behavior (#1729).
 - Packaged inline-media health check (#1920), Hub test settings isolation (#2510), and removal of unavailable model controls from locally driven sessions (#2584).
-- The own-PR exception for #1418 is limited to its upstream merge/CI status. The exact head received a clean HAPI Bot review and the fork covers both affected components. #1702 is a scope exception for one cancellable request across browser, hub and runner.
-- Open personal PRs #2096 and #2099 remain deferred because findings affect transcript completeness. #2342 remains deferred to avoid using the next official schema number for a private migration. New personal draft #2621 is a cosmetic icon update awaiting review.
+- The own-PR exception for #1418 covers upstream merge status and an unavailable latest-head review. The refreshed PR applied to the same source tree as the previously clean-reviewed patch, and its functional CI passed. #1702 is a scope exception for one cancellable request across browser, hub and runner.
+- Open personal PRs #2096 and #2099 remain deferred because findings affect transcript completeness. #2342 remains deferred to avoid using the next official schema number for a private migration. New personal PRs #2621 and #2622 are interface refinements awaiting a completed latest-head review.
 - The official base absorbed #1414, #1616, #2346, #2410, #2423 and #2432. Older carries #1615, #1617, #1849, #1921 and #2092 did not pass the current selection. The older fork-specific rewind repair depended on #2092 and was removed with it.
 
 ## Fork behavior and distribution

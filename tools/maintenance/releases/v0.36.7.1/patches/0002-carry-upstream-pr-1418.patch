@@ -3,7 +3,7 @@ From: swear01 <stanley.yellow1@gmail.com>
 Date: Fri, 27 Nov 2026 18:04:16 +0800
 Subject: [PATCH] carry(upstream): PR #1418
 
-Upstream-PR-Head: c488d1ebc9ff31cbb378ed1cdbadc22cf707e720
+Upstream-PR-Head: a465365cd54d11fb3dfe030171c99c01660d466a
 ---
  .../AssistantChat/HappyComposer.tsx           |   9 +
  .../AssistantChat/RichComposerInput.test.tsx  | 164 ++++++++++++++++++

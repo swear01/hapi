@@ -3,7 +3,7 @@
 # expected_source_tree=e83744584283d04c475ba9aeb2a1646ec5005f0e
 # previous_release_records=inherit
 0001-keep-skill-discovery-roots-and-test-home-isolation.patch	regenerate	overlay	73e3fa006fd2043f70003fdcbf1899d5fd8d19e3
-0002-carry-upstream-pr-1418.patch	carry	pr-1418	c488d1ebc9ff31cbb378ed1cdbadc22cf707e720
+0002-carry-upstream-pr-1418.patch	carry	pr-1418	a465365cd54d11fb3dfe030171c99c01660d466a
 0003-chore-release-package-signed-hapi-0-36-7-1-standalone-binaries.patch	regenerate	overlay	74dc80898c692f98f1bfbf5df1deb82f008e388e,6c507f16d5b9ca759c1169ed7d49cd4a8c43e64c,57ba98475221538affbe91523ab1ecf14f63b13a
 0004-carry-upstream-pr-1158.patch	carry	pr-1158	b00e39794e707d3bdbd6ab1029b5a6576b3cf985
 0005-carry-upstream-pr-1729.patch	carry	pr-1729	f04288cacaae35ee2c50b381bc4db5604eb03f80
