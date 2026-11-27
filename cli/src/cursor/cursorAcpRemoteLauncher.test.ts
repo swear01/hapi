@@ -715,7 +715,39 @@ describe('cursorAcpRemoteLauncher', () => {
         delete process.env.HAPI_SESSION_SUMMARY_CONTRACT;
     });
 
-    it('keeps the source bound and pending input fenced until the Hub commits the exact prepared rewind', async () => {
+    it('keeps fork and rewind fenced during permission recovery with an empty queue', async () => {
+        const fork = vi.spyOn(CursorConversationHistory.prototype, 'fork').mockReturnValue('forked-acp-session');
+        const session = makeSession(null, { keepQueueOpen: true });
+        const { handlers } = session.client.rpcHandlerManager as unknown as {
+            handlers: Map<string, (payload: unknown) => Promise<unknown>>
+        };
+        const running = cursorAcpRemoteLauncher(session);
+        try {
+            await vi.waitFor(() => expect(session.client.emitSessionReady).toHaveBeenCalledOnce());
+            harness.rejectedModes.add('agent');
+            session.queue.push('inspect in Ask mode', { permissionMode: 'ask' }, 'ask-user');
+            await vi.waitFor(() => expect(session.client.sendAgentMessage).toHaveBeenCalledWith(expect.objectContaining({
+                type: 'error', message: expect.stringContaining('could not restore default mode')
+            })));
+            expect(session.queue.size()).toBe(0);
+            expect(session.getPermissionMode()).toBe('ask');
+            const forkCurrent = handlers.get(RPC_METHODS.ForkConversation)!;
+            const rewind = handlers.get(RPC_METHODS.RewindConversation)!;
+            const source = { cursorSourceSessionId: 'new-acp-session' };
+            await expect(forkCurrent(source)).rejects.toThrow('idle ACP session');
+            await expect(rewind({ ...source, messageLocalId: 'ask-user' })).rejects.toThrow('idle ACP session');
+            expect(fork).not.toHaveBeenCalled();
+            harness.rejectedModes.delete('agent');
+            await session.applyPermissionModeConfig('default');
+            await expect(forkCurrent(source)).resolves.toMatchObject({ nativeSessionId: 'forked-acp-session' });
+        } finally {
+            await session.kill();
+            await running;
+            fork.mockRestore();
+        }
+    });
+
+    it('keeps the source bound and fences input, permission and model changes until the Hub commits the exact prepared rewind', async () => {
         const fork = vi.spyOn(CursorConversationHistory.prototype, 'fork').mockReturnValue('loaded-acp-session');
         const session = makeSession(null, { keepQueueOpen: true });
         const { handlers } = session.client.rpcHandlerManager as unknown as {
@@ -734,6 +766,12 @@ describe('cursorAcpRemoteLauncher', () => {
             harness.rejectedModes.clear();
             const prepared = await rewind({ cursorSourceSessionId: 'new-acp-session', messageLocalId });
             expect(prepared).toMatchObject({ success: true, nativeSessionId: 'loaded-acp-session' });
+            const confirmedMode = session.getPermissionMode();
+            const confirmedModel = session.model;
+            await expect(session.applyPermissionModeConfig('ask')).rejects.toThrow('Cursor rewind is pending');
+            await expect(session.applyModelConfig('composer-2.5[fast=true]')).rejects.toThrow('Cursor rewind is pending');
+            expect(session.getPermissionMode()).toBe(confirmedMode);
+            expect(session.model).toBe(confirmedModel);
             expect(session.onSessionFoundWithProtocol).not.toHaveBeenCalledWith('loaded-acp-session', 'acp');
             expect(fork).toHaveBeenCalledWith('new-acp-session', messageLocalId);
             await expect(session.applyPermissionModeConfig('yolo')).rejects.toThrow('rewind is pending');

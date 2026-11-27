@@ -2770,7 +2770,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
 
     private async initializeReplacementBackend(
         backend: AcpSdkBackend,
-        { resumeSessionId }: { resumeSessionId: string; spawnModel: string | null | undefined }
+        { resumeSessionId, spawnModel }: { resumeSessionId: string; spawnModel: string | null | undefined }
     ): Promise<void> {
         const session = this.session;
         let recentStderrHint: string | null = null;
@@ -2822,21 +2822,17 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             throw new Error('Session ending; discarding replacement ACP backend');
         }
 
-        let modeAfterLoad: PermissionMode;
+        const modeAfterLoad = session.getPermissionMode() ?? 'default';
         try {
-            modeAfterLoad = await this.confirmLoadedPermissionMode(backend, acpSessionId);
+            await applyCursorAcpMode(backend, acpSessionId, modeAfterLoad);
+            if (this.sessionTeardownStarted || this.shouldExit) {
+                throw new Error('Session ending; discarding replacement ACP backend');
+            }
         } catch (error) {
             await this.disconnectBackend(backend).catch(() => {});
             throw error;
         }
         this.activateLoadedBackend(backend, acpSessionId, modeAfterLoad);
-    }
-
-    private async confirmLoadedPermissionMode(backend: AcpSdkBackend, acpSessionId: string): Promise<PermissionMode> {
-        const mode = this.session.getPermissionMode() ?? 'default';
-        await applyCursorAcpMode(backend, acpSessionId, mode);
-        if (this.sessionTeardownStarted || this.shouldExit) throw new Error('Session ending; discarding replacement ACP backend');
-        return mode;
     }
 
     private wireReplacementBackend(backend: AcpSdkBackend, onStderr: (hint: string | null) => void): void {
@@ -2862,7 +2858,6 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             (response) => this.handlePermissionResponse(this.extensionAdapter!, response)
         );
 
-        // Publish the confirmed native mode together with its backend.
         this.backendPermissionMode = modeAfterLoad;
         this.backend = backend;
         this.acpSessionId = acpSessionId;
