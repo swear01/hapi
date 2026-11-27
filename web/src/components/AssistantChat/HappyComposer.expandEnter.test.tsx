@@ -178,7 +178,8 @@ vi.mock('@/components/ChatInput/Autocomplete', () => ({ Autocomplete: () => null
 vi.mock('@/components/AssistantChat/StatusBar', () => ({ StatusBar: () => null }))
 vi.mock('./PiModelPanel', () => ({ PiModelPanel: () => null }))
 vi.mock('./PiThinkingLevelPanel', () => ({ PiThinkingLevelPanel: () => null }))
-vi.mock('@/components/AssistantChat/ComposerButtons', () => ({
+vi.mock('@/components/AssistantChat/ComposerButtons', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('@/components/AssistantChat/ComposerButtons')>()),
     ComposerButtons: (props: {
         onSend: () => void
         expanded: boolean

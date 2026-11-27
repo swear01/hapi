@@ -16,7 +16,8 @@ const mocks = vi.hoisted(() => ({
     }))
 }))
 
-vi.mock('@/hooks/useTelegram', () => ({
+vi.mock('@/hooks/useTelegram', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('@/hooks/useTelegram')>()),
     isTelegramApp: () => mocks.telegramApp
 }))
 
