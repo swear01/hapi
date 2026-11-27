@@ -1,902 +1,6 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
-    "Add Passkey" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "パスキーを追加"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Добавить ключ доступа"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "添加通行密钥"
-          }
-        }
-      }
-    },
-    "Adding passkey…" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "パスキーを追加中…"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Добавление ключа доступа…"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "正在添加通行密钥…"
-          }
-        }
-      }
-    },
-    "Automatically retry transient model errors once" : {
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "一時的なモデルエラーを自動で1回再試行"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Повторить запрос один раз при временной ошибке модели"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "暂时性模型错误自动重试一次"
-          }
-        }
-      }
-    },
-    "Continue" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "続ける"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Продолжить"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "继续"
-          }
-        }
-      }
-    },
-    "Could not add the passkey: %@" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "パスキーを追加できませんでした：%@"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Не удалось добавить ключ доступа: %@"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "无法添加通行密钥：%@"
-          }
-        }
-      }
-    },
-    "Could not delete the passkey: %@" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "パスキーを削除できませんでした：%@"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Не удалось удалить ключ доступа: %@"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "无法删除通行密钥：%@"
-          }
-        }
-      }
-    },
-    "Created %@" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "作成日：%@"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Создан %@"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "创建于 %@"
-          }
-        }
-      }
-    },
-    "Delete Passkey" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "パスキーを削除"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Удалить ключ доступа"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "删除通行密钥"
-          }
-        }
-      }
-    },
-    "Delete Passkey…" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "パスキーを削除…"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Удалить ключ доступа…"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "删除通行密钥…"
-          }
-        }
-      }
-    },
-    "Delete “%@”?" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "「%@」を削除しますか？"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Удалить «%@»?"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "删除“%@”？"
-          }
-        }
-      }
-    },
-    "Devices signed in with this passkey are signed out of the hub. The passkey itself stays in your password manager until you remove it there." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "このパスキーでサインインしているデバイスは Hub からサインアウトされます。パスキー自体は、パスワードマネージャから削除するまで残ります。"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Устройства, вошедшие с этим ключом, будут отключены от хаба. Сам ключ останется в менеджере паролей, пока вы не удалите его там."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "使用此通行密钥登录的设备将退出该 Hub。通行密钥本身会保留在你的密码管理器中，直到你在那里删除它。"
-          }
-        }
-      }
-    },
-    "Last used %@" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "最終使用：%@"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Использован %@"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "上次使用：%@"
-          }
-        }
-      }
-    },
-    "Name this passkey" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "パスキーに名前を付ける"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Назовите ключ доступа"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "为通行密钥命名"
-          }
-        }
-      }
-    },
-    "Never used" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "未使用"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Не использовался"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "从未使用"
-          }
-        }
-      }
-    },
-    "No passkeys yet." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "パスキーはまだありません。"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ключей доступа пока нет."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "还没有通行密钥。"
-          }
-        }
-      }
-    },
-    "Passkey" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "パスキー"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ключ доступа"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "通行密钥"
-          }
-        }
-      }
-    },
-    "Passkey name" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "パスキー名"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Название ключа"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "通行密钥名称"
-          }
-        }
-      }
-    },
-    "Passkey rejected" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "パスキーが拒否されました"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ключ доступа отклонён"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "通行密钥被拒绝"
-          }
-        }
-      }
-    },
-    "Passkey unavailable" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "パスキーを利用できません"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ключ доступа недоступен"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "通行密钥不可用"
-          }
-        }
-      }
-    },
-    "Passkeys" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "パスキー"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ключи доступа"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "通行密钥"
-          }
-        }
-      }
-    },
-    "Registered before the hub's access token was rotated; it can no longer sign in." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Hub のアクセストークンがローテーションされる前に登録されたため、サインインできません。"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Зарегистрирован до смены токена доступа хаба; вход с ним больше невозможен."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "在 Hub 访问令牌轮换前注册，已无法用于登录。"
-          }
-        }
-      }
-    },
-    "Revoked" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "無効"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Отозван"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "已失效"
-          }
-        }
-      }
-    },
-    "Shown in the hub's passkey list so you can tell your devices apart." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Hub のパスキー一覧に表示され、デバイスを見分けるのに役立ちます。"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Отображается в списке ключей хаба, чтобы различать устройства."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "显示在 Hub 的通行密钥列表中，便于区分你的设备。"
-          }
-        }
-      }
-    },
-    "Sign in to %@ from another device with “Sign in with a Passkey” — no access token needed. Passkeys work in both the web app and this app." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "別のデバイスから「パスキーでサインイン」を使って %@ にサインインできます。アクセストークンは不要です。パスキーは Web アプリとこのアプリの両方で使えます。"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Войдите в %@ с другого устройства через «Войти с ключом доступа» — токен доступа не нужен. Ключи работают и в браузере, и в этом приложении."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "在其他设备上通过“使用通行密钥登录”登录 %@，无需访问令牌。通行密钥可同时用于网页版和本应用。"
-          }
-        }
-      }
-    },
-    "Sign in to this hub without the access token" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "アクセストークンなしでこの Hub にサインイン"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Вход в этот хаб без токена доступа"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "无需访问令牌即可登录此 Hub"
-          }
-        }
-      }
-    },
-    "Sign in with a Passkey" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "パスキーでサインイン"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Войти с ключом доступа"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "使用通行密钥登录"
-          }
-        }
-      }
-    },
-    "Signing in…" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "サインイン中…"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Вход…"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "正在登录…"
-          }
-        }
-      }
-    },
-    "The hub could not register the passkey (HTTP %lld)." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Hub がパスキーを登録できませんでした（HTTP %lld）。"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Хаб не смог зарегистрировать ключ доступа (HTTP %lld)."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Hub 无法注册通行密钥（HTTP %lld）。"
-          }
-        }
-      }
-    },
-    "The hub did not accept this passkey. It may have been deleted, or the hub's access token was rotated. Pair with the access token instead." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Hub がこのパスキーを受け付けませんでした。削除されたか、Hub のアクセストークンがローテーションされた可能性があります。代わりにアクセストークンでペアリングしてください。"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Хаб не принял этот ключ доступа. Возможно, он удалён или токен доступа хаба был сменён. Подключитесь с токеном доступа."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Hub 未接受此通行密钥。它可能已被删除，或 Hub 的访问令牌已轮换。请改用访问令牌配对。"
-          }
-        }
-      }
-    },
-    "The hub requested a passkey for “%@”, but this app only supports auth.hapi.run. Update the hub." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Hub が「%@」のパスキーを要求しましたが、このアプリは auth.hapi.run のみに対応しています。Hub を更新してください。"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Хаб запросил ключ доступа для «%@», но приложение поддерживает только auth.hapi.run. Обновите хаб."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Hub 请求的是“%@”的通行密钥，但本应用仅支持 auth.hapi.run。请更新 Hub。"
-          }
-        }
-      }
-    },
-    "This device could not create the passkey: %@" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "このデバイスでパスキーを作成できませんでした：%@"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Это устройство не смогло создать ключ доступа: %@"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "此设备无法创建通行密钥：%@"
-          }
-        }
-      }
-    },
-    "This device could not use a passkey for this hub. Try again, or pair with the access token." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "このデバイスでこの Hub のパスキーを使用できませんでした。もう一度お試しいただくか、アクセストークンでペアリングしてください。"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Это устройство не смогло использовать ключ доступа для этого хаба. Повторите попытку или подключитесь с токеном доступа."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "此设备无法为该 Hub 使用通行密钥。请重试，或使用访问令牌配对。"
-          }
-        }
-      }
-    },
-    "This hub does not support passkeys. Update the hub to use them." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "この Hub はパスキーに対応していません。利用するには Hub を更新してください。"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Этот хаб не поддерживает ключи доступа. Обновите хаб, чтобы использовать их."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "此 Hub 不支持通行密钥。请更新 Hub 后使用。"
-          }
-        }
-      }
-    },
-    "This passkey is already registered with the hub." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "このパスキーはすでに Hub に登録されています。"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Этот ключ доступа уже зарегистрирован в хабе."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "此通行密钥已在 Hub 中注册。"
-          }
-        }
-      }
-    },
-    "Unnamed passkey" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "名前のないパスキー"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ключ без названия"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "未命名的通行密钥"
-          }
-        }
-      }
-    },
-    "Uses a passkey you added for this hub in Settings → Passkeys. No access token needed." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "「設定 → パスキー」でこの Hub に追加したパスキーを使用します。アクセストークンは不要です。"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Используется ключ доступа, добавленный для этого хаба в Настройки → Ключи доступа. Токен доступа не нужен."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "使用你在“设置 → 通行密钥”中为此 Hub 添加的通行密钥，无需访问令牌。"
-          }
-        }
-      }
-    },
-    "Web" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Web"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Веб"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "网页"
-          }
-        }
-      }
-    },
-    "— Canceled" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "— キャンセル済み"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "— Отменено"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "— 已取消"
-          }
-        }
-      }
-    },
-    "(empty)" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "（空）"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "(пусто)"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "（空）"
-          }
-        }
-      }
-    },
     "%@\n\nOpen a session chat to browse its files." : {
       "extractionState" : "manual",
       "localizations" : {
@@ -916,52 +20,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "%@\n\n打开会话聊天即可浏览其文件。"
-          }
-        }
-      }
-    },
-    "%@ · %@ requests" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "%1$@ · %2$@ requests"
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%1$@ · %2$@ 件のリクエスト"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%@ · %@ запросов"
-          }
-        }
-      }
-    },
-    "%@ · %lld requests" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%@ · %lld 件"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%@ · запросы: %lld"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%@ · %lld 项"
           }
         }
       }
@@ -1161,6 +219,52 @@
         }
       }
     },
+    "%@ · %@ requests" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@ · %2$@ requests"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ · %2$@ 件のリクエスト"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ · %@ запросов"
+          }
+        }
+      }
+    },
+    "%@ · %lld requests" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ · %lld 件"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ · запросы: %lld"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ · %lld 项"
+          }
+        }
+      }
+    },
     "%@, %lld sessions" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1228,6 +332,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "%@，%lld 个会话"
+          }
+        }
+      }
+    },
+    "%lld Questions" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld 件の質問"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Вопросы: %lld"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld 个问题"
           }
         }
       }
@@ -1623,29 +750,6 @@
         }
       }
     },
-    "%lld Questions" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%lld 件の質問"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Вопросы: %lld"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%lld 个问题"
-          }
-        }
-      }
-    },
     "%lld queued messages" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1961,71 +1065,25 @@
         }
       }
     },
-    "● Recording…  %@" : {
+    "(empty)" : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "● 録音中…  %@"
+            "value" : "（空）"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "● Запись…  %@"
+            "value" : "(пусто)"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "● 录音中…  %@"
-          }
-        }
-      }
-    },
-    "✓ Approved" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "✓ 承認済み"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "✓ Одобрено"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "✓ 已批准"
-          }
-        }
-      }
-    },
-    "✕ Denied" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "✕ 拒否済み"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "✕ Отклонено"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "✕ 已拒绝"
+            "value" : "（空）"
           }
         }
       }
@@ -2352,29 +1410,6 @@
         }
       }
     },
-    "7 days" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "過去 7 日間"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "7 дней"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "近 7 天"
-          }
-        }
-      }
-    },
     "30 days" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -2394,6 +1429,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "近 30 天"
+          }
+        }
+      }
+    },
+    "7 days" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "過去 7 日間"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "7 дней"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "近 7 天"
           }
         }
       }
@@ -2559,7 +1617,7 @@
         }
       }
     },
-    "Active only" : {
+    "Active Only" : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
@@ -2582,7 +1640,7 @@
         }
       }
     },
-    "Active Only" : {
+    "Active only" : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
@@ -2624,6 +1682,75 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "活跃会话无法删除 — 请先归档"
+          }
+        }
+      }
+    },
+    "Add Hub" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hub を追加"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Добавить хаб"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "添加 Hub"
+          }
+        }
+      }
+    },
+    "Add Hub…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hub を追加…"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Добавить хаб…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "添加 Hub…"
+          }
+        }
+      }
+    },
+    "Add Passkey" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "パスキーを追加"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Добавить ключ доступа"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "添加通行密钥"
           }
         }
       }
@@ -2697,52 +1824,6 @@
         }
       }
     },
-    "Add Hub" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Hub を追加"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Добавить хаб"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "添加 Hub"
-          }
-        }
-      }
-    },
-    "Add Hub…" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Hub を追加…"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Добавить хаб…"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "添加 Hub…"
-          }
-        }
-      }
-    },
     "Add photo" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -2785,6 +1866,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "加入发送队列"
+          }
+        }
+      }
+    },
+    "Adding passkey…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "パスキーを追加中…"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Добавление ключа доступа…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在添加通行密钥…"
           }
         }
       }
@@ -3502,7 +2606,7 @@
         }
       }
     },
-    "Archived only" : {
+    "Archived Only" : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
@@ -3525,7 +2629,7 @@
         }
       }
     },
-    "Archived Only" : {
+    "Archived only" : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
@@ -3636,6 +2740,51 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "录音失败"
+          }
+        }
+      }
+    },
+    "Auto" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "自動"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Авто"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "自动"
+          }
+        }
+      }
+    },
+    "Automatically retry transient model errors once" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "一時的なモデルエラーを自動で1回再試行"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Повторить запрос один раз при временной ошибке модели"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "暂时性模型错误自动重试一次"
           }
         }
       }
@@ -3824,6 +2973,29 @@
         }
       }
     },
+    "Binary file not shown" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "バイナリファイルは表示されません"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Двоичный файл не показан"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "二进制文件未显示"
+          }
+        }
+      }
+    },
     "Binary file — no preview available" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -3847,25 +3019,71 @@
         }
       }
     },
-    "Binary file not shown" : {
+    "Bridge & retry" : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "バイナリファイルは表示されません"
+            "value" : "ブリッジで再試行"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Двоичный файл не показан"
+            "value" : "Повторить через мост"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "二进制文件未显示"
+            "value" : "桥接并重试"
+          }
+        }
+      }
+    },
+    "Bridge retry failed (%@)" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ブリッジによる再試行に失敗（%@）"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Повтор через мост не удался (%@)"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "桥接重试失败（%@）"
+          }
+        }
+      }
+    },
+    "Bridge retry queued" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ブリッジによる再試行は待機中です"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Повтор через мост в очереди"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "桥接重试已加入队列"
           }
         }
       }
@@ -4284,29 +3502,6 @@
         }
       }
     },
-    "Choose a session from the sidebar, or start a new one." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "サイドバーからセッションを選択するか、新しいセッションを開始してください。"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Выберите сессию на боковой панели или создайте новую."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "从侧栏选择一个会话，或新建会话。"
-          }
-        }
-      }
-    },
     "Choose Directory" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -4326,6 +3521,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "选择目录"
+          }
+        }
+      }
+    },
+    "Choose a session from the sidebar, or start a new one." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "サイドバーからセッションを選択するか、新しいセッションを開始してください。"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Выберите сессию на боковой панели или создайте новую."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "从侧栏选择一个会话，或新建会话。"
           }
         }
       }
@@ -4629,6 +3847,52 @@
         }
       }
     },
+    "Context window" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "コンテキスト長"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Контекстное окно"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "上下文窗口"
+          }
+        }
+      }
+    },
+    "Continue" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "続ける"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Продолжить"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "继续"
+          }
+        }
+      }
+    },
     "Continue command" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -4698,29 +3962,6 @@
         }
       }
     },
-    "Conversation exported" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "会話をエクスポートしました"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Разговор экспортирован"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "对话已导出"
-          }
-        }
-      }
-    },
     "Conversation History" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -4740,6 +3981,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "对话历史"
+          }
+        }
+      }
+    },
+    "Conversation exported" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "会話をエクスポートしました"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Разговор экспортирован"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "对话已导出"
           }
         }
       }
@@ -4790,6 +4054,29 @@
         }
       }
     },
+    "Copy Path" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "パスをコピー"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Копировать путь"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "复制路径"
+          }
+        }
+      }
+    },
     "Copy full content" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -4836,29 +4123,6 @@
         }
       }
     },
-    "Copy Path" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "パスをコピー"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Копировать путь"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "复制路径"
-          }
-        }
-      }
-    },
     "Copy result" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -4901,6 +4165,52 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "复制文字"
+          }
+        }
+      }
+    },
+    "Could not add the passkey: %@" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "パスキーを追加できませんでした：%@"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Не удалось добавить ключ доступа: %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法添加通行密钥：%@"
+          }
+        }
+      }
+    },
+    "Could not delete the passkey: %@" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "パスキーを削除できませんでした：%@"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Не удалось удалить ключ доступа: %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法删除通行密钥：%@"
           }
         }
       }
@@ -5434,6 +4744,29 @@
         }
       }
     },
+    "Create Team" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "チームを作成"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Создать команду"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "创建团队"
+          }
+        }
+      }
+    },
     "Create a new git worktree next to the repo" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -5503,25 +4836,25 @@
         }
       }
     },
-    "Create Team" : {
+    "Created %@" : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "チームを作成"
+            "value" : "作成日：%@"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Создать команду"
+            "value" : "Создан %@"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "创建团队"
+            "value" : "创建于 %@"
           }
         }
       }
@@ -5733,48 +5066,48 @@
         }
       }
     },
-    "Delete “%@”? This can't be undone." : {
+    "Delete Passkey" : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "「%@」を削除しますか？この操作は取り消せません。"
+            "value" : "パスキーを削除"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Удалить «%@»? Это действие необратимо."
+            "value" : "Удалить ключ доступа"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "确定删除“%@”吗？此操作无法撤销。"
+            "value" : "删除通行密钥"
           }
         }
       }
     },
-    "Delete failed: %@" : {
+    "Delete Passkey…" : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "削除に失敗しました：%@"
+            "value" : "パスキーを削除…"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Не удалось удалить: %@"
+            "value" : "Удалить ключ доступа…"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "删除失败：%@"
+            "value" : "删除通行密钥…"
           }
         }
       }
@@ -5825,6 +5158,29 @@
         }
       }
     },
+    "Delete failed: %@" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "削除に失敗しました：%@"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Не удалось удалить: %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "删除失败：%@"
+          }
+        }
+      }
+    },
     "Delete this draft?" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -5844,6 +5200,52 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "删除这条草稿？"
+          }
+        }
+      }
+    },
+    "Delete “%@”?" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "「%@」を削除しますか？"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Удалить «%@»?"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "删除“%@”？"
+          }
+        }
+      }
+    },
+    "Delete “%@”? This can't be undone." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "「%@」を削除しますか？この操作は取り消せません。"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Удалить «%@»? Это действие необратимо."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "确定删除“%@”吗？此操作无法撤销。"
           }
         }
       }
@@ -5982,6 +5384,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "详情"
+          }
+        }
+      }
+    },
+    "Devices signed in with this passkey are signed out of the hub. The passkey itself stays in your password manager until you remove it there." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このパスキーでサインインしているデバイスは Hub からサインアウトされます。パスキー自体は、パスワードマネージャから削除するまで残ります。"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Устройства, вошедшие с этим ключом, будут отключены от хаба. Сам ключ останется в менеджере паролей, пока вы не удалите его там."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "使用此通行密钥登录的设备将退出该 Hub。通行密钥本身会保留在你的密码管理器中，直到你在那里删除它。"
           }
         }
       }
@@ -6676,29 +6101,6 @@
         }
       }
     },
-    "Enter a valid hub domain or IP address, with an optional port." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "有効な Hub のドメインまたは IP アドレスを入力してください（ポートは任意）。"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Введите корректный домен или IP-адрес хаба, при необходимости с портом."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "请输入有效的 Hub 域名或 IP 地址，可包含端口。"
-          }
-        }
-      }
-    },
     "Enter Hub Details" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -6722,6 +6124,29 @@
         }
       }
     },
+    "Enter Hub address manually" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hub のアドレスを手動で入力"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ввести адрес хаба вручную"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "手动输入 Hub 地址"
+          }
+        }
+      }
+    },
     "Enter Manually" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -6741,6 +6166,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "手动输入"
+          }
+        }
+      }
+    },
+    "Enter a valid hub domain or IP address, with an optional port." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "有効な Hub のドメインまたは IP アドレスを入力してください（ポートは任意）。"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Введите корректный домен или IP-адрес хаба, при необходимости с портом."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请输入有效的 Hub 域名或 IP 地址，可包含端口。"
           }
         }
       }
@@ -6787,29 +6235,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "输入 Hub 地址，无需填写协议；也可粘贴完整地址或配对链接。"
-          }
-        }
-      }
-    },
-    "error" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "エラー"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ошибка"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "错误"
           }
         }
       }
@@ -6925,29 +6350,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "导出内容过大"
-          }
-        }
-      }
-    },
-    "Failed — tap to retry" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "失敗 — タップして再試行"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ошибка — нажмите, чтобы повторить"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "失败 — 点按重试"
           }
         }
       }
@@ -7481,6 +6883,29 @@
         }
       }
     },
+    "Failed — tap to retry" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "失敗 — タップして再試行"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ошибка — нажмите, чтобы повторить"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "失败 — 点按重试"
+          }
+        }
+      }
+    },
     "Fast" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -7527,25 +6952,25 @@
         }
       }
     },
-    "feature-x (optional)" : {
+    "Fast mode" : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "feature-x（任意）"
+            "value" : "高速モード"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "feature-x (необязательно)"
+            "value" : "Быстрый режим"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "feature-x（可选）"
+            "value" : "快速模式"
           }
         }
       }
@@ -7711,29 +7136,6 @@
         }
       }
     },
-    "Fork from Here" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ここからフォーク"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ответвить отсюда"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "从此处分叉"
-          }
-        }
-      }
-    },
     "Fork Here" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -7753,6 +7155,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "在此处分叉"
+          }
+        }
+      }
+    },
+    "Fork from Here" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ここからフォーク"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ответвить отсюда"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "从此处分叉"
           }
         }
       }
@@ -7826,29 +7251,6 @@
         }
       }
     },
-    "HAPI did not change this session because its native Codex boundary is ambiguous. Create a new session before this point instead? The current session will not be changed." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Codex ネイティブの境界が曖昧なため、HAPI はこのセッションを変更しませんでした。代わりに、この時点より前から新しいセッションを作成しますか？現在のセッションは変更されません。"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "HAPI не изменил эту сессию: нативная граница Codex неоднозначна. Создать вместо этого новую сессию до этого места? Текущая сессия не изменится."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "由于 Codex 原生对话边界存在歧义，HAPI 没有修改当前会话。是否改为在此处创建新会话？当前会话不会被修改。"
-          }
-        }
-      }
-    },
     "HAPI Guide" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -7868,6 +7270,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "HAPI 使用指南"
+          }
+        }
+      }
+    },
+    "HAPI did not change this session because its native Codex boundary is ambiguous. Create a new session before this point instead? The current session will not be changed." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Codex ネイティブの境界が曖昧なため、HAPI はこのセッションを変更しませんでした。代わりに、この時点より前から新しいセッションを作成しますか？現在のセッションは変更されません。"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "HAPI не изменил эту сессию: нативная граница Codex неоднозначна. Создать вместо этого новую сессию до этого места? Текущая сессия не изменится."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "由于 Codex 原生对话边界存在歧义，HAPI 没有修改当前会话。是否改为在此处创建新会话？当前会话不会被修改。"
           }
         }
       }
@@ -7914,6 +7339,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "HAPI 是自托管的：你的智能体会话运行在你自己的机器上，由你自己运营的 Hub 提供服务。先启动 Hub，然后输入它的地址和访问令牌，或粘贴它打印的配对链接。"
+          }
+        }
+      }
+    },
+    "HTTP is unencrypted and may be restricted by iOS. HTTPS is recommended." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "HTTP は暗号化されておらず、iOS によって制限される場合があります。HTTPS を推奨します。"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "HTTP не шифруется и может блокироваться iOS. Рекомендуется HTTPS."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "HTTP 不加密，且可能受 iOS 网络策略限制。建议使用 HTTPS。"
           }
         }
       }
@@ -8010,29 +7458,6 @@
         }
       }
     },
-    "HTTP is unencrypted and may be restricted by iOS. HTTPS is recommended." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "HTTP は暗号化されておらず、iOS によって制限される場合があります。HTTPS を推奨します。"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "HTTP не шифруется и может блокироваться iOS. Рекомендуется HTTPS."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "HTTP 不加密，且可能受 iOS 网络策略限制。建议使用 HTTPS。"
-          }
-        }
-      }
-    },
     "Hub" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -8052,6 +7477,52 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Hub"
+          }
+        }
+      }
+    },
+    "Hub URL" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hub の URL"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "URL хаба"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hub 地址"
+          }
+        }
+      }
+    },
+    "Hub address needed" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hub のアドレスが必要です"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Нужен адрес хаба"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "需要 Hub 地址"
           }
         }
       }
@@ -8167,29 +7638,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "无法连接 Hub — 点按重试。"
-          }
-        }
-      }
-    },
-    "Hub URL" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Hub の URL"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "URL хаба"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Hub 地址"
           }
         }
       }
@@ -8581,6 +8029,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "最后消息时间"
+          }
+        }
+      }
+    },
+    "Last used %@" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "最終使用：%@"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Использован %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "上次使用：%@"
           }
         }
       }
@@ -9413,6 +8884,29 @@
         }
       }
     },
+    "Model error (%@)" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "モデルエラー（%@）"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ошибка модели (%@)"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "模型错误（%@）"
+          }
+        }
+      }
+    },
     "Model list unavailable for this session." : {
       "extractionState" : "manual",
       "localizations" : {
@@ -9432,6 +8926,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "此会话暂无可用模型列表。"
+          }
+        }
+      }
+    },
+    "Model recovered (%@)" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "モデルが復旧しました（%@）"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Модель восстановлена (%@)"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "模型已恢复（%@）"
           }
         }
       }
@@ -9478,6 +8995,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "名称需要至少一个字母或数字"
+          }
+        }
+      }
+    },
+    "Name this passkey" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "パスキーに名前を付ける"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Назовите ключ доступа"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "为通行密钥命名"
           }
         }
       }
@@ -9551,25 +9091,25 @@
         }
       }
     },
-    "New note" : {
+    "Never used" : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "新規メモ"
+            "value" : "未使用"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Новая заметка"
+            "value" : "Не использовался"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "新建笔记"
+            "value" : "从未使用"
           }
         }
       }
@@ -9593,6 +9133,52 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "新建会话"
+          }
+        }
+      }
+    },
+    "New note" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "新規メモ"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Новая заметка"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "新建笔记"
+          }
+        }
+      }
+    },
+    "Next Session" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "次のセッション"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Следующая сессия"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "下一个会话"
           }
         }
       }
@@ -9643,29 +9229,6 @@
         }
       }
     },
-    "Next Session" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "次のセッション"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Следующая сессия"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "下一个会话"
-          }
-        }
-      }
-    },
     "Next tool" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -9685,6 +9248,52 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "下一个工具"
+          }
+        }
+      }
+    },
+    "No HAPI hub answered at this address. Check that the hub is running and that this device can reach it (same network, or the relay tunnel is up)." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このアドレスで応答した HAPI Hub はありません。Hub が稼働していること、およびこのデバイスから到達できること（同じネットワーク、またはリレートンネルが有効）を確認してください。"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "По этому адресу не ответил ни один хаб HAPI. Проверьте, что хаб запущен и это устройство может до него добраться (та же сеть или активный туннель реле)."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "该地址没有 HAPI Hub 应答。请确认 Hub 正在运行，且本设备能够访问它（处于同一网络，或中继隧道已开启）。"
+          }
+        }
+      }
+    },
+    "No History Points" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "履歴ポイントがありません"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Нет точек истории"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "没有历史点"
           }
         }
       }
@@ -9850,75 +9459,6 @@
         }
       }
     },
-    "No HAPI hub answered at this address. Check that the hub is running and that this device can reach it (same network, or the relay tunnel is up)." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "このアドレスで応答した HAPI Hub はありません。Hub が稼働していること、およびこのデバイスから到達できること（同じネットワーク、またはリレートンネルが有効）を確認してください。"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "По этому адресу не ответил ни один хаб HAPI. Проверьте, что хаб запущен и это устройство может до него добраться (та же сеть или активный туннель реле)."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "该地址没有 HAPI Hub 应答。请确认 Hub 正在运行，且本设备能够访问它（处于同一网络，或中继隧道已开启）。"
-          }
-        }
-      }
-    },
-    "no heartbeat %@" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ハートビートなし %@"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "нет heartbeat %@"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "无心跳 %@"
-          }
-        }
-      }
-    },
-    "No History Points" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "履歴ポイントがありません"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Нет точек истории"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "没有历史点"
-          }
-        }
-      }
-    },
     "No machines online" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -10076,6 +9616,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "无输出"
+          }
+        }
+      }
+    },
+    "No passkeys yet." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "パスキーはまだありません。"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ключей доступа пока нет."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "还没有通行密钥。"
           }
         }
       }
@@ -10425,98 +9988,6 @@
         }
       }
     },
-    "now" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "たった今"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "сейчас"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "刚刚"
-          }
-        }
-      }
-    },
-    "Offline" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "オフライン"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Офлайн"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "离线"
-          }
-        }
-      }
-    },
-    "Offline — showing cached sessions" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "オフライン — キャッシュされたセッションを表示中"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Офлайн — показаны кешированные сессии"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "离线 — 显示缓存的会话"
-          }
-        }
-      }
-    },
-    "Offline · updated %@" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "オフライン · %@に更新"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Офлайн · обновлено %@"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "离线 · %@更新"
-          }
-        }
-      }
-    },
     "OK" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -10559,6 +10030,121 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "OLED 纯黑"
+          }
+        }
+      }
+    },
+    "Off" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "オフ"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Выкл."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "关"
+          }
+        }
+      }
+    },
+    "Offline" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "オフライン"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Офлайн"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "离线"
+          }
+        }
+      }
+    },
+    "Offline · updated %@" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "オフライン · %@に更新"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Офлайн · обновлено %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "离线 · %@更新"
+          }
+        }
+      }
+    },
+    "Offline — showing cached sessions" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "オフライン — キャッシュされたセッションを表示中"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Офлайн — показаны кешированные сессии"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "离线 — 显示缓存的会话"
+          }
+        }
+      }
+    },
+    "On" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "オン"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Вкл."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "开"
           }
         }
       }
@@ -10609,29 +10195,6 @@
         }
       }
     },
-    "Open link?" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "このリンクを開きますか？"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Открыть ссылку?"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "打开此链接？"
-          }
-        }
-      }
-    },
     "Open Settings" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -10674,6 +10237,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "打开链接"
+          }
+        }
+      }
+    },
+    "Open link?" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このリンクを開きますか？"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Открыть ссылку?"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "打开此链接？"
           }
         }
       }
@@ -11000,6 +10586,144 @@
         }
       }
     },
+    "Passkey" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "パスキー"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ключ доступа"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "通行密钥"
+          }
+        }
+      }
+    },
+    "Passkey for another hub" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "別の Hub のパスキー"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ключ доступа другого хаба"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "属于其他 Hub 的通行密钥"
+          }
+        }
+      }
+    },
+    "Passkey name" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "パスキー名"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Название ключа"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "通行密钥名称"
+          }
+        }
+      }
+    },
+    "Passkey rejected" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "パスキーが拒否されました"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ключ доступа отклонён"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "通行密钥被拒绝"
+          }
+        }
+      }
+    },
+    "Passkey unavailable" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "パスキーを利用できません"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ключ доступа недоступен"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "通行密钥不可用"
+          }
+        }
+      }
+    },
+    "Passkeys" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "パスキー"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ключи доступа"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "通行密钥"
+          }
+        }
+      }
+    },
     "Path" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -11069,30 +10793,7 @@
         }
       }
     },
-    "pending" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "保留中"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ожидает"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "等待中"
-          }
-        }
-      }
-    },
-    "Permission mode" : {
+    "Permission Mode" : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
@@ -11115,7 +10816,7 @@
         }
       }
     },
-    "Permission Mode" : {
+    "Permission mode" : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
@@ -11253,29 +10954,6 @@
         }
       }
     },
-    "Pin failed: %@" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ピン留めに失敗しました：%@"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Не удалось закрепить: %@"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "置顶操作失败：%@"
-          }
-        }
-      }
-    },
     "Pin Globally" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -11295,6 +10973,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "全局置顶"
+          }
+        }
+      }
+    },
+    "Pin failed: %@" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ピン留めに失敗しました：%@"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Не удалось закрепить: %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "置顶操作失败：%@"
           }
         }
       }
@@ -11483,6 +11184,29 @@
         }
       }
     },
+    "Previous Session" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "前のセッション"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Предыдущая сессия"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "上一个会话"
+          }
+        }
+      }
+    },
     "Previous part" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -11525,29 +11249,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "上一题"
-          }
-        }
-      }
-    },
-    "Previous Session" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "前のセッション"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Предыдущая сессия"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "上一个会话"
           }
         }
       }
@@ -11805,52 +11506,6 @@
         }
       }
     },
-    "Skip" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "スキップ"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Пропустить"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "跳过"
-          }
-        }
-      }
-    },
-    "Question skipped" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "質問をスキップしました"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Вопрос пропущен"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "已跳过问题"
-          }
-        }
-      }
-    },
     "Question canceled" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -11916,6 +11571,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "已处理"
+          }
+        }
+      }
+    },
+    "Question skipped" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "質問をスキップしました"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Вопрос пропущен"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已跳过问题"
           }
         }
       }
@@ -12081,6 +11759,29 @@
         }
       }
     },
+    "Reasoning effort" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "推論レベル"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Уровень рассуждений"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "推理强度"
+          }
+        }
+      }
+    },
     "Reasoning…" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -12219,6 +11920,29 @@
         }
       }
     },
+    "Registered before the hub's access token was rotated; it can no longer sign in." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hub のアクセストークンがローテーションされる前に登録されたため、サインインできません。"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Зарегистрирован до смены токена доступа хаба; вход с ним больше невозможен."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在 Hub 访问令牌轮换前注册，已无法用于登录。"
+          }
+        }
+      }
+    },
     "Registered hubs" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -12311,29 +12035,6 @@
         }
       }
     },
-    "Rename failed: %@" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "名前の変更に失敗しました：%@"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Не удалось переименовать: %@"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "重命名失败：%@"
-          }
-        }
-      }
-    },
     "Rename Session" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -12353,6 +12054,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "重命名会话"
+          }
+        }
+      }
+    },
+    "Rename failed: %@" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "名前の変更に失敗しました：%@"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Не удалось переименовать: %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "重命名失败：%@"
           }
         }
       }
@@ -12610,6 +12334,29 @@
         }
       }
     },
+    "Revoked" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無効"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Отозван"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已失效"
+          }
+        }
+      }
+    },
     "Rewind" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -12652,6 +12399,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "回退对话"
+          }
+        }
+      }
+    },
+    "Rewind Unavailable" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "巻き戻しできません"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Откат недоступен"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "暂时无法回退"
           }
         }
       }
@@ -12721,29 +12491,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "回退到此处"
-          }
-        }
-      }
-    },
-    "Rewind Unavailable" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "巻き戻しできません"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Откат недоступен"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "暂时无法回退"
           }
         }
       }
@@ -12836,6 +12583,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "运行中"
+          }
+        }
+      }
+    },
+    "SQLite files" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SQLite ファイル"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Файлы SQLite"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SQLite 文件"
           }
         }
       }
@@ -13070,29 +12840,6 @@
         }
       }
     },
-    "Scheduled · %@" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "予約済み · %@"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "По расписанию · %@"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "定时发送 · %@"
-          }
-        }
-      }
-    },
     "Scheduled messages can't include attachments — remove them or send now" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -13158,6 +12905,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "发送时间必须在未来"
+          }
+        }
+      }
+    },
+    "Scheduled · %@" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "予約済み · %@"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "По расписанию · %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "定时发送 · %@"
           }
         }
       }
@@ -13599,29 +13369,6 @@
         }
       }
     },
-    "Send — long-press to steer" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "送信 — 長押しで割り込み送信"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Отправить — долгое нажатие, чтобы направить"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "发送 — 长按可插入当前回合"
-          }
-        }
-      }
-    },
     "Send & steer into current turn" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -13668,6 +13415,29 @@
         }
       }
     },
+    "Send — long-press to steer" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "送信 — 長押しで割り込み送信"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Отправить — долгое нажатие, чтобы направить"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "发送 — 长按可插入当前回合"
+          }
+        }
+      }
+    },
     "Session" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -13691,7 +13461,7 @@
         }
       }
     },
-    "Session files" : {
+    "Session Files" : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
@@ -13714,7 +13484,76 @@
         }
       }
     },
-    "Session Files" : {
+    "Session Settings" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "セッション設定"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Настройки сессии"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "会话设置"
+          }
+        }
+      }
+    },
+    "Session Settings…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "セッション設定…"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Настройки сессии…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "会话设置…"
+          }
+        }
+      }
+    },
+    "Session Type" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "セッションの種類"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Тип сессии"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "会话类型"
+          }
+        }
+      }
+    },
+    "Session files" : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
@@ -13875,76 +13714,7 @@
         }
       }
     },
-    "Session Settings" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "セッション設定"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Настройки сессии"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "会话设置"
-          }
-        }
-      }
-    },
-    "Session Settings…" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "セッション設定…"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Настройки сессии…"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "会话设置…"
-          }
-        }
-      }
-    },
     "Session type" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "セッションの種類"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Тип сессии"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "会话类型"
-          }
-        }
-      }
-    },
-    "Session Type" : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
@@ -14151,29 +13921,6 @@
         }
       }
     },
-    "Show all %lld lines" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%lld 行すべてを表示"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Показать все строки: %lld"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "显示全部 %lld 行"
-          }
-        }
-      }
-    },
     "Show English sent to agent" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -14216,6 +13963,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "显示隐藏目录"
+          }
+        }
+      }
+    },
+    "Show all %lld lines" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld 行すべてを表示"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Показать все строки: %lld"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "显示全部 %lld 行"
           }
         }
       }
@@ -14381,6 +14151,29 @@
         }
       }
     },
+    "Shown in the hub's passkey list so you can tell your devices apart." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hub のパスキー一覧に表示され、デバイスを見分けるのに役立ちます。"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Отображается в списке ключей хаба, чтобы различать устройства."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "显示在 Hub 的通行密钥列表中，便于区分你的设备。"
+          }
+        }
+      }
+    },
     "Shutdown Response" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -14450,29 +14243,6 @@
         }
       }
     },
-    "Sign out of %@?" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%@ からサインアウトしますか？"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Выйти из %@?"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "退出 %@ 的登录？"
-          }
-        }
-      }
-    },
     "Sign Out…" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -14492,6 +14262,98 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "退出登录…"
+          }
+        }
+      }
+    },
+    "Sign in to %@ from another device with “Sign in with a Passkey” — no access token needed. Passkeys work in both the web app and this app." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "別のデバイスから「パスキーでサインイン」を使って %@ にサインインできます。アクセストークンは不要です。パスキーは Web アプリとこのアプリの両方で使えます。"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Войдите в %@ с другого устройства через «Войти с ключом доступа» — токен доступа не нужен. Ключи работают и в браузере, и в этом приложении."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在其他设备上通过“使用通行密钥登录”登录 %@，无需访问令牌。通行密钥可同时用于网页版和本应用。"
+          }
+        }
+      }
+    },
+    "Sign in to this hub without the access token" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "アクセストークンなしでこの Hub にサインイン"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Вход в этот хаб без токена доступа"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无需访问令牌即可登录此 Hub"
+          }
+        }
+      }
+    },
+    "Sign in with a Passkey" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "パスキーでサインイン"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Войти с ключом доступа"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "使用通行密钥登录"
+          }
+        }
+      }
+    },
+    "Sign out of %@?" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ からサインアウトしますか？"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Выйти из %@?"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "退出 %@ 的登录？"
           }
         }
       }
@@ -14519,6 +14381,29 @@
         }
       }
     },
+    "Signing in…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "サインイン中…"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Вход…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在登录…"
+          }
+        }
+      }
+    },
     "Simple" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -14538,6 +14423,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "简单"
+          }
+        }
+      }
+    },
+    "Skip" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "スキップ"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Пропустить"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "跳过"
           }
         }
       }
@@ -14630,29 +14538,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "创建代理"
-          }
-        }
-      }
-    },
-    "SQLite files" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "SQLite ファイル"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Файлы SQLite"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "SQLite 文件"
           }
         }
       }
@@ -15209,6 +15094,29 @@
         }
       }
     },
+    "The agent reported completion before this error." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このエラーの前に、エージェントは完了を報告しました。"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Перед ошибкой агент сообщил о завершении работы."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "代理在发生此错误前报告任务已完成。"
+          }
+        }
+      }
+    },
     "The app checks the hub is reachable, then exchanges the token for a session." : {
       "extractionState" : "manual",
       "localizations" : {
@@ -15255,29 +15163,6 @@
         }
       }
     },
-    "the dropped item" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ドロップした項目"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "перетащенный элемент"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "拖入的项目"
-          }
-        }
-      }
-    },
     "The hub answered unexpectedly (HTTP %lld). Try again in a moment." : {
       "extractionState" : "manual",
       "localizations" : {
@@ -15297,6 +15182,52 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Hub 返回了意外响应（HTTP %lld）。请稍后重试。"
+          }
+        }
+      }
+    },
+    "The hub could not register the passkey (HTTP %lld)." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hub がパスキーを登録できませんでした（HTTP %lld）。"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Хаб не смог зарегистрировать ключ доступа (HTTP %lld)."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hub 无法注册通行密钥（HTTP %lld）。"
+          }
+        }
+      }
+    },
+    "The hub did not accept this passkey. It may have been deleted, or the hub's access token was rotated. Pair with the access token instead." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hub がこのパスキーを受け付けませんでした。削除されたか、Hub のアクセストークンがローテーションされた可能性があります。代わりにアクセストークンでペアリングしてください。"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Хаб не принял этот ключ доступа. Возможно, он удалён или токен доступа хаба был сменён. Подключитесь с токеном доступа."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hub 未接受此通行密钥。它可能已被删除，或 Hub 的访问令牌已轮换。请改用访问令牌配对。"
           }
         }
       }
@@ -15343,6 +15274,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Hub 拒绝了此访问令牌 — 它可能已被轮换。请从 Hub 获取新的配对码后重试。"
+          }
+        }
+      }
+    },
+    "The hub requested a passkey for “%@”, but this app only supports auth.hapi.run. Update the hub." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hub が「%@」のパスキーを要求しましたが、このアプリは auth.hapi.run のみに対応しています。Hub を更新してください。"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Хаб запросил ключ доступа для «%@», но приложение поддерживает только auth.hapi.run. Обновите хаб."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hub 请求的是“%@”的通行密钥，但本应用仅支持 auth.hapi.run。请更新 Hub。"
           }
         }
       }
@@ -15531,6 +15485,52 @@
         }
       }
     },
+    "This device could not create the passkey: %@" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このデバイスでパスキーを作成できませんでした：%@"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Это устройство не смогло создать ключ доступа: %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此设备无法创建通行密钥：%@"
+          }
+        }
+      }
+    },
+    "This device could not use a passkey for this hub. Try again, or pair with the access token." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このデバイスでこの Hub のパスキーを使用できませんでした。もう一度お試しいただくか、アクセストークンでペアリングしてください。"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Это устройство не смогло использовать ключ доступа для этого хаба. Повторите попытку или подключитесь с токеном доступа."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此设备无法为该 Hub 使用通行密钥。请重试，或使用访问令牌配对。"
+          }
+        }
+      }
+    },
     "This export contains %lld messages (about %@), above the recommended %lld." : {
       "extractionState" : "manual",
       "localizations" : {
@@ -15596,6 +15596,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "文件为空"
+          }
+        }
+      }
+    },
+    "This hub does not support passkeys. Update the hub to use them." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "この Hub はパスキーに対応していません。利用するには Hub を更新してください。"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Этот хаб не поддерживает ключи доступа. Обновите хаб, чтобы использовать их."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此 Hub 不支持通行密钥。请更新 Hub 后使用。"
           }
         }
       }
@@ -15688,6 +15711,75 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "配对链接无效或不完整。请从 Hub 复制完整链接。"
+          }
+        }
+      }
+    },
+    "This passkey belongs to a different hub. Choose a passkey for this hub, or check the hub address." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このパスキーは別の Hub のものです。この Hub のパスキーを選択するか、Hub のアドレスを確認してください。"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Этот ключ доступа принадлежит другому хабу. Выберите ключ для этого хаба или проверьте адрес."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此通行密钥属于其他 Hub。请选择此 Hub 的通行密钥，或检查 Hub 地址。"
+          }
+        }
+      }
+    },
+    "This passkey does not include its hub address. Enter the hub URL, then sign in with the same passkey." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このパスキーには Hub のアドレスが含まれていません。Hub の URL を入力してから、同じパスキーでサインインしてください。"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Этот ключ доступа не содержит адрес своего хаба. Введите URL хаба и войдите с тем же ключом."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此通行密钥未包含其 Hub 地址。请输入 Hub URL，然后使用同一通行密钥登录。"
+          }
+        }
+      }
+    },
+    "This passkey is already registered with the hub." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このパスキーはすでに Hub に登録されています。"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Этот ключ доступа уже зарегистрирован в хабе."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此通行密钥已在 Hub 中注册。"
           }
         }
       }
@@ -16129,6 +16221,29 @@
         }
       }
     },
+    "Unnamed passkey" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "名前のないパスキー"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ключ без названия"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未命名的通行密钥"
+          }
+        }
+      }
+    },
     "Unpin" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -16175,7 +16290,7 @@
         }
       }
     },
-    "Unread only" : {
+    "Unread Only" : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
@@ -16198,7 +16313,7 @@
         }
       }
     },
-    "Unread Only" : {
+    "Unread only" : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
@@ -16405,6 +16520,29 @@
         }
       }
     },
+    "Uses a passkey you added for this hub in Settings → Passkeys. No access token needed." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "「設定 → パスキー」でこの Hub に追加したパスキーを使用します。アクセストークンは不要です。"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Используется ключ доступа, добавленный для этого хаба в Настройки → Ключи доступа. Токен доступа не нужен."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "使用你在“设置 → 通行密钥”中为此 Hub 添加的通行密钥，无需访问令牌。"
+          }
+        }
+      }
+    },
     "Uses dangerous agent flags when spawning." : {
       "extractionState" : "manual",
       "localizations" : {
@@ -16447,6 +16585,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "启动时使用危险的代理标志。将应用原生 %@ 模式。"
+          }
+        }
+      }
+    },
+    "Variant" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "バリアント"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Вариант"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "变体"
           }
         }
       }
@@ -16826,6 +16987,29 @@
         }
       }
     },
+    "Web" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Web"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Веб"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "网页"
+          }
+        }
+      }
+    },
     "Web fetch" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -16872,29 +17056,6 @@
         }
       }
     },
-    "Workspace file" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ワークスペースのファイル"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Файл рабочего пространства"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "工作区文件"
-          }
-        }
-      }
-    },
     "Workspace Roots" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -16914,6 +17075,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "工作区根目录"
+          }
+        }
+      }
+    },
+    "Workspace file" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ワークスペースのファイル"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Файл рабочего пространства"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "工作区文件"
           }
         }
       }
@@ -17102,117 +17286,232 @@
         }
       }
     },
-    "Enter Hub address manually" : {
+    "error" : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Hub のアドレスを手動で入力"
+            "value" : "エラー"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Ввести адрес хаба вручную"
+            "value" : "ошибка"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "手动输入 Hub 地址"
+            "value" : "错误"
           }
         }
       }
     },
-    "Hub address needed" : {
+    "feature-x (optional)" : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Hub のアドレスが必要です"
+            "value" : "feature-x（任意）"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Нужен адрес хаба"
+            "value" : "feature-x (необязательно)"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "需要 Hub 地址"
+            "value" : "feature-x（可选）"
           }
         }
       }
     },
-    "Passkey for another hub" : {
+    "no heartbeat %@" : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "別の Hub のパスキー"
+            "value" : "ハートビートなし %@"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Ключ доступа другого хаба"
+            "value" : "нет heartbeat %@"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "属于其他 Hub 的通行密钥"
+            "value" : "无心跳 %@"
           }
         }
       }
     },
-    "This passkey does not include its hub address. Enter the hub URL, then sign in with the same passkey." : {
+    "now" : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "このパスキーには Hub のアドレスが含まれていません。Hub の URL を入力してから、同じパスキーでサインインしてください。"
+            "value" : "たった今"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Этот ключ доступа не содержит адрес своего хаба. Введите URL хаба и войдите с тем же ключом."
+            "value" : "сейчас"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此通行密钥未包含其 Hub 地址。请输入 Hub URL，然后使用同一通行密钥登录。"
+            "value" : "刚刚"
           }
         }
       }
     },
-    "This passkey belongs to a different hub. Choose a passkey for this hub, or check the hub address." : {
+    "pending" : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "このパスキーは別の Hub のものです。この Hub のパスキーを選択するか、Hub のアドレスを確認してください。"
+            "value" : "保留中"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Этот ключ доступа принадлежит другому хабу. Выберите ключ для этого хаба или проверьте адрес."
+            "value" : "ожидает"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此通行密钥属于其他 Hub。请选择此 Hub 的通行密钥，或检查 Hub 地址。"
+            "value" : "等待中"
+          }
+        }
+      }
+    },
+    "the dropped item" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ドロップした項目"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "перетащенный элемент"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "拖入的项目"
+          }
+        }
+      }
+    },
+    "— Canceled" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "— キャンセル済み"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "— Отменено"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "— 已取消"
+          }
+        }
+      }
+    },
+    "● Recording…  %@" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "● 録音中…  %@"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "● Запись…  %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "● 录音中…  %@"
+          }
+        }
+      }
+    },
+    "✓ Approved" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "✓ 承認済み"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "✓ Одобрено"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "✓ 已批准"
+          }
+        }
+      }
+    },
+    "✕ Denied" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "✕ 拒否済み"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "✕ Отклонено"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "✕ 已拒绝"
           }
         }
       }
