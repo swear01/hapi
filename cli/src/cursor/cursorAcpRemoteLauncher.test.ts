@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest';
 import { expectAcpKill } from '@/test/expectAcpKill';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
 import type { EnhancedMode } from './loop';
+import { enqueueCursorUserMessage } from './cursorUserMessageQueue';
 import type { AgentMessage } from '@/agent/types';
 import { ACP_INDETERMINATE_SYMBOL } from '@/agent/backends/acp/AcpStdioTransport';
 
@@ -37,6 +38,12 @@ const harness = vi.hoisted(() => ({
         'cursor-grok-4.5-medium-fast',
     ] as string[],
     setConfigOptionCalls: [] as Array<{ sessionId: string; configId: string; value: string }>,
+    rejectedModes: new Set<string>(),
+    rejectedModeAttempts: 0,
+    permissionPolicy: null as (() => string | undefined) | null,
+    acceptPlan: null as (() => void) | null,
+    promptPermissions: [] as (string | undefined)[],
+    promptNativeModes: [] as string[],
     deferSetConfigOption: null as Promise<void> | null,
     releaseSetConfigOption: null as (() => void) | null,
     /** When true, mode-opt also waits on deferSetConfigOption (Bridge abort race). */
@@ -79,6 +86,8 @@ const harness = vi.hoisted(() => ({
     overlayCleanup: null as ReturnType<typeof vi.fn> | null,
     notifyRuleInstallCalls: [] as Array<{ cwd: string; project?: string | null; agentId?: string | null }>,
     notifyRuleCleanup: null as ReturnType<typeof vi.fn> | null,
+    availableCommands: [] as Array<{ name: string }>,
+    availableCommandsListener: null as ((sessionId: string | null) => void) | null,
     agentActivityListener: null as ((thinking: boolean, source?: string) => void) | null,
     titleSyncControllers: [] as unknown[],
     titleSyncRegistered: [] as unknown[],
@@ -90,7 +99,7 @@ const harness = vi.hoisted(() => ({
     /** When set, the next backend.initialize() awaits this before completing. */
     deferNextInitialize: null as Promise<void> | null,
     /** Spawn flags passed to createCursorAcpBackend (newest last). */
-    spawnAutoReviewFlags: [] as boolean[],
+    advertisesSmartAuto: false,
     /** Last prompt() onUpdate — used to simulate post-prompt harness resume (#2267). */
     lastPromptOnUpdate: null as ((message: AgentMessage) => void) | null,
     /** Mirrors AcpSdkBackend.promptGeneration for post-done gate reopen. */
@@ -137,8 +146,8 @@ vi.mock('./utils/cursorAcpBackend', () => ({
         if (opts?.autoReview) {
             args.unshift('--auto-review');
         }
-        harness.spawnAutoReviewFlags.push(Boolean(opts?.autoReview));
         harness.backendArgs = { command: 'agent', args };
+        let nativeMode = 'agent';
         return {
             initialize: vi.fn(async () => {
                 harness.initializeAttempts += 1;
@@ -198,7 +207,13 @@ vi.mock('./utils/cursorAcpBackend', () => ({
                 }
                 return 'new-acp-session';
             }),
-            setMode: vi.fn(async () => {}),
+            setMode: vi.fn(async (_sessionId: string, mode: string) => {
+                if (harness.rejectedModes.has(mode)) {
+                    harness.rejectedModeAttempts += 1;
+                    throw new Error(`mode rejected: ${mode}`);
+                }
+                nativeMode = mode;
+            }),
             setModel: vi.fn(async () => {}),
             setConfigOption: vi.fn(async (sessionId: string, configId: string, value: string) => {
                 const deferModel = configId === 'model-opt' && harness.deferSetConfigOption;
@@ -219,7 +234,12 @@ vi.mock('./utils/cursorAcpBackend', () => ({
                 if (harness.failFastConfigOption && configId === 'fast') {
                     throw new Error('fast update rejected');
                 }
+                if (configId === 'mode-opt') {
+                    if (harness.rejectedModes.has(value)) throw new Error(`mode rejected: ${value}`);
+                    nativeMode = value;
+                }
                 harness.setConfigOptionCalls.push({ sessionId, configId, value });
+                return configId === 'mode-opt' ? [{ id: configId, currentValue: nativeMode }] : undefined;
             }),
             pinSessionModelWireId: vi.fn(),
             getSessionModelsMetadata: vi.fn(() => ({
@@ -245,6 +265,7 @@ vi.mock('./utils/cursorAcpBackend', () => ({
                         id: 'mode-opt',
                         options: [
                             { value: 'agent' },
+                            ...(harness.advertisesSmartAuto ? [{ value: 'auto-review' }] : []),
                             { value: 'plan' },
                             { value: 'debug' }
                         ]
@@ -273,6 +294,8 @@ vi.mock('./utils/cursorAcpBackend', () => ({
                     }
                 }
                 harness.promptSends++;
+                harness.promptPermissions.push(harness.permissionPolicy?.());
+                harness.promptNativeModes.push(nativeMode);
                 harness.prompts.push(content);
                 harness.lastPromptOnUpdate = onMessage ?? null;
                 // Real AcpSdkBackend bumps generation after the pre-swap drain and
@@ -317,6 +340,11 @@ vi.mock('./utils/cursorAcpBackend', () => ({
             onStderrError: vi.fn((handler: typeof harness.stderrErrorHandler) => {
                 harness.stderrErrorHandler = handler;
             }),
+            getAvailableCommands: vi.fn(() => harness.availableCommands),
+            hasSessionAvailableCommands: vi.fn(() => harness.availableCommands.length > 0),
+            setAvailableCommandsUpdateListener: vi.fn((listener: typeof harness.availableCommandsListener) => {
+                harness.availableCommandsListener = listener;
+            }),
             setUsageUpdateListener: vi.fn(),
             setAgentActivityListener: vi.fn((listener: ((thinking: boolean, source?: string) => void) | null) => {
                 harness.agentActivityListener = listener;
@@ -337,6 +365,9 @@ vi.mock('./utils/cursorAcpBackend', () => ({
 
 vi.mock('./utils/cursorExtensionAdapter', () => ({
     CursorExtensionAdapter: class {
+        constructor(_client: unknown, _backend: unknown, _onMessage: unknown, onPlanAccepted: () => void) {
+            harness.acceptPlan = onPlanAccepted;
+        }
         handlePermissionResponse = vi.fn(async () => false);
         cancelAll = vi.fn(async () => {});
     }
@@ -347,13 +378,14 @@ vi.mock('@/agent/permissionAdapter', () => ({
         constructor(
             client: { rpcHandlerManager?: { registerHandler?: (method: string, handler: (payload: unknown) => Promise<unknown>) => void } },
             _backend: unknown,
-            _getMode: unknown,
+            getMode: () => string | undefined,
             onResponse?: (response: {
                 id: string
                 approved: boolean
                 decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort'
             }) => Promise<boolean>
         ) {
+            harness.permissionPolicy = getMode;
             if (onResponse && client?.rpcHandlerManager?.registerHandler) {
                 client.rpcHandlerManager.registerHandler(
                     'permission',
@@ -410,6 +442,8 @@ vi.mock('@/ui/logger', () => ({
 }));
 
 import { classifyCursorAcpLoadError, cursorAcpRemoteLauncher } from './cursorAcpRemoteLauncher';
+import { cursorTodosBySession } from './utils/cursorTodoSnapshot';
+import { CursorConversationHistory } from './cursorConversationHistory';
 import { createCursorAcpBackend } from './utils/cursorAcpBackend';
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
 import { CursorSession } from './session';
@@ -625,6 +659,12 @@ describe('cursorAcpRemoteLauncher', () => {
         harness.promptStderrErrors = [];
         harness.releasePrompt = null;
         harness.setConfigOptionCalls = [];
+        harness.rejectedModes.clear();
+        harness.rejectedModeAttempts = 0;
+        harness.permissionPolicy = null;
+        harness.acceptPlan = null;
+        harness.promptPermissions = [];
+        harness.promptNativeModes = [];
         harness.deferSetConfigOption = null;
         harness.releaseSetConfigOption = null;
         harness.deferModeConfigOption = false;
@@ -648,6 +688,8 @@ describe('cursorAcpRemoteLauncher', () => {
         harness.overlayCleanup = null;
         harness.notifyRuleInstallCalls = [];
         harness.notifyRuleCleanup = null;
+        harness.availableCommands = [];
+        harness.availableCommandsListener = null;
         harness.agentActivityListener = null;
         resetSessionSummaryContractForTests();
         delete process.env.HAPI_SESSION_SUMMARY_CONTRACT;
@@ -657,7 +699,7 @@ describe('cursorAcpRemoteLauncher', () => {
         harness.failNextInitialize = null;
         harness.failInitializeTimes = 0;
         harness.deferNextInitialize = null;
-        harness.spawnAutoReviewFlags = [];
+        harness.advertisesSmartAuto = false;
         harness.lastPromptOnUpdate = null;
         harness.promptGeneration = 0;
         legacyLauncher.mockClear();
@@ -673,6 +715,199 @@ describe('cursorAcpRemoteLauncher', () => {
         resetSessionSummaryContractForTests();
         delete process.env.HAPI_SESSION_SUMMARY_CONTRACT;
     });
+
+    it('keeps fork and rewind fenced during permission recovery with an empty queue', async () => {
+        const fork = vi.spyOn(CursorConversationHistory.prototype, 'fork').mockReturnValue('forked-acp-session');
+        const session = makeSession(null, { keepQueueOpen: true });
+        const { handlers } = session.client.rpcHandlerManager as unknown as {
+            handlers: Map<string, (payload: unknown) => Promise<unknown>>
+        };
+        const running = cursorAcpRemoteLauncher(session);
+        try {
+            await vi.waitFor(() => expect(session.client.emitSessionReady).toHaveBeenCalledOnce());
+            harness.rejectedModes.add('agent');
+            session.queue.push('inspect in Ask mode', { permissionMode: 'ask' }, 'ask-user');
+            await vi.waitFor(() => expect(session.client.sendAgentMessage).toHaveBeenCalledWith(expect.objectContaining({
+                type: 'error', message: expect.stringContaining('could not restore default mode')
+            })));
+            expect(session.queue.size()).toBe(0);
+            expect(session.getPermissionMode()).toBe('ask');
+            const forkCurrent = handlers.get(RPC_METHODS.ForkConversation)!;
+            const rewind = handlers.get(RPC_METHODS.RewindConversation)!;
+            const source = { cursorSourceSessionId: 'new-acp-session' };
+            await expect(forkCurrent(source)).rejects.toThrow('idle ACP session');
+            await expect(rewind({ ...source, messageLocalId: 'ask-user' })).rejects.toThrow('idle ACP session');
+            expect(fork).not.toHaveBeenCalled();
+            harness.rejectedModes.delete('agent');
+            await session.applyPermissionModeConfig('default');
+            await expect(forkCurrent(source)).resolves.toMatchObject({ nativeSessionId: 'forked-acp-session' });
+        } finally {
+            await session.kill();
+            await running;
+            fork.mockRestore();
+        }
+    });
+
+    it('keeps the source bound and fences input, permission and model changes until the Hub commits the exact prepared rewind', async () => {
+        const fork = vi.spyOn(CursorConversationHistory.prototype, 'fork').mockReturnValue('loaded-acp-session');
+        const session = makeSession(null, { keepQueueOpen: true });
+        const { handlers } = session.client.rpcHandlerManager as unknown as {
+            handlers: Map<string, (payload: unknown) => Promise<unknown>>
+        };
+        const running = cursorAcpRemoteLauncher(session);
+        try {
+            await vi.waitFor(() => expect(handlers.has(RPC_METHODS.RewindConversation)).toBe(true));
+            const rewind = handlers.get(RPC_METHODS.RewindConversation)!;
+            const messageLocalId = 'synthetic-turn';
+            await expect(rewind({ messageLocalId })).rejects.toThrow('two-phase Hub');
+            expect(fork).not.toHaveBeenCalled();
+            harness.rejectedModes.add('agent');
+            await expect(rewind({ cursorSourceSessionId: 'new-acp-session', messageLocalId })).rejects.toThrow();
+            expect(session.onSessionFoundWithProtocol).not.toHaveBeenCalledWith('loaded-acp-session', 'acp');
+            harness.rejectedModes.clear();
+            const prepared = await rewind({ cursorSourceSessionId: 'new-acp-session', messageLocalId });
+            expect(prepared).toMatchObject({ success: true, nativeSessionId: 'loaded-acp-session' });
+            const confirmedMode = session.getPermissionMode();
+            const confirmedModel = session.model;
+            await expect(session.applyPermissionModeConfig('ask')).rejects.toThrow('Cursor rewind is pending');
+            await expect(session.applyModelConfig('composer-2.5[fast=true]')).rejects.toThrow('Cursor rewind is pending');
+            expect(session.getPermissionMode()).toBe(confirmedMode);
+            expect(session.model).toBe(confirmedModel);
+            expect(session.onSessionFoundWithProtocol).not.toHaveBeenCalledWith('loaded-acp-session', 'acp');
+            expect(fork).toHaveBeenCalledWith('new-acp-session', messageLocalId);
+            await expect(session.applyPermissionModeConfig('yolo')).rejects.toThrow('rewind is pending');
+            await expect(session.applyModelConfig('auto')).rejects.toThrow('rewind is pending');
+            session.queue.push('next prompt', { permissionMode: 'default' }, 'next');
+            await expect(rewind({ cursorCommittedSessionId: 'wrong', messageLocalId })).rejects.toThrow('No matching');
+            expect(harness.promptSends).toBe(0);
+            const retained = [{ id: 'keep', content: 'Retained', priority: 'medium', status: 'completed' }];
+            await expect(rewind({ cursorCommittedSessionId: 'loaded-acp-session', cursorTodoSnapshot: retained, messageLocalId })).resolves.toMatchObject({ success: true });
+            expect(cursorTodosBySession.get(session.client)).toEqual({ revision: 'loaded-acp-session', items: retained });
+            await vi.waitFor(() => expect(harness.promptSends).toBe(1));
+            expect(session.onSessionFoundWithProtocol).toHaveBeenCalledWith('loaded-acp-session', 'acp');
+            const candidate = vi.mocked(createCursorAcpBackend).mock.results.at(-1)!.value;
+            expect(vi.mocked(candidate.prompt).mock.calls[0][0]).toBe('loaded-acp-session');
+        } finally {
+            await session.kill();
+            await running;
+            fork.mockRestore();
+        }
+    });
+
+    it('disposes only the matching uncommitted candidate and dispatches waiting input to the original', async () => {
+        const fork = vi.spyOn(CursorConversationHistory.prototype, 'fork').mockReturnValue('loaded-acp-session');
+        const session = makeSession(null, { keepQueueOpen: true });
+        const { handlers } = session.client.rpcHandlerManager as unknown as {
+            handlers: Map<string, (payload: unknown) => Promise<unknown>>
+        };
+        const running = cursorAcpRemoteLauncher(session);
+        try {
+            await vi.waitFor(() => expect(handlers.has(RPC_METHODS.RewindConversation)).toBe(true));
+            const rewind = handlers.get(RPC_METHODS.RewindConversation)!;
+            const source = vi.mocked(createCursorAcpBackend).mock.results.at(-1)!.value;
+            const messageLocalId = 'synthetic-turn';
+            const prepare = { cursorSourceSessionId: 'new-acp-session', messageLocalId };
+            const abort = { cursorAbortOperationId: 'first', messageLocalId };
+            await rewind({ ...prepare, cursorPrepareOperationId: 'first' });
+            const candidate = vi.mocked(createCursorAcpBackend).mock.results.at(-1)!.value;
+            await expect(rewind({ ...abort, cursorAbortOperationId: 'unrelated' })).rejects.toThrow();
+            expect(candidate.disconnect).not.toHaveBeenCalled();
+            await expect(rewind(abort)).resolves.toMatchObject({ success: true });
+            expect(candidate.disconnect).toHaveBeenCalledOnce();
+            expect(source.disconnect).not.toHaveBeenCalled();
+            expect(vi.mocked(source.setSessionInfoUpdateListener).mock.calls.at(-1)?.[0]).toEqual(expect.any(Function));
+            await expect(rewind(abort)).resolves.toMatchObject({ success: true });
+            await rewind({ ...prepare, cursorPrepareOperationId: 'second' });
+            await expect(rewind(abort)).rejects.toThrow();
+            session.queue.push('next prompt', { permissionMode: 'default' }, 'next');
+            await rewind({ ...abort, cursorAbortOperationId: 'second' });
+            await vi.waitFor(() => expect(harness.promptSends).toBe(1));
+            expect(vi.mocked(source.prompt).mock.calls.at(-1)?.[0]).toBe('new-acp-session');
+            expect(session.onSessionFoundWithProtocol).not.toHaveBeenCalledWith('loaded-acp-session', 'acp');
+        } finally {
+            await session.kill();
+            await running;
+            fork.mockRestore();
+        }
+    });
+
+    it('restores the source model parameters from native readback before preparing a rewind', async () => {
+        const fork = vi.spyOn(CursorConversationHistory.prototype, 'fork').mockReturnValue('loaded-acp-session');
+        const session = makeSession(null, { keepQueueOpen: true });
+        const { handlers } = session.client.rpcHandlerManager as unknown as {
+            handlers: Map<string, (payload: unknown) => Promise<unknown>>
+        };
+        const create = vi.mocked(createCursorAcpBackend);
+        const running = cursorAcpRemoteLauncher(session);
+        try {
+            await vi.waitFor(() => expect(handlers.has(RPC_METHODS.RewindConversation)).toBe(true));
+            const source = create.mock.results.at(-1)!.value as ReturnType<typeof createCursorAcpBackend>;
+            const candidate = create.getMockImplementation()!({ cwd: session.path });
+            create.mockReturnValueOnce(candidate);
+            const parameter = { id: 'fast', options: [{ value: 'true' }, { value: 'false' }] };
+            source.getSessionConfigOptions = vi.fn(() => [{ ...parameter, currentValue: 'true' }]);
+            let fast = 'false';
+            candidate.getSessionConfigOptions = vi.fn(() => [{ ...parameter, currentValue: fast }]);
+            vi.mocked(candidate.setConfigOption).mockImplementation(async (_id, option, value) => {
+                if (option === 'fast') fast = value;
+                return undefined;
+            });
+            const rewind = handlers.get(RPC_METHODS.RewindConversation)!;
+            await expect(rewind({ cursorSourceSessionId: 'new-acp-session', messageLocalId: 'synthetic-turn' }))
+                .resolves.toMatchObject({ success: true, nativeSessionId: 'loaded-acp-session' });
+            expect(candidate.setConfigOption).toHaveBeenCalledWith('loaded-acp-session', 'fast', 'true');
+            expect(source.disconnect).not.toHaveBeenCalled();
+        } finally {
+            await session.kill();
+            await running;
+            fork.mockRestore();
+        }
+    });
+
+    it.each(['permission', 'model', 'model parameter'] as const)(
+        'keeps the original session usable when rewind cannot confirm the %s', async (rejection) => {
+            const fork = vi.spyOn(CursorConversationHistory.prototype, 'fork').mockReturnValue('loaded-acp-session');
+            const session = makeSession(null, { keepQueueOpen: true });
+            const { handlers } = session.client.rpcHandlerManager as unknown as {
+                handlers: Map<string, (payload: unknown) => Promise<unknown>>
+            };
+            const create = vi.mocked(createCursorAcpBackend);
+            const running = cursorAcpRemoteLauncher(session);
+            try {
+                await vi.waitFor(() => expect(handlers.has(RPC_METHODS.RewindConversation)).toBe(true));
+                const source = create.mock.results.at(-1)!.value as ReturnType<typeof createCursorAcpBackend>;
+                const factory = create.getMockImplementation()!;
+                const candidate = factory({ cwd: session.path });
+                create.mockReturnValueOnce(candidate);
+                if (rejection === 'permission') {
+                    vi.mocked(candidate.setConfigOption).mockRejectedValue(new Error('config rejected'));
+                    vi.mocked(candidate.setMode).mockRejectedValue(new Error('mode rejected'));
+                } else if (rejection === 'model') {
+                    vi.mocked(candidate.getSessionModelsMetadata).mockReturnValue({
+                        currentModelId: 'different-model', availableModels: []
+                    });
+                } else {
+                    const parameter = { id: 'thinking', category: 'thought_level', options: [] };
+                    source.getSessionConfigOptions = vi.fn(() => [{ ...parameter, currentValue: 'on' }]);
+                    candidate.getSessionConfigOptions = vi.fn(() => [{ ...parameter, currentValue: 'off' }]);
+                }
+                const rewind = handlers.get(RPC_METHODS.RewindConversation)!;
+                const messageLocalId = 'synthetic-turn';
+                await expect(rewind({ cursorSourceSessionId: 'new-acp-session', messageLocalId })).rejects.toThrow();
+                expect(candidate.disconnect).toHaveBeenCalledOnce();
+                expect(source.disconnect).not.toHaveBeenCalled();
+                await expect(rewind({ cursorCommittedSessionId: 'loaded-acp-session', messageLocalId })).rejects.toThrow('No matching');
+                session.queue.push('continue the source', { permissionMode: 'default' }, 'continued');
+                await vi.waitFor(() => expect(source.prompt).toHaveBeenCalled());
+                expect(vi.mocked(source.prompt).mock.calls[0][0]).toBe('new-acp-session');
+                expect(session.onSessionFoundWithProtocol).not.toHaveBeenCalledWith('loaded-acp-session', 'acp');
+            } finally {
+                await session.kill();
+                await running;
+                fork.mockRestore();
+            }
+        }
+    );
 
     it('does not auto-bridge after a soft-steer accepted newer input', async () => {
         // Cold-review Major 2026-09-12: steer B into prompt A, then A hits 429.
@@ -903,7 +1138,7 @@ describe('cursorAcpRemoteLauncher', () => {
         )).toBe(true));
         await vi.waitFor(() => expect(nextWait.release).not.toBeNull());
 
-        session.setPermissionMode('plan');
+        await session.applyPermissionModeConfig('plan');
 
         const recorded = client.updateMetadata.mock.calls
             .map((call) => {
@@ -3783,7 +4018,136 @@ describe('cursorAcpRemoteLauncher', () => {
         expect(harness.loadSessionCalled).toBe(true);
     });
 
-    it('applies debug mode immediately when setPermissionMode is called', async () => {
+    it('waits for native permission acknowledgement before publishing session readiness', async () => {
+        harness.rejectedModes.add('agent');
+        const session = makeSession(null);
+        await expect(cursorAcpRemoteLauncher(session)).rejects.toThrow('mode rejected: agent');
+        expect(session.client.emitSessionReady).not.toHaveBeenCalled();
+    });
+
+    it('resumes ordinary queued input after all rejected Ask messages are canceled', async () => {
+        const session = makeSession(null, { keepQueueOpen: true });
+        session.queue.modeHasher = (mode) => mode.permissionMode;
+        const running = cursorAcpRemoteLauncher(session);
+        await vi.waitFor(() => expect(session.client.emitSessionReady).toHaveBeenCalled());
+        harness.rejectedModes.add('ask');
+        session.queue.push('first', { permissionMode: 'ask' }, 'ask-one');
+        session.queue.push('second', { permissionMode: 'ask' }, 'ask-two');
+        session.queue.push('unrelated', { permissionMode: 'default' }, 'ordinary');
+        await vi.waitFor(() => expect(harness.rejectedModeAttempts).toBe(1));
+        expect(session.queue.cancelByLocalId('ask-one')).toBe(true);
+        expect(harness.promptSends).toBe(0);
+        expect(session.queue.cancelByLocalId('ask-two')).toBe(true);
+        await vi.waitFor(() => expect(session.client.emitMessagesConsumed).toHaveBeenCalledWith(['ordinary']));
+        expect(harness.promptSends).toBe(1);
+        expect(harness.promptPermissions).toEqual(['default']);
+        session.queue.close();
+        await running;
+    });
+
+    it('keeps rejected Ask input queued and retries its own permission policy after a broader selection', async () => {
+        const session = makeSession(null, { keepQueueOpen: true });
+        const running = cursorAcpRemoteLauncher(session);
+        await vi.waitFor(() => expect(session.client.emitSessionReady).toHaveBeenCalledTimes(1));
+        harness.rejectedModes.add('ask');
+        session.queue.push('inspect without edits', { permissionMode: 'ask' }, 'ask-user');
+        await vi.waitFor(() => expect(harness.rejectedModeAttempts).toBe(1));
+        expect(harness.promptSends).toBe(0);
+        expect(session.client.emitMessagesConsumed).not.toHaveBeenCalled();
+
+        await expect(session.applyPermissionModeConfig('yolo')).resolves.toBe('yolo');
+        await vi.waitFor(() => {
+            expect(harness.rejectedModeAttempts).toBe(2);
+            expect(session.queue.peekByLocalId('ask-user')?.mode.permissionMode).toBe('ask');
+        });
+        expect(harness.promptSends).toBe(0);
+        expect(session.client.emitMessagesConsumed).not.toHaveBeenCalled();
+
+        harness.rejectedModes.delete('ask');
+        await session.applyPermissionModeConfig('yolo');
+        await vi.waitFor(() => expect(session.client.emitMessagesConsumed).toHaveBeenCalledWith(['ask-user']));
+        await vi.waitFor(() => expect(harness.permissionPolicy?.()).toBe('yolo'));
+        expect(harness.promptPermissions).toEqual(['ask']);
+        expect(harness.promptNativeModes).toEqual(['ask']);
+        session.queue.close();
+        await running;
+    });
+
+    it('rejects live mode edits during a turn without changing the native mode', async () => {
+        const session = makeSession(null, { keepQueueOpen: true });
+        const prompt = Promise.withResolvers<void>();
+        harness.deferPrompt = prompt.promise;
+        const running = cursorAcpRemoteLauncher(session);
+        await vi.waitFor(() => expect(session.client.emitSessionReady).toHaveBeenCalledTimes(1));
+        session.queue.push('inspect in Ask mode', { permissionMode: 'ask' }, 'ask-user');
+        await vi.waitFor(() => expect(harness.promptSends).toBe(1));
+
+        await expect(session.applyPermissionModeConfig('yolo')).rejects.toThrow('Wait for the current Cursor turn');
+        expect(harness.promptNativeModes).toEqual(['ask']);
+        expect(harness.permissionPolicy?.()).toBe('ask');
+        expect(session.getPermissionMode()).toBe('default');
+
+        prompt.resolve();
+        session.queue.close();
+        await running;
+    });
+
+    it('continues an accepted plan only after the native executable mode is confirmed', async () => {
+        const session = makeSession(null, { keepQueueOpen: true });
+        const planPrompt = Promise.withResolvers<void>();
+        harness.deferPrompt = planPrompt.promise;
+        const running = cursorAcpRemoteLauncher(session);
+        await vi.waitFor(() => expect(session.client.emitSessionReady).toHaveBeenCalledTimes(1));
+        await session.applyPermissionModeConfig('plan');
+        session.queue.push('write a plan', { permissionMode: 'plan' }, 'plan-user');
+        await vi.waitFor(() => expect(harness.promptSends).toBe(1));
+
+        harness.rejectedModes.add('agent');
+        expect(harness.acceptPlan).not.toBeNull();
+        harness.acceptPlan?.();
+        expect(session.getPermissionMode()).toBe('plan');
+        harness.deferPrompt = null;
+        planPrompt.resolve();
+        await vi.waitFor(() => {
+            expect(harness.rejectedModeAttempts).toBe(1);
+            expect(session.queue.size()).toBe(1);
+        });
+        expect(harness.promptNativeModes).toEqual(['plan']);
+        expect(session.getPermissionMode()).toBe('plan');
+
+        harness.rejectedModes.delete('agent');
+        await session.applyPermissionModeConfig('plan');
+        await vi.waitFor(() => expect(harness.promptNativeModes).toEqual(['plan', 'agent']));
+        expect(session.getPermissionMode()).toBe('default');
+        session.queue.close();
+        await running;
+    });
+
+    it('keeps the acknowledged Ask state visible if restoring the selected default fails', async () => {
+        const session = makeSession(null, { keepQueueOpen: true });
+        const running = cursorAcpRemoteLauncher(session);
+        await vi.waitFor(() => expect(session.client.emitSessionReady).toHaveBeenCalledTimes(1));
+        harness.rejectedModes.add('agent');
+        session.queue.push('inspect in Ask mode', { permissionMode: 'ask' }, 'ask-user');
+        await vi.waitFor(() => expect(session.getPermissionMode()).toBe('ask'));
+        expect(harness.promptNativeModes).toEqual(['ask']);
+        expect(harness.permissionPolicy?.()).toBe('ask');
+        expect(session.client.sendAgentMessage).toHaveBeenCalledWith(expect.objectContaining({
+            type: 'error', message: expect.stringContaining('could not restore default mode')
+        }));
+
+        session.queue.push('next request', { permissionMode: 'ask' }, 'next-user');
+        expect(harness.promptSends).toBe(1);
+        expect(session.client.sendSessionEvent).not.toHaveBeenCalledWith({ type: 'ready' });
+        harness.rejectedModes.delete('agent');
+        await session.applyPermissionModeConfig('default');
+        await vi.waitFor(() => expect(session.client.emitMessagesConsumed).toHaveBeenCalledWith(['next-user']));
+        expect(harness.promptNativeModes).toEqual(['ask', 'ask']);
+        session.queue.close();
+        await running;
+    });
+
+    it('applies debug mode immediately when the native permission change is acknowledged', async () => {
         const queue = new MessageQueue2<EnhancedMode>((mode) => mode.permissionMode);
         const client = {
             rpcHandlerManager: { registerHandler: vi.fn() },
@@ -3815,7 +4179,7 @@ describe('cursorAcpRemoteLauncher', () => {
         const runPromise = cursorAcpRemoteLauncher(session);
         await vi.waitFor(() => expect(harness.newSessionCalled).toBe(true));
 
-        session.setPermissionMode('debug');
+        await session.applyPermissionModeConfig('debug');
 
         await vi.waitFor(() => {
             expect(
@@ -3972,6 +4336,35 @@ describe('cursorAcpRemoteLauncher', () => {
 
         queue.close();
         await runPromise;
+    });
+
+    it.each(['composer-2.5[fast=false]', 'default[]'])('preserves the reported %s model and queued input when Auto is contradicted during a turn', async (actual) => {
+        const session = makeSession(null, { keepQueueOpen: true });
+        const run = cursorAcpRemoteLauncher(session);
+        await vi.waitFor(() => expect(session.canApplyModelConfig()).toBe(true));
+        const prior = 'composer-2.5[fast=false]';
+        await session.applyModelConfig(prior);
+        let finish!: () => void;
+        harness.deferPrompt = new Promise((resolve) => { finish = resolve; });
+        try {
+            session.queue.push('active', { permissionMode: 'default' }, 'active');
+            await vi.waitFor(() => expect(harness.promptCalls).toBe(1));
+            session.queue.push('next', { permissionMode: 'default' }, 'queued');
+            harness.modelOptionValues = ['auto', prior];
+            const backend = vi.mocked(createCursorAcpBackend).mock.results.at(-1)!.value;
+            vi.mocked(backend.setConfigOption).mockResolvedValueOnce([
+                { id: 'model-opt', currentValue: actual, options: [] }
+            ]);
+            await expect(session.applyModelConfig('auto')).rejects.toThrow(/in flight/);
+            expect(session.model).toBe(actual);
+            expect(session.queue.pendingLocalIds()).toContain('queued');
+            expect(harness.loadSessionCalled).toBe(false);
+        } finally {
+            harness.deferPrompt = null;
+            finish();
+            session.queue.close();
+            await run;
+        }
     });
 
     it('relaunches via setModel Auto when ACP has no auto option', async () => {
@@ -4234,419 +4627,45 @@ describe('cursorAcpRemoteLauncher', () => {
         await runPromise;
     });
 
-    it('re-queues Auto-review slash after relaunch when leaving and re-entering Auto-review', async () => {
-        const queue = new MessageQueue2<EnhancedMode>((mode) => mode.permissionMode);
-        const client = {
-            rpcHandlerManager: { registerHandler: vi.fn() },
-            updateMetadata: vi.fn(),
-            getMetadata: vi.fn(() => null),
-            flushMetadata: vi.fn(async () => true),
-            sendSessionEvent: vi.fn(),
-            sendAgentMessage: vi.fn(),
-            keepAlive: vi.fn(),
-            emitSessionReady: vi.fn(),
-            emitMessagesConsumed: vi.fn()
-        } as unknown as ApiSessionClient;
-
-        const session = new CursorSession({
-            api: {} as never,
-            client,
-            path: '/tmp/project',
-            logPath: '/tmp/log',
-            sessionId: null,
-            messageQueue: queue,
-            onModeChange: vi.fn(),
-            mode: 'remote',
-            startedBy: 'runner',
-            startingMode: 'remote',
-            permissionMode: 'default'
+    it.each([false, true])('publishes the actual Smart Auto capability (%s) after ACP negotiation', async offered => {
+        harness.advertisesSmartAuto = offered;
+        const session = makeSession(null, { keepQueueOpen: true });
+        let metadata = { path: session.path, host: 'test' };
+        vi.mocked(session.client.updateMetadata).mockImplementation(update => { metadata = update(metadata); });
+        const running = cursorAcpRemoteLauncher(session);
+        await vi.waitFor(() => expect(session.client.emitSessionReady).toHaveBeenCalled());
+        expect(metadata).toMatchObject({
+            cursorAcpPermissionModes: ['default', 'plan', 'debug', ...(offered ? ['autoReview'] : []), 'yolo']
         });
-        session.onSessionFoundWithProtocol = vi.fn((id: string) => {
-            session.sessionId = id;
-        });
-        queue.push('hold-open', { permissionMode: 'default' });
-
-        const runPromise = cursorAcpRemoteLauncher(session);
-        await vi.waitFor(() => expect(harness.newSessionCalled).toBe(true));
-        await vi.waitFor(() => expect(session.canApplyModelConfig()).toBe(true));
-
-        session.setPermissionMode('autoReview');
-        await vi.waitFor(() => {
-            expect(queue.hasMessageMatching((message) => message === '/auto-review')).toBe(true);
-        });
-        // Consume the slash so the old-process flag would otherwise block a re-queue.
-        await vi.waitFor(() => {
-            expect(
-                harness.prompts.some((prompt) => JSON.stringify(prompt).includes('/auto-review'))
-            ).toBe(true);
-        });
-
-        session.setPermissionMode('default');
-        await session.applyModelConfig('composer-2.5[fast=false]');
-        await session.applyModelConfig('auto');
-        session.setPermissionMode('autoReview');
-
-        await vi.waitFor(() => {
-            expect(
-                harness.prompts.filter((prompt) => JSON.stringify(prompt).includes('/auto-review')).length
-            ).toBeGreaterThanOrEqual(2);
-        });
-
-        queue.close();
-        await runPromise;
+        session.queue.close();
+        await running;
     });
 
-    it('queues Auto-review slash after Auto relaunch when session started with --auto-review', async () => {
-        const queue = new MessageQueue2<EnhancedMode>((mode) => mode.permissionMode);
-        const client = {
-            rpcHandlerManager: { registerHandler: vi.fn() },
-            updateMetadata: vi.fn(),
-            getMetadata: vi.fn(() => null),
-            flushMetadata: vi.fn(async () => true),
-            sendSessionEvent: vi.fn(),
-            sendAgentMessage: vi.fn(),
-            keepAlive: vi.fn(),
-            emitSessionReady: vi.fn(),
-            emitMessagesConsumed: vi.fn()
-        } as unknown as ApiSessionClient;
-
-        const session = new CursorSession({
-            api: {} as never,
-            client,
-            path: '/tmp/project',
-            logPath: '/tmp/log',
-            sessionId: null,
-            messageQueue: queue,
-            onModeChange: vi.fn(),
-            mode: 'remote',
-            startedBy: 'runner',
-            startingMode: 'remote',
-            permissionMode: 'autoReview'
-        });
-        session.onSessionFoundWithProtocol = vi.fn((id: string) => {
-            session.sessionId = id;
-        });
-        queue.push('hold-open', { permissionMode: 'autoReview' });
-
-        const runPromise = cursorAcpRemoteLauncher(session);
-        await vi.waitFor(() => expect(harness.newSessionCalled).toBe(true));
-        await vi.waitFor(() => expect(session.canApplyModelConfig()).toBe(true));
-        expect(harness.spawnAutoReviewFlags[0]).toBe(true);
-        // Spawned with --auto-review — no slash needed yet.
-        expect(queue.hasMessageMatching((message) => message === '/auto-review')).toBe(false);
-
-        session.setPermissionMode('default');
-        await session.applyModelConfig('composer-2.5[fast=false]');
-        await session.applyModelConfig('auto');
-
-        await vi.waitFor(() => {
-            expect(harness.spawnAutoReviewFlags.at(-1)).toBe(false);
-        });
-
-        session.setPermissionMode('autoReview');
-        await vi.waitFor(() => {
-            expect(
-                harness.prompts.some((prompt) => JSON.stringify(prompt).includes('/auto-review'))
-                || queue.hasMessageMatching((message) => message === '/auto-review')
-            ).toBe(true);
-        });
-
-        queue.close();
-        await runPromise;
+    it('rejects unavailable Smart Auto without publishing it or dispatching an unconfirmed toggle', async () => {
+        const session = makeSession(null, { keepQueueOpen: true });
+        const running = cursorAcpRemoteLauncher(session);
+        await vi.waitFor(() => expect(session.client.emitSessionReady).toHaveBeenCalled());
+        await expect(session.applyPermissionModeConfig('autoReview')).rejects.toThrow('does not offer Smart Auto');
+        expect(session.getPermissionMode()).toBe('default');
+        session.queue.pushIsolated('/auto-review', { permissionMode: 'default' }, 'toggle');
+        await vi.waitFor(() => expect(session.client.emitMessagesConsumed).toHaveBeenCalledWith(['toggle']));
+        expect(harness.promptSends).toBe(0);
+        session.queue.close();
+        await running;
     });
 
-    it('drops queued Auto-review slash when Auto relaunch spawns with --auto-review', async () => {
-        const queue = new MessageQueue2<EnhancedMode>((mode) => mode.permissionMode);
-        const client = {
-            rpcHandlerManager: { registerHandler: vi.fn() },
-            updateMetadata: vi.fn(),
-            getMetadata: vi.fn(() => null),
-            flushMetadata: vi.fn(async () => true),
-            sendSessionEvent: vi.fn(),
-            sendAgentMessage: vi.fn(),
-            keepAlive: vi.fn(),
-            emitSessionReady: vi.fn(),
-            emitMessagesConsumed: vi.fn()
-        } as unknown as ApiSessionClient;
-
-        const session = new CursorSession({
-            api: {} as never,
-            client,
-            path: '/tmp/project',
-            logPath: '/tmp/log',
-            sessionId: null,
-            messageQueue: queue,
-            onModeChange: vi.fn(),
-            mode: 'remote',
-            startedBy: 'runner',
-            startingMode: 'remote',
-            permissionMode: 'default'
-        });
-        session.onSessionFoundWithProtocol = vi.fn((id: string) => {
-            session.sessionId = id;
-        });
-        queue.push('hold-open', { permissionMode: 'default' });
-
-        const runPromise = cursorAcpRemoteLauncher(session);
-        await vi.waitFor(() => expect(harness.newSessionCalled).toBe(true));
-        await vi.waitFor(() => expect(session.canApplyModelConfig()).toBe(true));
-        await session.applyModelConfig('composer-2.5[fast=false]');
-
-        // Mode is Auto-review before relaunch so the replacement gets --auto-review.
-        session.setPermissionMode('autoReview');
-        await vi.waitFor(() => {
-            expect(
-                harness.prompts.some((prompt) => JSON.stringify(prompt).includes('/auto-review'))
-            ).toBe(true);
-        });
-        // Wait until the slash prompt finishes so relaunch is not blocked by promptInFlight.
-        await vi.waitFor(() => {
-            expect(queue.hasMessageMatching((message) => message === '/auto-review')).toBe(false);
-        });
-
-        let releaseInitialize!: () => void;
-        harness.deferNextInitialize = new Promise<void>((resolve) => {
-            releaseInitialize = resolve;
-        });
-        const autoSwitch = session.applyModelConfig('auto');
-        await vi.waitFor(() => expect(harness.deferNextInitialize).toBeNull());
-
-        // Leftover toggle from the old process still queued while replacement starts
-        // with --auto-review. Insert without waking the waiter so the message loop
-        // cannot dequeue it before bindFresh reconciles (mode+model race).
-        queue.queue.push({
-            message: '/auto-review',
-            mode: { permissionMode: 'autoReview', model: session.model },
-            modeHash: queue.modeHasher({ permissionMode: 'autoReview', model: session.model }),
-            isolate: true,
-            internal: { kind: 'control' },
-            enqueueOrder: 9999
-        });
-        expect(queue.hasMessageMatching((message) => message === '/auto-review')).toBe(true);
-
-        const promptsBeforeBind = harness.prompts.filter(
-            (prompt) => JSON.stringify(prompt).includes('/auto-review')
-        ).length;
-        releaseInitialize();
-        await autoSwitch;
-
-        expect(harness.spawnAutoReviewFlags.at(-1)).toBe(true);
-        expect(queue.hasMessageMatching((message) => message === '/auto-review')).toBe(false);
-        expect(
-            harness.prompts.filter((prompt) => JSON.stringify(prompt).includes('/auto-review')).length
-        ).toBe(promptsBeforeBind);
-
-        queue.close();
-        await runPromise;
-    });
-
-    it('discards a dequeued internal Auto-review toggle held across Auto relaunch', async () => {
-        const queue = new MessageQueue2<EnhancedMode>((mode) =>
-            `${mode.permissionMode}:${mode.model ?? ''}`
-        );
-        const client = {
-            rpcHandlerManager: { registerHandler: vi.fn() },
-            updateMetadata: vi.fn(),
-            getMetadata: vi.fn(() => null),
-            flushMetadata: vi.fn(async () => true),
-            sendSessionEvent: vi.fn(),
-            sendAgentMessage: vi.fn(),
-            keepAlive: vi.fn(),
-            emitSessionReady: vi.fn(),
-            emitMessagesConsumed: vi.fn()
-        } as unknown as ApiSessionClient;
-
-        const session = new CursorSession({
-            api: {} as never,
-            client,
-            path: '/tmp/project',
-            logPath: '/tmp/log',
-            sessionId: null,
-            messageQueue: queue,
-            onModeChange: vi.fn(),
-            mode: 'remote',
-            startedBy: 'runner',
-            startingMode: 'remote',
-            permissionMode: 'default'
-        });
-        session.onSessionFoundWithProtocol = vi.fn((id: string) => {
-            session.sessionId = id;
-        });
-        queue.push('hold-open', { permissionMode: 'default' });
-
-        const runPromise = cursorAcpRemoteLauncher(session);
-        await vi.waitFor(() => expect(harness.newSessionCalled).toBe(true));
-        await vi.waitFor(() => expect(session.canApplyModelConfig()).toBe(true));
-        await session.applyModelConfig('composer-2.5[fast=false]');
-
-        session.setPermissionMode('autoReview');
-        const slash = queue.queue.find((entry) => entry.message === '/auto-review');
-        expect(slash?.internal).toEqual({ kind: 'control' });
-        // Force the held batch to trigger Auto relaunch while dequeued (tip-bot Major).
-        slash!.mode = { permissionMode: 'autoReview', model: 'auto' };
-        slash!.modeHash = queue.modeHasher(slash!.mode);
-
-        await vi.waitFor(() => {
-            expect(harness.spawnAutoReviewFlags.at(-1)).toBe(true);
-        });
-        await vi.waitFor(() => expect(session.model).toBe('auto'));
-
-        // Internal toggle must not be prompted on a --auto-review replacement.
-        expect(
-            harness.prompts.filter((prompt) => JSON.stringify(prompt).includes('/auto-review')).length
-        ).toBe(0);
-
-        queue.close();
-        await runPromise;
-    });
-
-    it('preserves a user-sent /auto-review across Auto relaunch with --auto-review', async () => {
-        const queue = new MessageQueue2<EnhancedMode>((mode) => mode.permissionMode);
-        const client = {
-            rpcHandlerManager: { registerHandler: vi.fn() },
-            updateMetadata: vi.fn(),
-            getMetadata: vi.fn(() => null),
-            flushMetadata: vi.fn(async () => true),
-            sendSessionEvent: vi.fn(),
-            sendAgentMessage: vi.fn(),
-            keepAlive: vi.fn(),
-            emitSessionReady: vi.fn(),
-            emitMessagesConsumed: vi.fn()
-        } as unknown as ApiSessionClient;
-
-        const session = new CursorSession({
-            api: {} as never,
-            client,
-            path: '/tmp/project',
-            logPath: '/tmp/log',
-            sessionId: null,
-            messageQueue: queue,
-            onModeChange: vi.fn(),
-            mode: 'remote',
-            startedBy: 'runner',
-            startingMode: 'remote',
-            permissionMode: 'default'
-        });
-        session.onSessionFoundWithProtocol = vi.fn((id: string) => {
-            session.sessionId = id;
-        });
-        queue.push('hold-open', { permissionMode: 'default' });
-
-        const runPromise = cursorAcpRemoteLauncher(session);
-        await vi.waitFor(() => expect(harness.newSessionCalled).toBe(true));
-        await vi.waitFor(() => expect(session.canApplyModelConfig()).toBe(true));
-        await session.applyModelConfig('composer-2.5[fast=false]');
-
-        session.setPermissionMode('autoReview');
-        await vi.waitFor(() => {
-            expect(
-                harness.prompts.some((prompt) => JSON.stringify(prompt).includes('/auto-review'))
-            ).toBe(true);
-        });
-        await vi.waitFor(() => {
-            expect(queue.hasMessageMatching((message) => message === '/auto-review')).toBe(false);
-        });
-
-        let releaseInitialize!: () => void;
-        harness.deferNextInitialize = new Promise<void>((resolve) => {
-            releaseInitialize = resolve;
-        });
-        const autoSwitch = session.applyModelConfig('auto');
-        await vi.waitFor(() => expect(harness.deferNextInitialize).toBeNull());
-
-        // User-authored command (no internal flag) must survive bindFresh reconcile.
-        queue.queue.push({
-            message: '/auto-review',
-            mode: { permissionMode: 'autoReview', model: session.model },
-            modeHash: queue.modeHasher({ permissionMode: 'autoReview', model: session.model }),
-            isolate: true,
-            localId: 'user-auto-review-1',
-            enqueueOrder: 9999
-        });
-        const promptsBeforeUserSlash = harness.prompts.filter(
-            (prompt) => JSON.stringify(prompt).includes('/auto-review')
-        ).length;
-
-        releaseInitialize();
-        await autoSwitch;
-        expect(harness.spawnAutoReviewFlags.at(-1)).toBe(true);
-        expect(queue.hasMessageMatching((message) => message === '/auto-review')).toBe(true);
-
-        // Silent insert during relaunch did not wake the idle waiter — nudge the loop.
-        queue.push('wake-loop', { permissionMode: 'default' });
-
-        await vi.waitFor(() => {
-            expect(
-                harness.prompts.filter((prompt) => JSON.stringify(prompt).includes('/auto-review')).length
-            ).toBeGreaterThan(promptsBeforeUserSlash);
-        });
-        expect(queue.hasMessageMatching((message) => message === '/auto-review')).toBe(false);
-        expect(vi.mocked(client.emitMessagesConsumed)).toHaveBeenCalledWith(
-            expect.arrayContaining(['user-auto-review-1'])
-        );
-
-        queue.close();
-        await runPromise;
-    });
-
-    it('queues Auto-review slash when mode flips during Auto relaunch', async () => {
-        const queue = new MessageQueue2<EnhancedMode>((mode) => mode.permissionMode);
-        const client = {
-            rpcHandlerManager: { registerHandler: vi.fn() },
-            updateMetadata: vi.fn(),
-            getMetadata: vi.fn(() => null),
-            flushMetadata: vi.fn(async () => true),
-            sendSessionEvent: vi.fn(),
-            sendAgentMessage: vi.fn(),
-            keepAlive: vi.fn(),
-            emitSessionReady: vi.fn(),
-            emitMessagesConsumed: vi.fn()
-        } as unknown as ApiSessionClient;
-
-        const session = new CursorSession({
-            api: {} as never,
-            client,
-            path: '/tmp/project',
-            logPath: '/tmp/log',
-            sessionId: null,
-            messageQueue: queue,
-            onModeChange: vi.fn(),
-            mode: 'remote',
-            startedBy: 'runner',
-            startingMode: 'remote',
-            permissionMode: 'default'
-        });
-        session.onSessionFoundWithProtocol = vi.fn((id: string) => {
-            session.sessionId = id;
-        });
-        queue.push('hold-open', { permissionMode: 'default' });
-
-        const runPromise = cursorAcpRemoteLauncher(session);
-        await vi.waitFor(() => expect(harness.newSessionCalled).toBe(true));
-        await vi.waitFor(() => expect(session.canApplyModelConfig()).toBe(true));
-        await session.applyModelConfig('composer-2.5[fast=false]');
-
-        let releaseInitialize!: () => void;
-        harness.deferNextInitialize = new Promise<void>((resolve) => {
-            releaseInitialize = resolve;
-        });
-        const autoSwitch = session.applyModelConfig('auto');
-        await vi.waitFor(() => expect(harness.deferNextInitialize).toBeNull());
-
-        session.setPermissionMode('autoReview');
-        releaseInitialize();
-        await autoSwitch;
-
-        await vi.waitFor(() => {
-            expect(
-                harness.prompts.some((prompt) => JSON.stringify(prompt).includes('/auto-review'))
-                || (queue as unknown as { queue: Array<{ message: string }> }).queue
-                    ?.some((item) => item.message === '/auto-review')
-            ).toBe(true);
-        });
-
-        queue.close();
-        await runPromise;
+    it('enters and leaves an advertised Smart Auto mode with native confirmation and no toggle prompt', async () => {
+        harness.advertisesSmartAuto = true;
+        const session = makeSession(null, { keepQueueOpen: true });
+        const running = cursorAcpRemoteLauncher(session);
+        await vi.waitFor(() => expect(session.client.emitSessionReady).toHaveBeenCalled());
+        await expect(session.applyPermissionModeConfig('autoReview')).resolves.toBe('autoReview');
+        session.queue.pushIsolated('/auto-review', { permissionMode: 'autoReview' }, 'leave-smart-auto');
+        await vi.waitFor(() => expect(session.getPermissionMode()).toBe('default'));
+        expect(harness.setConfigOptionCalls.map(call => call.value)).toEqual(expect.arrayContaining(['auto-review', 'agent']));
+        expect(harness.promptSends).toBe(0);
+        session.queue.close();
+        await running;
     });
 
     it('prompts a queued Auto-mode batch on the relaunched backend', async () => {
@@ -6320,6 +6339,73 @@ describe('cursorAcpRemoteLauncher', () => {
         })).toEqual({ ok: false, reason: 'not_bridgeable' });
     });
 
+    it('publishes the current ACP slash catalog and ignores updates for other sessions', async () => {
+        const session = makeSession(null, { keepQueueOpen: true });
+        harness.availableCommands = [{ name: 'rename-chat' }, { name: 'not a command' }];
+        const running = cursorAcpRemoteLauncher(session);
+        try {
+            await vi.waitFor(() => expect(session.availableSlashCommands).toEqual(new Set(['rename-chat'])));
+            const updateMetadata = vi.mocked(session.client.updateMetadata);
+            const catalogUpdates = () => updateMetadata.mock.calls
+                .map(([update]) => update({} as Parameters<typeof update>[0]).slashCommands)
+                .filter((commands) => commands !== undefined);
+            expect(catalogUpdates()).toEqual([['rename-chat']]);
+
+            harness.availableCommands = [{ name: 'simplify' }];
+            harness.availableCommandsListener?.('unrelated-session');
+            expect(catalogUpdates()).toEqual([['rename-chat']]);
+            harness.availableCommandsListener?.('new-acp-session');
+            expect(catalogUpdates()).toEqual([['rename-chat'], ['simplify']]);
+
+            harness.availableCommands = [];
+            harness.availableCommandsListener?.('new-acp-session');
+            expect(catalogUpdates()).toEqual([['rename-chat'], ['simplify'], []]);
+        } finally {
+            session.queue.close();
+            await running;
+        }
+    });
+
+    it('keeps the resumed slash catalog until the backend reports a replacement', async () => {
+        const session = makeSession('previous-session', { keepQueueOpen: true });
+        vi.mocked(session.client.getMetadata).mockReturnValue({ slashCommands: ['rename-chat'] } as never);
+        const running = cursorAcpRemoteLauncher(session);
+        try {
+            await vi.waitFor(() => expect(session.client.emitSessionReady).toHaveBeenCalled());
+            expect(session.availableSlashCommands).toEqual(new Set(['rename-chat']));
+
+            harness.availableCommandsListener?.('loaded-acp-session');
+            expect(session.availableSlashCommands).toEqual(new Set());
+        } finally {
+            session.queue.close();
+            await running;
+        }
+    });
+
+    it.each([false, true])('does not replay an advertised command after a retryable failure (tool activity: %s)', async (ranTool) => {
+        const session = makeSession(null, { keepQueueOpen: true });
+        harness.availableCommands = [{ name: 'rename-chat' }];
+        harness.promptErrors = [new Error('http/2 stream closed with error code CANCEL')];
+        if (ranTool) {
+            harness.promptMessageBatches = [[{ type: 'tool_call', id: 'tool', name: 'shell', input: {}, status: 'completed' }]];
+        }
+        const running = cursorAcpRemoteLauncher(session);
+        try {
+            await vi.waitFor(() => expect(session.availableSlashCommands?.has('rename-chat')).toBe(true));
+            const mode: EnhancedMode = { permissionMode: 'default' };
+            enqueueCursorUserMessage(session.queue, '/rename-chat New title', mode, 'command', session.availableSlashCommands);
+            enqueueCursorUserMessage(session.queue, 'next task', mode, 'prompt', session.availableSlashCommands);
+            await vi.waitFor(() => expect(harness.prompts).toEqual([
+                [{ type: 'text', text: '/rename-chat New title' }],
+                ...(ranTool ? [[{ type: 'text', text: 'Continue.' }]] : []),
+                [{ type: 'text', text: 'next task' }]
+            ]));
+        } finally {
+            session.queue.close();
+            await running;
+        }
+    });
+
     it('does not wrap pass-through slash commands as Bridge prompts', async () => {
         harness.emitStderrOnPrompt = {
             type: 'rate_limit',
@@ -6783,17 +6869,10 @@ describe('cursorAcpRemoteLauncher', () => {
         const recorded = metadata.lastModelError as { eventId?: string } | undefined;
         expect(recorded?.eventId).toBeTypeOf('string');
 
-        // Switching to Auto-review enqueues an internal control slash, which is
-        // then dequeued and prompted as a batch of its own.
+        // A permission setting is control traffic and must not supersede a failed turn.
         harness.emitStderrOnPrompt = null;
-        session.setPermissionMode('autoReview');
-        await vi.waitFor(() => {
-            expect(
-                harness.prompts.some((prompt) => JSON.stringify(prompt).includes('/auto-review'))
-            ).toBe(true);
-        });
-
-        // The control command is HAPI's own and must not supersede the error.
+        harness.advertisesSmartAuto = true;
+        await session.applyPermissionModeConfig('autoReview');
         expect((metadata.lastModelError as { supersededByUserTurn?: boolean } | undefined)
             ?.supersededByUserTurn).not.toBe(true);
 

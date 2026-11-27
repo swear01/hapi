@@ -339,6 +339,17 @@ describe('AcpSdkBackend', () => {
         ]);
     });
 
+    it('returns only model options confirmed by the current config response', async () => {
+        const backend = new AcpSdkBackend({ command: 'cursor-agent' });
+        const option = { id: 'fast', currentValue: 'false', options: [{ value: 'false' }] };
+        const sendRequest = vi.fn().mockResolvedValueOnce({ configOptions: [option] }).mockResolvedValueOnce({});
+        Object.assign(backend, { transport: { sendRequest } });
+
+        expect(await backend.setConfigOption('session-1', 'fast', 'true')).toMatchObject([option]);
+        expect(await backend.setConfigOption('session-1', 'fast', 'true')).toBeUndefined();
+        expect(backend.getSessionConfigOptions('session-1')).toMatchObject([option]);
+    });
+
     it('uses session/set_config_option when flavor is opencode and captures thought_level', async () => {
         const backend = new AcpSdkBackend({ command: 'opencode' });
         const calls: Array<{ method: string; params: unknown }> = [];
@@ -1751,6 +1762,13 @@ describe('AcpSdkBackend', () => {
         backend.registerExtensionRequestHandler('cursor/ask_question', handler);
 
         expect(registered.get('cursor/ask_question')).toBe(handler);
+        const notify = vi.fn().mockResolvedValue({});
+        backend.registerExtensionRequestHandler('cursor/update_todos', notify, { acceptNotification: true });
+        const incoming = backend as unknown as { handleNotification(method: string, params: unknown): void };
+        incoming.handleNotification('cursor/update_todos', { todos: [], merge: false });
+        incoming.handleNotification('cursor/ask_question', {});
+        expect(notify).toHaveBeenCalledWith({ todos: [], merge: false }, null);
+        expect(handler).not.toHaveBeenCalled();
     });
 
     it('beginSoftSteerPrompt sends concurrent session/prompt without cancel', () => {

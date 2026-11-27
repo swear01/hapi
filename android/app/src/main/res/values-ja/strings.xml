@@ -106,6 +106,9 @@
     <string name="new_session_yolo_maps_to">ネイティブの %1$s モードを適用します。</string>
     <string name="new_session_collaboration_mode">コラボレーションモード</string>
     <string name="new_session_copilot_agent_mode">エージェントモード</string>
+    <string name="cursor_thinking">思考</string>
+    <string name="cursor_context_window">コンテキストウィンドウ</string>
+    <string name="cursor_model_variant">バリアント</string>
     <string name="new_session_fast_mode">高速モード</string>
     <string name="new_session_fast_mode_standard">標準</string>
     <string name="new_session_fast_mode_fast">高速</string>
@@ -120,6 +123,7 @@
     <string name="settings_category_general_summary">外観、言語、アプリ情報</string>
     <string name="settings_back">戻る</string>
     <string name="settings_cancel">キャンセル</string>
+    <string name="settings_cursor_retry">一時的なモデルエラーを自動で1回再試行</string>
     <string name="settings_retry">再試行</string>
     <string name="settings_load_error">このダッシュボードを読み込めませんでした。</string>
     <string name="settings_owner_only">このダッシュボードは Hub のオーナー（default namespace）のみ利用できます。</string>
@@ -171,6 +175,16 @@
 
     <!-- Usage dashboard -->
     <string name="settings_usage">使用量</string>
+    <string name="quota_title">CLI アカウントのクォータ</string>
+    <string name="quota_empty">CLI アカウントがインストールされたオンラインのマシンはありません。</string>
+    <string name="quota_runner">CLI アカウントのクォータを表示するには、このマシンの runner を更新してください。</string>
+    <string name="quota_remaining">残り %1$d%%（使用済み %2$d%%）</string>
+    <string name="quota_resets">%1$s にリセット</string>
+    <string name="quota_unauthenticated">未サインイン</string>
+    <string name="quota_custom_provider">カスタムエンドポイント / API キー</string>
+    <string name="quota_error">クォータを取得できません</string>
+    <string name="quota_older_hub">CLI アカウントのクォータを表示するには、ハブを更新してください。</string>
+    <string name="quota_stale">更新できませんでした。前回のクォータを表示しています。</string>
     <string name="settings_usage_range_7d">7 日間</string>
     <string name="settings_usage_range_30d">30 日間</string>
     <string name="settings_usage_range_all">全期間</string>
@@ -341,6 +355,7 @@
     <string name="chat_notice_request_already_handled">リクエストはすでに処理されています</string>
     <string name="chat_notice_request_failed">リクエストに失敗しました</string>
     <string name="chat_notice_models_failed">モデルの読み込みに失敗しました</string>
+    <string name="chat_notice_config_readback_unavailable">設定は受理されました。現在の値を取得できませんでした。</string>
     <string name="chat_notice_config_failed">セッションの更新に失敗しました</string>
 
     <!-- Composer (B-M3a/ce/f) -->
@@ -467,6 +482,7 @@
     <string name="chat_question_awaiting">回答待ち</string>
     <string name="chat_question_answered">回答済み</string>
     <string name="chat_question_handled">質問は対応済みです</string>
+    <string name="chat_question_skipped">質問をスキップしました</string>
     <string name="chat_question_canceled">質問はキャンセルされました</string>
     <string name="chat_question_failed">質問に失敗しました</string>
     <string name="chat_question_submitting">回答を送信中…</string>
@@ -478,6 +494,7 @@
     <string name="chat_question_optional">任意</string>
     <string name="chat_question_other_answer">その他の回答</string>
     <string name="chat_question_hide_note">メモを隠す</string>
+    <string name="chat_question_skip">スキップ</string>
     <string name="chat_question_previous">前の質問</string>
     <string name="chat_question_submit">回答を送信</string>
     <string name="chat_question_next">次の質問</string>
@@ -827,4 +844,19 @@
     <string name="sessions_other_project">その他</string>
     <string name="sessions_folder_expanded">展開中</string>
     <string name="sessions_folder_collapsed">折りたたみ中</string>
+    <string name="chat_model_error">モデルエラー · %1$s</string>
+    <string name="chat_model_error_recovered">直前のメッセージを再送しました · %1$s</string>
+    <string name="chat_model_error_retry_failed">再試行に失敗しました · %1$s</string>
+    <string name="chat_model_error_claimed_done">エラーの前にエージェントが完了を報告しました。作業結果を確認してください。</string>
+    <string name="chat_model_error_bridge">ブリッジして再試行</string>
+    <string name="chat_model_error_bridging">ブリッジ中…</string>
+    <string name="chat_model_error_hide_details">詳細を隠す</string>
+    <string name="model_error_action_failed">モデルエラーの状態を更新できませんでした。</string>
+    <string name="model_error_ack_unconfirmed">エラーを閉じたことを確認できませんでした。</string>
+    <string name="model_error_reason_model_error_changed">モデルエラーが変わりました。</string>
+    <string name="model_error_reason_no_model_error">現在モデルエラーはありません。</string>
+    <string name="model_error_reason_prompt_in_flight">すでに応答を生成しています。</string>
+    <string name="model_error_reason_superseded_by_newer_turn">すでに次のターンが始まりました。</string>
+    <string name="model_error_reason_not_bridgeable">このエラーはブリッジで再試行できません。</string>
+    <string name="model_error_reason_missing_last_user_message">再送できるメッセージがありません。</string>
 </resources>

@@ -59,6 +59,16 @@ class HapiApiTest {
 
     private fun lastRequestBody() = Json.parseToJsonElement(server.takeRequest().body.readUtf8()).jsonObject
 
+    @Test fun cursorRetryUpdateSendsOnlyTheFlagAndReturnsTheHubState() {
+        server.enqueue(ok("""{"autoBridgeTransientModelErrors":false}"""))
+        val confirmed = runBlocking { session.api.setCursorAutoRetry(true) }
+        assertEquals(false, confirmed.autoBridgeTransientModelErrors)
+        val req = server.takeRequest()
+        assertEquals("PUT", req.method)
+        assertEquals("/api/hub-settings", req.path)
+        assertEquals("""{"autoBridgeTransientModelErrors":true}""", req.body.readUtf8())
+    }
+
     @Test
     fun `production clients reject cleartext hub urls`() {
         assertFailsWith<IllegalArgumentException> {
@@ -67,6 +77,47 @@ class HapiApiTest {
         assertFailsWith<IllegalArgumentException> {
             HubSession("http://hub.example", InMemoryCredentialStore())
         }
+    }
+
+    @Test
+    fun `model error actions send the exact event id and encode session as one path segment`() = runBlocking {
+        val eventId = "evt/#:123"
+        for (action in listOf("bridge", "acknowledge")) {
+            server.enqueue(ok("""{"ok":true}"""))
+            if (action == "bridge") assertTrue(session.api.bridgeModelError("s/1", eventId).ok)
+            else session.api.acknowledgeModelError("s/1", eventId)
+            val sent = server.takeRequest()
+            assertEquals("POST", sent.method)
+            assertEquals("/api/sessions/s%2F1/model-error/$action", sent.path)
+            assertEquals(buildJsonObject { put("eventId", eventId) }, Json.parseToJsonElement(sent.body.readUtf8()))
+        }
+    }
+
+    @Test
+    fun `bridge returns CLI refusals and preserves ordinary conflicts as API errors`() = runBlocking {
+        server.enqueue(ok("""{"ok":false,"reason":"superseded_by_newer_turn"}""").setResponseCode(409))
+        val refused = session.api.bridgeModelError("s", "evt")
+        assertEquals(false, refused.ok)
+        assertEquals("superseded_by_newer_turn", refused.reason)
+
+        server.enqueue(ok("""{"error":"Session is inactive","code":"session_inactive"}""").setResponseCode(409))
+        assertEquals("session_inactive", assertFailsWith<ApiError> { session.api.bridgeModelError("s", "evt") }.code)
+        server.enqueue(ok("""{"error":"Model error changed"}""").setResponseCode(409))
+        assertEquals("Model error changed", assertFailsWith<ApiError> { session.api.acknowledgeModelError("s", "evt") }.code)
+    }
+
+    @Test
+    fun `gateway HTML and malformed success envelopes cannot accept a model error action`() = runBlocking {
+        for (body in listOf("<html>Sign in</html>", "{}", """{"ok":"true"}""")) {
+            server.enqueue(ok(body))
+            assertFailsWith<java.io.IOException> { session.api.bridgeModelError("s", "evt") }
+            server.enqueue(ok(body))
+            assertFailsWith<java.io.IOException> { session.api.acknowledgeModelError("s", "evt") }
+        }
+        server.enqueue(ok("""{"ok":false,"reason":"unconfirmed"}"""))
+        assertEquals("unconfirmed", assertFailsWith<java.io.IOException> {
+            session.api.acknowledgeModelError("s", "evt")
+        }.message)
     }
 
     // ------------------------------------------------------------ ApiError --
@@ -340,6 +391,19 @@ class HapiApiTest {
     }
 
     @Test
+    fun cursorCatalogsDecodeOnMachineAndSessionRoutes() {
+        val body = """{"success":true,"availableModels":[{"modelId":"grok[fast=false]"}],"cliModelSkus":[{"modelId":"grok-fast"}],"currentModelId":"grok[fast=false]"}"""
+        server.enqueue(ok(body))
+        server.enqueue(ok(body))
+        val machine = runBlocking { session.api.getMachineCursorModels("m1") }
+        val chat = runBlocking { session.api.getSessionCursorModels("s1") }
+        assertEquals("/api/machines/m1/cursor-models", server.takeRequest().path)
+        assertEquals("/api/sessions/s1/cursor-models", server.takeRequest().path)
+        assertEquals(machine, chat)
+        assertEquals("grok-fast", machine.cliModelSkus?.single()?.modelId)
+    }
+
+    @Test
     fun `machine codex models decode and rpc_target_missing surfaces as coded ApiError`() {
         server.enqueue(
             ok(
@@ -446,6 +510,29 @@ class HapiApiTest {
         assertEquals("Bearer $jwt", request.getHeader("Authorization"))
         assertNull(summary.range.from)
         assertEquals(12L, summary.totals.totalTokens)
+    }
+
+    @Test
+    fun `usage quotas decode arbitrary agents and force refresh only on request`() {
+        val response = """
+            {"machines":[{"machineId":"m","machineName":"runner","supported":true,"accounts":[
+              {"agent":"future-cli","status":"ok","available":true,"creditsLabel":"USD 10","buckets":[
+                {"label":"Monthly","remainingPercent":42.75,"usedPercent":57.25,"resetsAt":1789000000000}
+              ]}
+            ]}]}
+        """.trimIndent()
+        for (refresh in listOf(false, true)) {
+            server.enqueue(ok(response))
+            val quotas = runBlocking { session.api.getUsageQuotas(refresh) }
+            val request = server.takeRequest()
+            assertEquals("/api/usage/quotas" + if (refresh) "?refresh=1" else "", request.path)
+            assertEquals("Bearer $jwt", request.getHeader("Authorization"))
+            val account = quotas.machines.single().accounts.single()
+            assertEquals("future-cli", account.agent)
+            assertEquals("USD 10", account.creditsLabel)
+            assertEquals(42.75, account.buckets.single().remainingPercent)
+            assertEquals(1789000000000L, account.buckets.single().resetsAt)
+        }
     }
 
     @Test

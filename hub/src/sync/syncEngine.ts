@@ -7,7 +7,7 @@
  * - No E2E encryption; data is stored as JSON in SQLite
  */
 
-import { type SessionReadStateRequest, isKnownFlavor, matchesClaudeSessionId, isLiveLifecycleState, isSteeringSupportedForSession, MACHINE_CAPABILITIES, type LocalResumeTarget, type ResumableSession, type SessionEndReason } from '@hapi/protocol'
+import { type SessionReadStateRequest, isObject, isKnownFlavor, matchesClaudeSessionId, isLiveLifecycleState, isSteeringSupportedForSession, MACHINE_CAPABILITIES, type LocalResumeTarget, type ResumableSession, type SessionEndReason } from '@hapi/protocol'
 import {
     cliBinaryUpdatedOnDisk,
     isMachineCapabilitySkewed,
@@ -23,7 +23,7 @@ import type { AgentFlavor, BackgroundTask, CodexCollaborationMode, CopilotAgentM
 import { hasConversationMessageContent, unwrapRoleWrappedRecordEnvelope } from '@hapi/protocol/messages'
 import type { Server } from 'socket.io'
 import { createHash, randomUUID } from 'node:crypto'
-import type { BranchConversationRequest, BranchConversationResponse } from '@hapi/protocol/apiTypes'
+import { BranchConversationAgentSchema, resolveBranchSourceDirectory, type BranchConversationRequest, type BranchConversationResponse } from '@hapi/protocol/apiTypes'
 import { branchSessionId, buildBranchPrompt } from './branchTranscript'
 import type { Store, CancelQueuedMessageResult } from '../store'
 import type { StoredMessage } from '../store/types'
@@ -96,7 +96,7 @@ import { SessionEnumerationCache } from './sessionEnumerationCache'
 import { ingestNotifySummaryFromMessage } from './workGraphNotifyIngest'
 import { MetadataSchema, type OpenCodeRewindOperation } from '@hapi/protocol/schemas'
 import type { OpenCodeRewindReport } from '@hapi/protocol/apiTypes'
-import { extractTodoWriteTodosFromMessageContent } from './todos'
+import { cursorTodoSnapshotAfterCut, extractTodoWriteTodosFromMessageContent } from './todos'
 import {
     readAutoBridgeTransientModelErrorsEnabled,
     writeAutoBridgeTransientModelErrorsEnabled
@@ -2225,6 +2225,10 @@ export class SyncEngine {
 
     /** Stale localIds must fail before native fork/rewind mutates agent history. */
     private assertInvokedHistoryBoundary(sessionId: string, messageLocalId: string): void {
+        const metadata = this.getSession(sessionId)?.metadata
+        if (metadata?.flavor === 'cursor' && metadata.conversationHistoryPoints?.[messageLocalId] !== true) {
+            throw new Error('No verified Cursor checkpoint for this message')
+        }
         const boundary = this.store.messages.getAllMessages(sessionId).find(
             (message) => message.localId === messageLocalId && message.invokedAt != null
         )
@@ -2293,7 +2297,7 @@ export class SyncEngine {
     private async waitForExactNativeForkBound(
         childId: string,
         expectedNativeSessionId: string,
-        metadataKey: 'grokSessionId' | 'piSessionId' | 'opencodeSessionId' | 'codexSessionId',
+        metadataKey: 'cursorSessionId' | 'grokSessionId' | 'piSessionId' | 'opencodeSessionId' | 'codexSessionId',
         requireSessionReady: boolean,
         timeoutMs: number = 60_000
     ): Promise<boolean> {
@@ -2612,27 +2616,41 @@ export class SyncEngine {
                         ? { warning: 'Launch outcome is uncertain. Inspect this child before starting another branch.' } : {}) }
             }
             this.assertConversationHistoryIdle(source, false, false)
-            if (!['claude', 'codex'].includes(source.metadata?.flavor ?? 'claude')) {
-                throw new Error('Portable branches currently support Claude Code and Codex source sessions')
+            const sourceAgent = BranchConversationAgentSchema.safeParse(source.metadata?.flavor ?? 'claude').data
+            if (!sourceAgent) {
+                throw new Error('Portable branches require a Claude Code, Codex, or Cursor source session')
+            }
+            if (request.agent === 'cursor' && request.workspace === 'worktree') {
+                throw new Error('Branching into Cursor requires the current directory')
             }
             const machineId = source.metadata?.machineId
-            const directory = source.metadata?.path
+            const directory = resolveBranchSourceDirectory(source.metadata)
             const machine = machineId ? this.getMachineByNamespace(machineId, namespace) : undefined
             if (!machineId || !directory || !machine?.active) throw new Error('Source machine must be online')
+            if (sourceAgent === 'cursor' && request.sourceDirectory !== directory) {
+                throw new Error('Confirm the Cursor source directory before branching')
+            }
             if (request.model) {
-                const catalog = request.agent === 'claude'
-                    ? await this.listClaudeModelsForMachine(machineId)
-                    : await this.listCodexModelsForMachine(machineId)
-                const models = 'availableModels' in catalog
-                    ? catalog.availableModels?.map(model => model.value)
-                    : 'models' in catalog ? catalog.models?.map(model => model.id) : []
-                if (!catalog.success || !models?.includes(request.model)) throw new Error('Selected model is not available on the source machine')
+                let models: string[] | undefined
+                if (request.agent === 'cursor') {
+                    const catalog = await this.listCursorModelsForMachine(machineId)
+                    if (catalog.success) models = catalog.availableModels?.map(model => model.modelId)
+                } else if (request.agent === 'claude') {
+                    const catalog = await this.listClaudeModelsForMachine(machineId)
+                    if (catalog.success) models = catalog.availableModels?.map(model => model.value)
+                } else {
+                    const catalog = await this.listCodexModelsForMachine(machineId)
+                    if (catalog.success) models = catalog.models?.map(model => model.id)
+                }
+                if (!models?.includes(request.model)) throw new Error('Selected model is not available on the source machine')
             }
             // Catalog discovery is asynchronous; reject if a new turn began meanwhile.
             const latestSource = this.getSessionByNamespace(sessionId, namespace)
             if (!latestSource) throw new Error('Source session no longer exists')
             this.assertConversationHistoryIdle(latestSource, false, false)
-            if (latestSource.metadata?.machineId !== machineId || latestSource.metadata?.path !== directory) {
+            if ((latestSource.metadata?.flavor ?? 'claude') !== sourceAgent
+                || latestSource.metadata?.machineId !== machineId
+                || resolveBranchSourceDirectory(latestSource.metadata) !== directory) {
                 throw new Error('Source location changed; reopen the branch dialog')
             }
             // Freeze the invoked prefix before any asynchronous spawn work. Pending
@@ -2665,8 +2683,10 @@ export class SyncEngine {
                 const spawn = await this.rpcGateway.spawnSession(
                     machineId, directory, request.agent, request.model,
                     undefined, undefined, request.workspace === 'worktree' ? 'worktree' : 'simple',
-                    request.worktreeName, undefined, undefined, undefined, undefined,
-                    undefined, undefined, undefined, 'remote', undefined, childId
+                    request.worktreeName, undefined, undefined, request.agent === 'cursor' ? 'default' : undefined, undefined,
+                    undefined, undefined, undefined, 'remote', undefined, childId, undefined,
+                    // The confirmed Cursor workspace may have disappeared since the dialog opened.
+                    sourceAgent === 'cursor' ? false : undefined
                 )
                 if (spawn.type !== 'success') {
                     if (spawn.childStarted === false) {
@@ -3061,11 +3081,15 @@ export class SyncEngine {
             return { type: 'error', message: 'Session is missing machine or path metadata' }
         }
 
+        // Cursor copies a native store while the Hub owns the visible transcript.
+        // Refuse to pair the snapshot with rows that arrived during that copy.
+        const cursorSourceId = source.metadata?.flavor === 'cursor' ? source.metadata.cursorSessionId : undefined
+        const cursorRows = cursorSourceId ? JSON.stringify(this.store.messages.getAllMessages(sessionId)) : undefined
         let rpcResult: Awaited<ReturnType<RpcGateway['forkConversation']>>
         try {
             rpcResult = await this.rpcGateway.forkConversation(
                 sessionId,
-                latestCompleted
+                cursorSourceId ? { cursorSourceSessionId: cursorSourceId, messageLocalId } : latestCompleted
                     ? { latestCompleted: true, ...(boundary?.nativeTurnId ? { lastTurnId: boundary.nativeTurnId } : {}) }
                     : messageLocalId
                         ? { messageLocalId }
@@ -3112,6 +3136,11 @@ export class SyncEngine {
         source = refreshedSource
 
         const flavor = this.resolveFlavor(source)
+        if (flavor === 'cursor' && (!cursorSourceId || source.metadata?.cursorSessionProtocol !== 'acp'
+            || source.metadata.cursorSessionId !== cursorSourceId || rpcResult.nativeSessionId === cursorSourceId
+            || JSON.stringify(this.store.messages.getAllMessages(sessionId)) !== cursorRows)) {
+            return { type: 'error', message: 'Cursor source changed or did not produce a distinct native fork' }
+        }
         if (flavor === 'opencode'
             && (rpcResult.opencodeHistoryCheckpoint?.sessionId !== rpcResult.nativeSessionId
                 || rpcResult.opencodeHistoryCheckpoint.localMessageIds?.length !== 0
@@ -3163,6 +3192,11 @@ export class SyncEngine {
         } else if (flavor === 'opencode') {
             childMetadata.opencodeHistoryCheckpoint = rpcResult.opencodeHistoryCheckpoint
             childMetadata.opencodeForkPending = true
+        } else if (flavor === 'cursor') {
+            childMetadata.cursorSessionId = rpcResult.nativeSessionId
+            childMetadata.cursorSessionProtocol = 'acp'
+            // Cursor checkpoints belong to the parent launcher instance.
+            childMetadata.conversationHistoryPoints = {}
         } else if (flavor === 'grok') {
             childMetadata.grokSessionId = rpcResult.nativeSessionId
         } else if (flavor === 'pi') {
@@ -3261,12 +3295,12 @@ export class SyncEngine {
                 }
             }
 
-            if (flavor === 'pi') {
+            if (flavor === 'pi' || flavor === 'cursor') {
                 const bound = await this.waitForExactNativeForkBound(
-                    childId, rpcResult.nativeSessionId, 'piSessionId', true
+                    childId, rpcResult.nativeSessionId, flavor === 'pi' ? 'piSessionId' : 'cursorSessionId', true
                 )
                 if (!bound) {
-                    throw new Error('Pi fork could not load the exact native session before ready')
+                    throw new Error(`${flavor === 'pi' ? 'Pi' : 'Cursor'} fork could not load the exact native session before ready`)
                 }
             }
 
@@ -3568,6 +3602,7 @@ export class SyncEngine {
             return { type: 'error', message: error instanceof Error ? error.message : String(error) }
         }
 
+        if (session.metadata?.flavor === 'cursor') return await this.rewindCursor(session, namespace, messageLocalId)
         if (session.metadata?.flavor === 'opencode') return await this.rewindOpenCode(session, namespace, messageLocalId)
 
         this.claudeRewindRpcsInFlight.set(sessionId, messageLocalId)
@@ -3653,6 +3688,72 @@ export class SyncEngine {
                 hydrateFailed: true
             }
         }
+    }
+
+    private async rewindCursor(session: Session, namespace: string, localId: string): Promise<{ type: 'success' } | { type: 'error'; message: string }> {
+        const metadata = session.metadata
+        const sourceId = metadata?.cursorSessionId
+        if (!sourceId || metadata.cursorSessionProtocol !== 'acp') {
+            return { type: 'error', message: 'Cursor rewind requires a verified native checkpoint' }
+        }
+        const sessionId = session.id
+        const version = session.metadataVersion
+        const transcript = JSON.stringify(this.store.messages.getAllMessages(sessionId))
+        const operationId = randomUUID()
+        let childId: string
+        let cursorTodoSnapshot: import('@hapi/protocol/schemas').CursorTodoSnapshot = []
+        try {
+            // Preparation loads an independent native copy and fences prompt dispatch.
+            // Until the transaction commits, restarting the runner resumes the original.
+            const prepared = await this.rpcGateway.rewindConversation(sessionId, { messageLocalId: localId, cursorSourceSessionId: sourceId, cursorPrepareOperationId: operationId })
+            if (!prepared?.success) return { type: 'error', message: prepared?.error ?? 'Cursor rewind preparation failed' }
+            if (!prepared.nativeSessionId || prepared.nativeSessionId === sourceId || prepared.truncateFromLocalId !== localId) {
+                throw new Error('Cursor did not verify the requested native checkpoint')
+            }
+            childId = prepared.nativeSessionId
+            this.store.runInTransaction(() => {
+                const latest = this.sessionCache.getSessionByNamespace(sessionId, namespace)
+                if (!latest?.active || latest.thinking || transcript !== JSON.stringify(this.store.messages.getAllMessages(sessionId))) {
+                    throw new Error('Cursor source changed during rewind')
+                }
+                const update = this.store.sessions.updateSessionMetadata(sessionId, {
+                    ...metadata, cursorSessionId: childId, conversationHistoryPoints: {}, lastModelError: null
+                }, version, namespace)
+                if (update.result !== 'success') throw new Error('Cursor session binding changed during rewind')
+                this.store.messages.truncateMessagesFromLocalId(sessionId, localId)
+                const retained = this.store.messages.getAllMessages(sessionId)
+                cursorTodoSnapshot = cursorTodoSnapshotAfterCut(retained)
+                const stored = this.store.sessions.getSession(sessionId)!
+                const state = this.store.sessions.updateSessionAgentState(sessionId, {
+                    ...(isObject(stored.agentState) ? stored.agentState : {}), cursorTodoRevision: childId, cursorTodoSnapshot
+                }, stored.agentStateVersion, namespace)
+                if (state.result !== 'success') throw new Error('Cursor agent state changed during rewind')
+                const todos = retained.map(m => extractTodoWriteTodosFromMessageContent(m.content)).filter(Boolean).at(-1) ?? null
+                this.store.sessions.replaceSessionTodos(sessionId, todos, namespace)
+            })
+        } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error)
+            // A lost prepare reply can still leave a loaded candidate. Only cancel
+            // this operation, and only if SQLite still selects the original source.
+            try {
+                const current = this.store.sessions.getSessionByNamespace(sessionId, namespace)?.metadata as Session['metadata']
+                if (current?.cursorSessionId === sourceId && current.cursorSessionProtocol === 'acp') {
+                    const released = await this.rpcGateway.rewindConversation(sessionId, {
+                        messageLocalId: localId, cursorAbortOperationId: operationId
+                    })
+                    if (released?.success) return { type: 'error', message: reason }
+                }
+            } catch { /* An unreachable runner or an unreadable binding cannot be reconciled here. */ }
+            return { type: 'error', message: `${reason}. If input is still blocked, stop the active runner session and resume it from the saved binding.` }
+        }
+
+        this.sessionCache.refreshSession(sessionId)
+        this.eventPublisher.emit({ type: 'messages-invalidated', sessionId, namespace, reason: 'rewind', truncateFromLocalId: localId })
+        try {
+            const ack = await this.rpcGateway.rewindConversation(sessionId, { messageLocalId: localId, cursorCommittedSessionId: childId, cursorTodoSnapshot })
+            if (ack?.success && ack.truncateFromLocalId === localId) return { type: 'success' }
+        } catch { /* The durable cut is authoritative even if the worker disconnected. */ }
+        return { type: 'error', message: 'Cursor rewind committed. If input is blocked, stop the active runner session and resume it from the verified checkpoint.' }
     }
 
     private openCodeRewindPending(sessionId: string): boolean {
@@ -3991,13 +4092,18 @@ export class SyncEngine {
     flipCursorSessionProtocolToAcp(
         sessionId: string,
         namespace: string,
-        lastUsedModel: string | null
+        lastUsedModel: string | null,
+        expectedMetadataVersion?: number
     ): { result: 'success' | 'version-mismatch' | 'not-found' | 'session-active' } {
         for (let attempt = 0; attempt < 2; attempt += 1) {
             const latest = this.sessionCache.getSessionByNamespace(sessionId, namespace)
                 ?? this.sessionCache.refreshSession(sessionId)
-            if (!latest?.metadata) {
+            if (!latest?.metadata || latest.namespace !== namespace) {
                 return { result: 'not-found' }
+            }
+            // Remote verification applies only to the row that requested the copy.
+            if (expectedMetadataVersion !== undefined && latest.metadataVersion !== expectedMetadataVersion) {
+                return { result: 'version-mismatch' }
             }
             // Combined SSE-event payload contract (UX A++): clear the
             // `cursorMigrationState='in_progress'` flag in the SAME metadata
@@ -5112,6 +5218,31 @@ export class SyncEngine {
         return undefined
     }
 
+    private async prepareRemoteCursorResume(session: Session, namespace: string): Promise<boolean> {
+        const { metadata: md, metadataVersion, activeAt } = session
+        if (session.active || session.namespace !== namespace || md?.flavor !== 'cursor'
+            || md.cursorSessionProtocol === 'acp' || !md.machineId || !md.cursorSessionId || !md.path || !md.host) {
+            return false
+        }
+        const owner = this.machineCache.getMachineByNamespace(md.machineId, namespace)
+        if (!owner?.active || owner.metadata?.host !== md.host
+            || (md.homeDir && owner.metadata.homeDir !== md.homeDir)) return false
+
+        const knownMessageCount = this.store.messages.countMessages(session.id)
+        const copy = await this.rpcGateway.prepareCursorImportForMachine(
+            owner.id, md.cursorSessionId, md.path, { knownMessageCount }
+        )
+        if (!copy.success || copy.sourceFormat !== 'legacy' || copy.verifiedLegacyCopy !== true
+            || copy.uuid !== md.cursorSessionId || copy.workspacePath !== md.path || copy.hostName !== md.host) {
+            return false
+        }
+        const current = this.sessionCache.getSessionByNamespace(session.id, namespace)
+        if (!current || current.activeAt !== activeAt || this.store.messages.countMessages(session.id) !== knownMessageCount) {
+            return false
+        }
+        return this.flipCursorSessionProtocolToAcp(session.id, namespace, null, metadataVersion).result === 'success'
+    }
+
     /**
      * tiann/hapi#824 — sync-on-open auto-migration. Returns the (possibly
      * refreshed-from-cache) session. If the session is a legacy stream-json
@@ -5145,6 +5276,7 @@ export class SyncEngine {
             console.info('[auto-migrate] skipped: env flag disabled', { sessionId: session.id })
             return session
         }
+        if (session.active) return session
         if (!md || md.flavor !== 'cursor') {
             console.info('[auto-migrate] skipped: not a cursor session', { sessionId: session.id, flavor: md?.flavor ?? null })
             return session
@@ -5183,7 +5315,16 @@ export class SyncEngine {
             // This is exactly the stale-row case the sync-on-open path is
             // meant to clean up — refusing here would defeat the whole
             // point and silently fall back to the legacy launcher forever.
-            const outcome = await migrator.migrateOne(session, { forceArchiveRunning: true })
+            const versionBeforeMigration = this.sessionCache.getSessionByNamespace(session.id, namespace)?.metadataVersion
+            const outcome = await migrator.migrateOne(session, { forceArchiveRunning: true, keepSource: true })
+            if (!outcome.ok && outcome.reason === 'cross_host_session') {
+                const candidate = this.sessionCache.getSessionByNamespace(session.id, namespace)
+                if (candidate && candidate.metadataVersion === versionBeforeMigration
+                    && await this.prepareRemoteCursorResume(candidate, namespace)) {
+                    bannerCleanupNeeded = false
+                    return this.sessionCache.getSessionByNamespace(session.id, namespace) ?? session
+                }
+            }
             if (outcome.ok) {
                 console.info('[auto-migrate] success', {
                     sessionId: session.id,
@@ -5480,7 +5621,10 @@ export class SyncEngine {
         // would block the post-migration ACP launcher), run the transplant
         // synchronously before resuming. The user sees the regular session
         // loading state for ~3–5s longer; the session opens as ACP.
-        const session = await this.maybeAutoMigrateLegacyCursorSession(initialSession, namespace)
+        await this.maybeAutoMigrateLegacyCursorSession(initialSession, namespace)
+        const session = this.sessionCache.getSessionByNamespace(access.sessionId, namespace)
+        if (!session) return { type: 'error', message: 'Session not found', code: 'session_not_found' }
+        if (session.active) return { type: 'success', sessionId: access.sessionId }
 
         const targetResult = this.resolveLocalResumeTarget(access.sessionId, namespace)
         let flavor: AgentFlavor

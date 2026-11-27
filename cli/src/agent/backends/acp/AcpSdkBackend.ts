@@ -126,6 +126,7 @@ function userMessageChunkText(update: unknown): string | null {
 
 export class AcpSdkBackend implements AgentBackend {
     private transport: AcpStdioTransport | null = null;
+    private readonly extensionNotifications = new Map<string, (params: unknown, id: null) => Promise<unknown>>();
     private permissionHandler: ((request: PermissionRequest) => void) | null = null;
     private stderrErrorHandler: ((error: AcpStderrError) => void) | null = null;
     private readonly pendingPermissions = new Map<string, PendingPermission>();
@@ -447,12 +448,15 @@ export class AcpSdkBackend implements AgentBackend {
 
     registerExtensionRequestHandler(
         method: string,
-        handler: (params: unknown, requestId: string | number | null) => Promise<unknown>
+        handler: (params: unknown, requestId: string | number | null) => Promise<unknown>,
+        options?: { acceptNotification?: boolean }
     ): void {
         if (!this.transport) {
             throw new Error('ACP transport not initialized');
         }
         this.transport.registerRequestHandler(method, handler);
+        if (options?.acceptNotification) this.extensionNotifications.set(method, handler);
+        else this.extensionNotifications.delete(method);
     }
 
     async setMode(sessionId: string, modeId: string): Promise<void> {
@@ -676,7 +680,7 @@ export class AcpSdkBackend implements AgentBackend {
         sessionId: string,
         configId: string,
         value: string
-    ): Promise<void> {
+    ): Promise<AcpConfigOptionDescriptor[] | undefined> {
         if (!this.transport) {
             throw new Error('ACP transport not initialized');
         }
@@ -688,7 +692,10 @@ export class AcpSdkBackend implements AgentBackend {
             configId,
             value
         });
+        const previous = this.sessionConfigOptions.get(sessionId);
         this.captureSessionMetadata(sessionId, response);
+        const captured = this.sessionConfigOptions.get(sessionId);
+        return captured === previous ? undefined : captured;
     }
 
     /**
@@ -738,6 +745,10 @@ export class AcpSdkBackend implements AgentBackend {
         const sessionCommands = sessionId ? this.sessionAvailableCommands.get(sessionId) : undefined;
         const source = sessionCommands ?? this.initialAvailableCommands;
         return Array.from(source.values(), (command) => ({ ...command }));
+    }
+
+    hasSessionAvailableCommands(sessionId: string): boolean {
+        return this.sessionAvailableCommands.has(sessionId);
     }
 
     setAvailableCommandsUpdateListener(
@@ -1474,6 +1485,11 @@ export class AcpSdkBackend implements AgentBackend {
     }
 
     private handleNotification(method: string, params: unknown): void {
+        const extension = this.extensionNotifications.get(method);
+        if (extension) {
+            void extension(params, null).catch(error => logger.debug('[ACP] Failed to handle extension notification', { method, error }));
+            return;
+        }
         if (method === 'session/update') {
             this.handleSessionUpdate(params);
         } else if (method === OPENCODE_CHILD_UPDATE_METHOD && this.options.childSessionUpdates) {

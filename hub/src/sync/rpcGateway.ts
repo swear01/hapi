@@ -120,14 +120,13 @@ export class PermissionRequestNotFoundError extends Error {
     }
 }
 
-// Matches on the specific shared message rather than treating any error on
-// the Permission RPC method as "not found" — a future, unrelated throw in
-// handlePermissionResponse's success path should surface as a genuine error,
-// not get relabeled as a stale request.
-function isPermissionRequestNotFoundResponse(response: unknown): boolean {
-    if (!response || typeof response !== 'object') return false
+export class PermissionResponseRejectedError extends Error {}
+
+function assertPermissionResponseAccepted(response: unknown, requestId: string): void {
+    if (!response || typeof response !== 'object') return
     const error = (response as Record<string, unknown>).error
-    return error === PERMISSION_REQUEST_NOT_FOUND_MESSAGE
+    if (error === PERMISSION_REQUEST_NOT_FOUND_MESSAGE) throw new PermissionRequestNotFoundError(requestId)
+    if (typeof error === 'string') throw new PermissionResponseRejectedError(error)
 }
 
 export type RpcCommandResponse = CommandResponse
@@ -190,9 +189,7 @@ export class RpcGateway {
             decision,
             answers
         })
-        if (isPermissionRequestNotFoundResponse(response)) {
-            throw new PermissionRequestNotFoundError(requestId)
-        }
+        assertPermissionResponseAccepted(response, requestId)
     }
 
     async denyPermission(
@@ -205,9 +202,7 @@ export class RpcGateway {
             approved: false,
             decision
         })
-        if (isPermissionRequestNotFoundResponse(response)) {
-            throw new PermissionRequestNotFoundError(requestId)
-        }
+        assertPermissionResponseAccepted(response, requestId)
     }
 
     async abortSession(sessionId: string): Promise<void> {
@@ -335,7 +330,9 @@ export class RpcGateway {
         /** Fresh machine-spawn stub — distinct from reopen existingSessionId. */
         reservedSessionId?: string,
         /** Claude: resume the spawned child truncated to this entry uuid. */
-        resumeSessionAt?: string
+        resumeSessionAt?: string,
+        /** Pass false to reject a missing directory instead of letting the runner create it. */
+        approvedNewDirectoryCreation?: boolean
     ): Promise<
         | { type: 'success'; sessionId: string }
         | {
@@ -373,7 +370,8 @@ export class RpcGateway {
                     copilotAgentMode,
                     startingMode,
                     forkSession: forkSession === true,
-                    resumeSessionAt
+                    resumeSessionAt,
+                    approvedNewDirectoryCreation
                 },
                 agent === 'codex' ? CODEX_SPAWN_RPC_TIMEOUT_MS : DEFAULT_RPC_TIMEOUT_MS
             )
@@ -687,13 +685,16 @@ export class RpcGateway {
     async prepareCursorImportForMachine(
         machineId: string,
         uuid: string,
-        workspacePath?: string | null
+        workspacePath?: string | null,
+        legacyResume?: { knownMessageCount: number }
     ): Promise<PrepareCursorImportRpcResponse> {
         // ACP verify can take tens of seconds; reuse the long list timeout.
         const result = await this.machineRpc(
             machineId,
             RPC_METHODS.PrepareCursorImport,
-            { uuid, workspacePath: workspacePath ?? null },
+            legacyResume
+                ? { legacyResume: { uuid, workspacePath, knownMessageCount: legacyResume.knownMessageCount } }
+                : { uuid, workspacePath: workspacePath ?? null },
             MODEL_LIST_RPC_TIMEOUT_MS
         )
         return PrepareCursorImportRpcResponseSchema.parse(result)
@@ -805,7 +806,7 @@ export class RpcGateway {
 
     async forkConversation(
         sessionId: string,
-        params: { messageLocalId?: string; latestCompleted?: boolean; lastTurnId?: string }
+        params: { messageLocalId?: string; latestCompleted?: boolean; lastTurnId?: string; cursorSourceSessionId?: string }
     ): Promise<import('@hapi/protocol/apiTypes').ForkConversationRpcResponse> {
         return await this.sessionRpc(
             sessionId,
@@ -851,7 +852,7 @@ export class RpcGateway {
 
     async rewindConversation(
         sessionId: string,
-        params: { messageLocalId: string; discardedThroughSeq?: number; opencodeRewind?: import('@hapi/protocol/schemas').OpenCodeRewindOperation }
+        params: import('@hapi/protocol/apiTypes').CursorRewindRpcParams & { discardedThroughSeq?: number; opencodeRewind?: import('@hapi/protocol/schemas').OpenCodeRewindOperation }
     ): Promise<import('@hapi/protocol/apiTypes').RewindConversationRpcResult> {
         return await this.sessionRpc(
             sessionId,

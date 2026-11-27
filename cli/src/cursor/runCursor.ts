@@ -62,7 +62,8 @@ export async function runCursor(opts: {
             model: opts.model,
             reservedSessionId: opts.reservedSessionId
         });
-    const { api, session } = bootstrap;
+    const { api, session, metadata } = bootstrap;
+    const previousSlashCommands = new Set(metadata.slashCommands);
 
     const startingMode: 'local' | 'remote' = startedBy === 'runner' ? 'remote' : 'local';
 
@@ -113,7 +114,10 @@ export async function runCursor(opts: {
             model: queuedModel
         };
         const formattedText = formatMessageWithAttachments(message.content.text, message.content.attachments);
-        enqueueCursorUserMessage(messageQueue, formattedText, enhancedMode, localId);
+        enqueueCursorUserMessage(
+            messageQueue, formattedText, enhancedMode, localId,
+            sessionWrapperRef.current?.availableSlashCommands ?? previousSlashCommands
+        );
     });
 
     session.onCancelQueuedMessage((localId) => {
@@ -153,10 +157,10 @@ export async function runCursor(opts: {
         const nextPermissionMode = config.permissionMode !== undefined
             ? resolveSessionConfigPermissionMode<PermissionMode>(config.permissionMode, 'cursor')
             : undefined;
+        const sessionInstance = sessionWrapperRef.current;
 
         if (config.model !== undefined) {
             const requestedModel = resolveNullableSessionModel(config.model);
-            const sessionInstance = sessionWrapperRef.current;
             if (!sessionInstance?.canApplyModelConfig()) {
                 throw new Error('Cursor ACP session is not ready to apply model changes');
             }
@@ -167,14 +171,11 @@ export async function runCursor(opts: {
         }
 
         if (nextPermissionMode !== undefined) {
-            currentPermissionMode = nextPermissionMode;
-            applied.permissionMode = currentPermissionMode;
-
-            const sessionInstance = sessionWrapperRef.current;
-            if (sessionInstance) {
-                sessionInstance.setPermissionMode(currentPermissionMode);
-                sessionInstance.pushKeepAlive();
+            if (!sessionInstance) {
+                throw new Error('Cursor session is not ready to apply permission mode changes');
             }
+            applied.permissionMode = await sessionInstance.applyPermissionModeConfig(nextPermissionMode);
+            sessionInstance.pushKeepAlive();
         }
 
         return {

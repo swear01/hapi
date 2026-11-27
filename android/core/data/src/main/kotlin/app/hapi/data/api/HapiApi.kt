@@ -4,6 +4,9 @@ import app.hapi.protocol.wire.SessionReadStateRequest
 import app.hapi.protocol.wire.SessionReadStateResponse
 import app.hapi.data.auth.HubUrls
 import app.hapi.protocol.wire.AgentAvailabilityResponse
+import app.hapi.protocol.wire.boolOrNull
+import app.hapi.protocol.wire.stringOrNull
+import app.hapi.protocol.wire.ModelErrorActionResponse
 import app.hapi.protocol.wire.ApprovePermissionRequest
 import app.hapi.protocol.wire.AuthRequest
 import app.hapi.protocol.wire.AuthResponse
@@ -11,6 +14,7 @@ import app.hapi.protocol.wire.CancelMessageResponse
 import app.hapi.protocol.wire.MessageContextResponse
 import app.hapi.protocol.wire.RetryIndeterminateMessageResponse
 import app.hapi.protocol.wire.RestartRunnerResponse
+import app.hapi.protocol.wire.CursorModelsResponse
 import app.hapi.protocol.wire.CodexModelsResponse
 import app.hapi.protocol.wire.DeleteUploadRequest
 import app.hapi.protocol.wire.DeleteUploadResponse
@@ -66,6 +70,7 @@ import app.hapi.protocol.wire.UnregisterDeviceRequest
 import app.hapi.protocol.wire.UpdateSessionSummaryRequest
 import app.hapi.protocol.wire.UploadFileRequest
 import app.hapi.protocol.wire.UploadFileResponse
+import app.hapi.protocol.wire.UsageQuotasResponse
 import app.hapi.protocol.wire.UsageSummaryResponse
 import app.hapi.protocol.wire.VisibilityRequest
 import java.io.IOException
@@ -414,6 +419,39 @@ class HapiApi internal constructor(
         request<Unit>("POST", url("api", "sessions", sessionId, "archive").build(), EMPTY_JSON)
     }
 
+    override suspend fun bridgeModelError(sessionId: String, eventId: String): ModelErrorActionResponse =
+        modelErrorAction(sessionId, eventId, "bridge")
+
+    override suspend fun acknowledgeModelError(sessionId: String, eventId: String) {
+        val result = modelErrorAction(sessionId, eventId, "acknowledge")
+        if (!result.ok) throw IOException(result.reason ?: "Model error acknowledgement rejected")
+    }
+
+    private suspend fun modelErrorAction(sessionId: String, eventId: String, action: String): ModelErrorActionResponse {
+        val request = Request.Builder()
+            .url(url("api", "sessions", sessionId, "model-error", action).build())
+            .post(jsonBody(buildJsonObject { put("eventId", eventId) }))
+            .build()
+        return client.newCall(request).await().use { response ->
+            val text = response.body?.string().orEmpty()
+            val envelope = try {
+                HapiJson.parseToJsonElement(text) as? JsonObject
+            } catch (_: IllegalArgumentException) {
+                null
+            }
+            val ok = envelope?.get("ok").boolOrNull
+            val reason = envelope?.get("reason").stringOrNull
+            // The bridge endpoint uses a 409 envelope for a CLI refusal. All other
+            // failures (including stale event and inactive session) use the hub error shape.
+            if (!response.isSuccessful && !(response.code == 409 && action == "bridge" && ok == false)) {
+                throw ApiError.from(response.code, text)
+            }
+            // A reverse proxy may return a 200 sign-in page in place of a hub response.
+            if (ok == null) throw IOException("Unexpected model error $action response")
+            ModelErrorActionResponse(ok, reason)
+        }
+    }
+
     /** `DELETE /api/sessions/:id` — 409 while active (archive first). */
     suspend fun deleteSession(sessionId: String) {
         request<Unit>("DELETE", url("api", "sessions", sessionId).build())
@@ -432,6 +470,9 @@ class HapiApi internal constructor(
             SetSessionTranslateInputRequest(enabled).toJsonBody(),
         )
     }
+
+    suspend fun setCursorAutoRetry(enabled: Boolean): HubSettingsResponse =
+        request("PUT", url("api", "hub-settings").build(), mapOf("autoBridgeTransientModelErrors" to enabled).toJsonBody())
 
     /** `GET /api/features`. */
     override suspend fun getFeatures(): FeaturesResponse =
@@ -574,6 +615,9 @@ class HapiApi internal constructor(
      * `GET /api/sessions/:id/codex-models` — active codex session's model
      * catalog (RPC-wrapped: check `success`; 400 on other flavors).
      */
+    override suspend fun getSessionCursorModels(sessionId: String): CursorModelsResponse =
+        request("GET", url("api", "sessions", sessionId, "cursor-models").build())
+
     override suspend fun getSessionCodexModels(sessionId: String): CodexModelsResponse =
         request("GET", url("api", "sessions", sessionId, "codex-models").build())
 
@@ -648,6 +692,9 @@ class HapiApi internal constructor(
      * 503 with code `rpc_target_missing` → [ApiError]; callers hide the picker
      * (web ref: `useCodexModels`). Added in B-M3d.
      */
+    suspend fun getMachineCursorModels(machineId: String): CursorModelsResponse =
+        request("GET", url("api", "machines", machineId, "cursor-models").build())
+
     suspend fun getMachineCodexModels(machineId: String): CodexModelsResponse =
         request("GET", url("api", "machines", machineId, "codex-models").build())
 
@@ -789,6 +836,12 @@ class HapiApi internal constructor(
         val target = url("api", "usage", "summary")
             .addQueryParameter("range", range)
             .addQueryParameter("timeZone", timeZone)
+        return request("GET", target.build())
+    }
+
+    suspend fun getUsageQuotas(refresh: Boolean = false): UsageQuotasResponse {
+        val target = url("api", "usage", "quotas")
+        if (refresh) target.addQueryParameter("refresh", "1")
         return request("GET", target.build())
     }
 

@@ -36,9 +36,10 @@ export type PromptContent =
     };
 
 export type PlanItem = {
+    id?: string;
     content: string;
     priority: 'high' | 'medium' | 'low';
-    status: 'pending' | 'in_progress' | 'completed';
+    status: 'pending' | 'in_progress' | 'completed' | 'cancelled';
 };
 
 export type AgentRoundModelUsage = {
@@ -164,7 +165,8 @@ export interface AgentBackend {
     initialize(): Promise<void>;
     newSession(config: AgentSessionConfig): Promise<string>;
     setModel?(sessionId: string, modelId: string, opts?: { flavor?: AgentFlavor }): Promise<void>;
-    setConfigOption?(sessionId: string, configId: string, value: string): Promise<void>;
+    /** ACP can return the newly acknowledged config options; older backends return no metadata. */
+    setConfigOption?(sessionId: string, configId: string, value: string): Promise<AgentSessionConfigOptionDescriptor[] | void>;
     getSessionModelsMetadata?(sessionId: string): AgentSessionModelsMetadata | undefined;
     getThoughtLevelConfigOption?(sessionId: string): AgentSessionConfigOptionDescriptor | undefined;
     prompt(

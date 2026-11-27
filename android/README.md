@@ -11,13 +11,16 @@ This README covers development builds.
 - **applicationId**: `run.hapi.companion` · **minSdk** 26 · **target/compileSdk** 36
 - **Toolchain**: Gradle 8.14.2 (wrapper) · AGP 8.11.1 · Kotlin 2.1.21 · Compose BOM 2025.05.00 · JDK 17+ (CI uses 21)
 
+Cursor sessions support the machine's advertised models and ACP permission modes in the new-session form. The chat settings sheet fetches the active remote ACP session's own model catalog. Model, reasoning, speed and other offered options select complete runner IDs; coupled variants stay together. Terminal-controlled and legacy stream-json sessions cannot live-switch their model here. When a settings request fails, the app keeps confirmed values and refreshes the session.
+
 ## Current capabilities
 
 The app provides sessions/chat, approvals and questions, new sessions,
 attachments, files/Git, Scratchlist, standard dictation, usage/storage,
 settings and encrypted-relay or direct-FCM notifications. Model and permission
 controls follow agent/session capabilities; usage/storage require the owner
-namespace. See the [native app guide](../docs/guide/native-apps.md) for platform
+namespace. Settings → Usage shows session totals and CLI account quotas reported
+by online runners. See the [native app guide](../docs/guide/native-apps.md) for platform
 differences, pairing and features currently available through the web.
 
 - **Session actions:** pin/archive plus Rename, Delete and explicit Reopen
@@ -494,6 +497,12 @@ machines; names/IDs determine ordering, never counts. Duplicate names include
 IDs; unnamed and unknown machines are labeled. **Reset** clears the filters (not
 the order); filters are transient per home/hub and cleared when no longer valid.
 The share picker reuses the list model with the base order.
+
+An unresolved model error appears in the session list. Open the chat to see the
+error and its details. For an active, idle Cursor session, **Bridge & retry** asks the
+agent to bridge an eligible error. The banner shows recovery or failure when the
+hub reports the outcome. **Dismiss** acknowledges the displayed event, including
+in an inactive session.
 
 Each row's agent icon carries the web presence badge (one mark per state):
 solid green pulsing while working, solid blue pulsing when only background

@@ -3,7 +3,6 @@ import type { AcpSdkBackend } from '@/agent/backends/acp';
 import {
     applyCursorAcpModel,
     applyCursorAcpMode,
-    isCursorAutoReviewMode,
     resolveCursorAcpWireId,
     resolveCursorModeAfterPlanApproval,
     toCursorAcpMode,
@@ -21,12 +20,10 @@ describe('toCursorAcpMode', () => {
     it('maps HAPI cursor modes to Cursor ACP modes', () => {
         expect(toCursorAcpMode('default')).toBe('agent');
         expect(toCursorAcpMode('yolo')).toBe('agent');
-        expect(toCursorAcpMode('autoReview')).toBe('agent');
+        expect(toCursorAcpMode('autoReview')).toBe('auto-review');
         expect(toCursorAcpMode('plan')).toBe('plan');
         expect(toCursorAcpMode('ask')).toBe('ask');
         expect(toCursorAcpMode('debug')).toBe('debug');
-        expect(isCursorAutoReviewMode('autoReview')).toBe(true);
-        expect(isCursorAutoReviewMode('yolo')).toBe(false);
         expect(toCursorAcpMode(undefined)).toBe('agent');
     });
 });
@@ -109,24 +106,47 @@ describe('applyCursorAcpMode', () => {
         expect(setMode).toHaveBeenCalledWith('session-1', 'ask');
     });
 
-    it('swallows setMode errors', async () => {
+    it('requires affirmative native readback when entering or leaving Smart Auto', async () => {
+        const backend = {
+            getConfigOptionByCategory: () => ({ id: 'mode-opt', options: [{value: 'auto-review'}, {value: 'agent'}] }),
+            setConfigOption: vi.fn(async () => undefined),
+            setMode: vi.fn()
+        } as unknown as AcpSdkBackend;
+        await expect(applyCursorAcpMode(backend, 's', 'autoReview')).rejects.toThrow('did not confirm');
+        await expect(applyCursorAcpMode(backend, 's', 'default', 'autoReview')).rejects.toThrow('did not confirm');
+        expect(backend.setMode).not.toHaveBeenCalled();
+    });
+
+    it('rejects a fresh config response that confirms a different mode', async () => {
+        const modeOption = { id: 'mode-opt', currentValue: 'agent', options: [{ value: 'ask' }] };
+        const backend = {
+            getConfigOptionByCategory: vi.fn(() => modeOption),
+            setConfigOption: vi.fn(async () => [{ ...modeOption, currentValue: 'plan' }]),
+            setMode: vi.fn()
+        } as unknown as AcpSdkBackend;
+
+        await expect(applyCursorAcpMode(backend, 'session-1', 'ask')).rejects.toThrow('did not confirm ask mode (reported: plan)');
+        expect(backend.setMode).not.toHaveBeenCalled();
+    });
+
+    it('rejects if Cursor did not apply the mode', async () => {
         const setMode = vi.fn(async () => {
             throw new Error('method not found');
         });
         const backend = { setMode } as unknown as AcpSdkBackend;
 
-        await expect(applyCursorAcpMode(backend, 'session-1', 'ask')).resolves.toBeUndefined();
+        await expect(applyCursorAcpMode(backend, 'session-1', 'ask')).rejects.toThrow('method not found');
     });
 });
 
 describe('wireIdForCursorSessionState', () => {
-    it('keeps explicit variant wire ids from the user request', () => {
+    it('keeps the wire actually selected if it contradicts the request', () => {
         expect(
             wireIdForCursorSessionState(
                 'composer-2.5[fast=false]',
                 'composer-2.5[fast=true]'
             )
-        ).toBe('composer-2.5[fast=false]');
+        ).toBe('composer-2.5[fast=true]');
     });
 
     it('stores remapped catalog ids when a legacy wire base was upgraded', () => {
@@ -261,6 +281,82 @@ describe('applyCursorAcpModel', () => {
             requestedWireId: 'composer-2.5[fast=false]'
         });
         expect(setConfigOption).toHaveBeenCalledWith('s1', 'model-opt', 'composer-2.5[fast=false]');
+    });
+
+    const separateOptions = () => [
+        { id: 'model', currentValue: 'agent-model', options: [{ value: 'agent-model' }] },
+        { id: 'thinking', currentValue: 'true', options: [{ value: 'true' }, { value: 'false' }] },
+        { id: 'context', currentValue: '300k', options: [{ value: '300k' }, { value: '1m' }] },
+        { id: 'effort', currentValue: 'low', options: [{ value: 'low' }, { value: 'high' }] },
+        { id: 'fast', currentValue: 'true', options: [{ value: 'true' }, { value: 'false' }] }
+    ];
+
+    it.each([false, true])('applies the explicit thinking, context, speed and effort (later reset: %s)', async (reset) => {
+        const options = separateOptions();
+        const setConfigOption = vi.fn(async (_session: string, id: string, value: string) => {
+            options.find(option => option.id === id)!.currentValue = value;
+            if (reset && id === 'effort') options.find(option => option.id === 'context')!.currentValue = '300k';
+            return options;
+        });
+        const backend = mockModelBackend({
+            setConfigOption,
+            getSessionModelsMetadata: () => undefined,
+            getSessionConfigOptions: () => options,
+            getConfigOptionByCategory: (_session: string, id: string) => options.find(option => option.id === id)
+        });
+        const requested = 'agent-model[thinking=false,context=1m,fast=false,effort=high]';
+        const result = await applyCursorAcpModel(backend, 's', requested);
+        expect(setConfigOption.mock.calls.map(([, id, value]) => [id, value])).toEqual([
+            ['model', 'agent-model'], ['thinking', 'false'], ['context', '1m'], ['fast', 'false'], ['effort', 'high']
+        ]);
+        if (reset) {
+            const actual = 'agent-model[thinking=false,context=300k,fast=false,effort=high]';
+            expect(result).toEqual({ applied: false, partiallyAppliedWireId: actual });
+            expect(backend.pinSessionModelWireId).toHaveBeenCalledWith('s', actual);
+        } else {
+            expect(result).toEqual({ applied: true, requestedWireId: requested, resolvedWireId: requested });
+        }
+    });
+
+    it.each(['context=2m', 'effort=unsupported'])('rejects unsupported explicit model dimension %s', async (param) => {
+        const options = separateOptions();
+        const setConfigOption = vi.fn(async () => undefined);
+        const backend = mockModelBackend({
+            setConfigOption,
+            getSessionModelsMetadata: () => undefined,
+            getSessionConfigOptions: () => options,
+            getConfigOptionByCategory: (_session: string, id: string) => options.find(option => option.id === id)
+        });
+        expect(await applyCursorAcpModel(backend, 's', `agent-model[${param}]`)).toEqual({
+            applied: false, partiallyAppliedWireId: 'agent-model'
+        });
+        expect(setConfigOption.mock.calls).toEqual([['s', 'model', 'agent-model']]);
+    });
+
+    it('rejects an unknown model dimension before changing the base', async () => {
+        const setConfigOption = vi.fn();
+        const backend = mockModelBackend({
+            setConfigOption,
+            getSessionModelsMetadata: () => undefined,
+            getConfigOptionByCategory: () => separateOptions()[0]
+        });
+        expect(await applyCursorAcpModel(backend, 's', 'agent-model[mode=yolo]')).toEqual({ applied: false });
+        expect(setConfigOption).not.toHaveBeenCalled();
+    });
+
+    it('keeps the reported whole wire when Cursor confirms a different variant', async () => {
+        const selected = 'agent-model[fast=true]';
+        const requested = 'agent-model[fast=false]';
+        const model = { id: 'model', options: [{ value: selected }, { value: requested }] };
+        const backend = mockModelBackend({
+            getSessionModelsMetadata: () => undefined,
+            getConfigOptionByCategory: () => model,
+            setConfigOption: async () => [{ ...model, currentValue: selected }]
+        });
+        expect(await applyCursorAcpModel(backend, 's', requested)).toEqual({
+            applied: false, partiallyAppliedWireId: selected
+        });
+        expect(backend.pinSessionModelWireId).toHaveBeenCalledWith('s', selected);
     });
 
     it('applies parameterized Cursor Composer fast=false for base CLI sku requests', async () => {

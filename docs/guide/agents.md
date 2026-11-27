@@ -38,7 +38,7 @@ Steer, effort and history controls apply to sessions under remote control. The w
 |-------|:-----:|:-------------:|:-------------:|:------:|:--------------------:|
 | Claude Code | ✓ | ✓ | Fork current point | ✓ | ✓ |
 | Codex | ✓ | ✓ (reasoning effort) | Fork (no rewind) | ✓ | ✓ |
-| Cursor Agent | ✓ (ACP sessions) | — | — | — | — |
+| Cursor Agent | ✓ (ACP sessions) | ✓ (model variants) | [Runner support](./conversation-history.md#which-agents-support-what) | [Eligible sessions](./conversation-history.md#branch-with-options) | ✓ (ACP attach) |
 | Grok Build | — | ✓ | Probed | — | — |
 | GitHub Copilot | — | ✓ | — | — | — |
 | Kimi | — | ✓ | — | — | — |
@@ -48,12 +48,14 @@ Steer, effort and history controls apply to sessions under remote control. The w
 | Pi | ✓ | ✓ | Probed | — | ✓ |
 
 - **Steer** delivers a queued message into the running turn instead of waiting for it to end. See [Composer](./composer.md).
-- **Fork / rewind** use the agent's native history; **Branch** starts a new Claude Code or Codex session from a Claude Code or Codex conversation's visible history, optionally switching agents. See [Conversation history](./conversation-history.md).
+- **Fork / rewind** use the agent's native history. **Branch** starts a fresh session from visible history and lets you switch between Claude Code, Codex and Cursor. See [Conversation history](./conversation-history.md).
 - **Import local history** brings sessions started outside HAPI into the session list. See [Import local sessions](./import-local-sessions.md).
 
 Source: `STEERING_SUPPORTED_FLAVORS` in `shared/src/modes.ts`, `shared/src/flavors.ts`, and the per-agent history capabilities in `shared/src/conversationHistory.ts`.
 
 ## Common concepts
+
+For ACP tool approval requests, HAPI shows the grant scopes offered by the agent for that particular action. A notification offers quick approval only when the request allows a one-time grant. Older clients that request an unavailable scope receive an error and can retry the pending request.
 
 ### ACP
 
@@ -61,7 +63,7 @@ Most remote integrations speak the [Agent Client Protocol](https://agentclientpr
 
 ### Permission modes
 
-Permission modes are per-agent — each flavor exposes its own set (see the matrix above). Set the mode at launch with `--permission-mode <mode>` or a shortcut flag (`--yolo`, `--plan`, `--auto-review`, depending on the agent), and switch it mid-session from the web UI or with `hapi set-mode <session-id-or-prefix> <mode>` (active sessions switch immediately; inactive ones use it on their next resume). Semantics vary per agent; see the per-agent sections below.
+Each agent exposes its own permission modes. Set the mode at launch with `--permission-mode <mode>` or a supported shortcut such as `--yolo`, `--plan` or `--auto-review`. Change it from the web UI or with `hapi set-mode <session-id-or-prefix> <mode>`. Inactive sessions use the selected mode on their next resume. See the per-agent sections below for live switching behavior.
 
 ### Local and remote mode
 
@@ -184,6 +186,10 @@ Verify installation:
 agent --version
 ```
 
+### Cursor model changes
+
+When the running Cursor session exposes thinking, context, speed or effort as separate options, HAPI applies the selected model variant through those options. If Cursor accepts only part of a change, HAPI reports the error and the last known active selection. Switching to Auto on a CLI without a live Auto option requires an idle session so HAPI can restart Cursor with `--model auto` and resume the conversation.
+
 ### Usage
 
 ```bash
@@ -201,6 +207,8 @@ hapi cursor --cursor-worktree feature-x    # Cursor-native worktree (named)
 hapi cursor --cursor-add-dir ../shared     # Extra workspace root (repeatable)
 ```
 
+Single-file ACP edits can display the before/after diff even when Cursor delivers it separately from the file path.
+
 ### Permission modes
 
 | Mode | Description |
@@ -212,7 +220,9 @@ hapi cursor --cursor-add-dir ../shared     # Extra workspace root (repeatable)
 | `autoReview` | Auto (Smart Auto) - allowlist/sandbox/classifier instead of full YOLO |
 | `yolo` | Bypass approval prompts |
 
-Set mode via `--plan` / `--mode` / `--permission-mode` / `--auto-review`, or change from the web UI during a session.
+Use `--plan`, `--mode`, `--permission-mode` or `--auto-review` at launch. Change a remote ACP session's permission mode between turns from the web UI or with `hapi set-mode`. HAPI waits for Cursor to acknowledge the ACP mode. Remote Smart Auto requires Cursor ACP to advertise the policy and confirm the transition. After negotiation the active-session picker offers the advertised native modes, plus HAPI Default and YOLO. For example, a catalog with only agent, plan and ask hides Debug and Smart Auto. The launch form can still offer those settings before a native session catalog is known. The remote `/auto-review` command uses the same checked switch. If the installed ACP version does not offer Smart Auto, choose another remote mode or use the native Cursor terminal, where `/auto-review on`, `/auto-review off` and `/auto-review status` select and inspect the policy. For an active terminal session, change modes in Cursor or hand off to HAPI first. A legacy stream-json session uses the new mode for messages queued after the change.
+
+Cursor ACP questions accept the options offered by the agent. Skip leaves the question unanswered; abort cancels it. To provide text outside the listed options, send it as an ordinary chat message (it queues while the question is pending), then choose **Skip** to unblock the turn. The agent receives the text as a follow-up message when the queue drains. Completed question cards retain the selected options.
 
 ### Cursor-native worktree & multi-root
 
@@ -228,22 +238,30 @@ These commands are isolated in the queue and forwarded to the agent (ACP prompt 
 
 `/compress` `/summarize` `/compact` `/model` `/multitask` `/best-of-n` `/worktree` `/apply-worktree` `/delete-worktree` `/add-dir` `/context` `/fork` `/auto-review`
 
+The slash menu also lists the commands and skills that the running Cursor ACP session advertises. HAPI sends a listed command in its own turn.
+
 Interactive TUI-only commands (`/config`, `/mcp`, `/sandbox`, `/btw`, `/rewind`, …) are not supported remotely.
+
+### Native conversation history
+
+On Cursor Agent `2026.11.22-e9042b2`, an idle remote ACP session can fork a verified native chat store. Historical fork and conversation-only rewind need a checkpoint for the selected user message. See [Conversation history](./conversation-history.md#rewind) for checkpoint lifetime and recovery.
 
 ### Modes
 
 - **Local mode** - Run `hapi cursor` from terminal. Full interactive experience.
 - **Remote mode** - Spawn from web/phone when no terminal. New Cursor sessions use `agent acp` with HAPI permission approval, plan/question UI, and richer tool updates. Legacy sessions created before the ACP migration may still resume via the old `agent -p` stream-json path temporarily.
 
+Cursor plan cards show the overview when supplied, followed by the Markdown plan and approval controls in the web, iOS, and Android apps. When Cursor supplies named phases, cards group the corresponding tasks under each phase. Incremental todo updates preserve the other tasks, cancelled tasks retain their status in the transcript, and an empty replacement clears the current list. A pending plan or question marks the session as waiting for input.
+
 ### Model errors
 
-Cursor sometimes reports a transient model error inside a turn instead of failing it. HAPI detects these, shows a banner in the chat and an indicator in the session list, and sends a notification. **Bridge & retry** re-sends your last message as a one-shot recovery prompt; a new message from you always takes precedence. The hub owner can opt in to automatic retry (off by default).
+Cursor sometimes reports a transient model error inside a turn instead of failing it. HAPI detects these, shows a banner in the chat and an indicator in the session list, and sends a notification. **Bridge & retry** re-sends your last message as a one-shot recovery prompt; a new message from you always takes precedence. The hub owner can enable one automatic retry for eligible transient errors in the default namespace (off by default). An exhausted quota requires account action or a reset. Settings → Usage shows the included pools reported by the Cursor login on each runner and links to [Cursor’s guide to account usage](https://cursor.com/help/models-and-usage/usage-limits#how-do-i-check-my-usage) for the dashboard that matches the subscription.
 
 ### Limitations
 
 - **Multitask UI** - `/multitask` is slash-driven; HAPI does not yet provide an Agents Window-style fleet pane. Subagent `cursor/task` notifications show as CursorTask cards when the agent emits them.
-- **Legacy sessions** - Cursor sessions created before the ACP migration can still resume temporarily via stream-json. Start a new Cursor session to get ACP permissions, plans, todos, and question support.
-- **Session resume** - ACP sessions resume through `session/load`. Old stream-json `session_id` values are not loadable via ACP; those sessions keep using the legacy path until you start fresh.
+- **Legacy session resume** - When you resume an inactive stream-json session, HAPI tries to upgrade it to ACP so you can steer a turn and answer Cursor's questions in the same chat. On a different host from the hub, the owning runner copies the legacy store for the recorded Cursor session and workspace, preserves the original, and verifies that ACP can replay history from the copy before HAPI switches protocols.
+- **When the upgrade is skipped** - Active sessions keep their current protocol. An older runner, an existing ACP destination, or a copy with no verifiable history leaves the cross-host session on the legacy resume path. Set `HAPI_CURSOR_LEGACY_AUTO_MIGRATE=0` on the hub to disable automatic upgrades.
 
 #### Legacy stream-json safety: AskQuestion behavior
 
