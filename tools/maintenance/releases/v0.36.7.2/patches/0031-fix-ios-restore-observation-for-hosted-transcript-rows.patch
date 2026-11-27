@@ -1,0 +1,40 @@
+From 0fdad16087b64617bbc0c243878d93e88fe6ab54 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 28 Nov 2026 00:37:07 +0800
+Subject: [PATCH] fix(ios): restore observation for hosted transcript rows
+
+---
+ .../Sources/HapiUI/Chat/AnchoredTranscriptList.swift   | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/ios/Packages/HapiKit/Sources/HapiUI/Chat/AnchoredTranscriptList.swift b/ios/Packages/HapiKit/Sources/HapiUI/Chat/AnchoredTranscriptList.swift
+index ced3a073e..9fddbc4c7 100644
+--- a/ios/Packages/HapiKit/Sources/HapiUI/Chat/AnchoredTranscriptList.swift
++++ b/ios/Packages/HapiKit/Sources/HapiUI/Chat/AnchoredTranscriptList.swift
+@@ -299,11 +299,6 @@ private final class TranscriptCollectionView: UICollectionView {
+     }
+ }
+ 
+-/// Keep hosting roots alive across unrelated transcript updates. The small
+-/// SwiftUI wrapper reads the latest builder and inherited environment,
+-/// including action captures. SwiftUI can diff the resulting row instead of UIKit
+-/// reinstalling every visible hosting configuration and measuring it again.
+-@MainActor @Observable
+ /// Lets the keyboard-dismiss tap run alongside cell gestures instead of
+ /// waiting for them to fail.
+ private final class SimultaneousGestureDelegate: NSObject, UIGestureRecognizerDelegate {
+@@ -311,6 +306,11 @@ private final class SimultaneousGestureDelegate: NSObject, UIGestureRecognizerDe
+                            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+ }
+ 
++/// Keep hosting roots alive across unrelated transcript updates. The small
++/// SwiftUI wrapper reads the latest builder and inherited environment,
++/// including action captures. SwiftUI can diff the resulting row instead of UIKit
++/// reinstalling every visible hosting configuration and measuring it again.
++@MainActor @Observable
+ private final class TranscriptContent<Item> {
+     var render: (Item) -> AnyView = { _ in AnyView(EmptyView()) }
+     var environment = EnvironmentValues()
+-- 
+2.54.0 (Apple Git-157)
+

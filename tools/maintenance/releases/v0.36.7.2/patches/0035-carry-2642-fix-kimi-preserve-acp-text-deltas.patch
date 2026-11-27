@@ -1,0 +1,91 @@
+From 6110da3b33e156bd32845539f447881cfd0c778d Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 28 Nov 2026 06:00:00 +0800
+Subject: [PATCH] Carry #2642: fix(kimi): preserve ACP text deltas
+
+Upstream head: 206a3b25b4276a0f5e3993f41946bb139f737aac
+---
+ cli/src/kimi/utils/kimiBackend.test.ts | 58 ++++++++++++++++++++++++++
+ cli/src/kimi/utils/kimiBackend.ts      |  1 +
+ 2 files changed, 59 insertions(+)
+ create mode 100644 cli/src/kimi/utils/kimiBackend.test.ts
+
+diff --git a/cli/src/kimi/utils/kimiBackend.test.ts b/cli/src/kimi/utils/kimiBackend.test.ts
+new file mode 100644
+index 000000000..22498dbd1
+--- /dev/null
++++ b/cli/src/kimi/utils/kimiBackend.test.ts
+@@ -0,0 +1,58 @@
++import { expect, it, vi } from 'vitest';
++import { AcpStdioTransport } from '@/agent/backends/acp/AcpStdioTransport';
++import type { AgentMessage } from '@/agent/types';
++import { createKimiBackend } from './kimiBackend';
++
++it.each([
++    {
++        source: 'the #2625 examples',
++        chunks: ['разработан', 'ный', '\n', 'А07-42', '2', '94/2023', '\n', '\n', 'Следующий абзац'],
++        expected: 'разработанный\nА07-42294/2023\n\nСледующий абзац'
++    },
++    {
++        source: 'Kimi Code 2.8.1 with a simulated model',
++        chunks: ['哈', '哈', '哈', ' ', '1', '1', '2', '2', '\n', '\n', '下一行', '\n', '尾'],
++        expected: '哈哈哈 1122\n\n下一行\n尾'
++    }
++])('preserves repeated text and newlines in Kimi ACP deltas from $source', async ({ chunks, expected }) => {
++    const sessionId = 'kimi-replay';
++    let notify: Parameters<AcpStdioTransport['onNotification']>[0] = null;
++    const transport = {
++        onNotification: (handler: typeof notify) => { notify = handler; },
++        onStderrError: vi.fn(),
++        registerRequestHandler: vi.fn(),
++        close: vi.fn(async () => true),
++        sendRequest: vi.fn(async (method: string) => {
++            switch (method) {
++                case 'initialize':
++                    return { protocolVersion: 1, agentCapabilities: {} };
++                case 'session/new':
++                    return { sessionId };
++                case 'session/prompt':
++                    for (const text of chunks) {
++                        notify?.('session/update', {
++                            sessionId,
++                            update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } }
++                        });
++                    }
++                    return { stopReason: 'end_turn' };
++                default:
++                    throw new Error(`Unexpected ACP request: ${method}`);
++            }
++        })
++    };
++    const createTransport = vi.spyOn(AcpStdioTransport, 'create')
++        .mockResolvedValueOnce(transport as unknown as AcpStdioTransport);
++    const backend = createKimiBackend();
++    const messages: AgentMessage[] = [];
++    try {
++        await backend.initialize();
++        const id = await backend.newSession({ cwd: process.cwd(), mcpServers: [] });
++        await backend.prompt(id, [{ type: 'text', text: 'Repeat the sample with a blank line.' }], (msg) => messages.push(msg));
++        const text = messages.flatMap((msg) => msg.type === 'text' && !msg.live ? [msg.text] : []).join('');
++        expect(text).toBe(expected);
++    } finally {
++        createTransport.mockRestore();
++        await backend.disconnect();
++    }
++});
+diff --git a/cli/src/kimi/utils/kimiBackend.ts b/cli/src/kimi/utils/kimiBackend.ts
+index a98472a24..13abaf6d4 100644
+--- a/cli/src/kimi/utils/kimiBackend.ts
++++ b/cli/src/kimi/utils/kimiBackend.ts
+@@ -24,6 +24,7 @@ export function createKimiBackend(): AcpSdkBackend {
+         args: ['acp'],
+         env: filterEnv(process.env),
+         flavor: 'kimi',
++        textChunkMode: 'delta',
+         configOptionUpdates: true,
+     });
+ }
+-- 
+2.54.0 (Apple Git-157)
+

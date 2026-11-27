@@ -1,8 +1,10 @@
 package app.hapi.data.api
 
+import app.hapi.protocol.wire.ModelErrorActionResponse
 import app.hapi.protocol.wire.ApprovePermissionRequest
 import app.hapi.protocol.wire.CancelMessageResponse
 import app.hapi.protocol.wire.RetryIndeterminateMessageResponse
+import app.hapi.protocol.wire.CursorModelsResponse
 import app.hapi.protocol.wire.CodexModelsResponse
 import app.hapi.protocol.wire.DeleteUploadResponse
 import app.hapi.protocol.wire.FeaturesResponse
@@ -45,6 +47,9 @@ interface AttachmentUploadApi {
  * and [AttachmentUploadApi] for the composer attachment flow (B-M3f).
  */
 interface ChatSessionApi : MessagesApi, AttachmentUploadApi {
+    suspend fun bridgeModelError(sessionId: String, eventId: String): ModelErrorActionResponse
+    suspend fun acknowledgeModelError(sessionId: String, eventId: String)
+
     /** Shared root creation; only the initiating client navigates. */
     suspend fun clearConversation(sessionId: String): ResumeSessionResponse
 
@@ -101,6 +106,8 @@ interface ChatSessionApi : MessagesApi, AttachmentUploadApi {
     suspend fun setModelReasoningEffort(sessionId: String, modelReasoningEffort: String?)
 
     /** `GET /api/sessions/:id/codex-models` (RPC-wrapped: check `success`). */
+    suspend fun getSessionCursorModels(sessionId: String): CursorModelsResponse
+
     suspend fun getSessionCodexModels(sessionId: String): CodexModelsResponse
 
     /**

@@ -1,0 +1,283 @@
+From 209b73d9fdfd7d8f1be2b2e7cc81fc7a99e3bef9 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 28 Nov 2026 06:05:46 +0800
+Subject: [PATCH] Retry verified Cursor legacy copies after an uncommitted
+ resume
+
+---
+ .../common/cursorImportSessions.test.ts       | 59 +++++++++++-
+ .../modules/common/cursorImportSessions.ts    | 93 ++++++++++++++++---
+ 2 files changed, 133 insertions(+), 19 deletions(-)
+
+diff --git a/cli/src/modules/common/cursorImportSessions.test.ts b/cli/src/modules/common/cursorImportSessions.test.ts
+index 2a3b72d85..e383c90fa 100644
+--- a/cli/src/modules/common/cursorImportSessions.test.ts
++++ b/cli/src/modules/common/cursorImportSessions.test.ts
+@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest'
+ // Exercise the production bun:sqlite implementation against temporary Cursor homes.
+ const scenario = `
+ import { createHash } from 'node:crypto'
+-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
++import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+ import { tmpdir } from 'node:os'
+ import { join } from 'node:path'
+ import { Database } from 'bun:sqlite'
+@@ -24,6 +24,7 @@ try {
+     writeFileSync(join(home, '.local', 'bin', 'agent'), '')
+     const source = join(legacy, 'store.db')
+     const db = new Database(source, { create: true })
++    if (mode === 'retry-wal-source') db.exec('PRAGMA journal_mode=WAL')
+     db.exec("CREATE TABLE blobs (data TEXT); INSERT INTO blobs VALUES ('synthetic history')")
+     db.close()
+     const original = readFileSync(source)
+@@ -47,7 +48,7 @@ try {
+             content: { type: 'text', text: mode === 'empty' ? ' ' : 'synthetic history' }
+         }
+     }
+-    const result = await prepareCursorImportOnDisk({
++    const prepare = () => prepareCursorImportOnDisk({
+         uuid, home, workspacePath: mode === 'drawer' ? home : requestedPath,
+         knownMessageCount: mode === 'shrunken' ? 1000 : 10,
+         deps: {
+@@ -60,11 +61,38 @@ try {
+             })
+         }
+     })
+-    const placed = existsSync(join(destination, 'store.db')) ? readFileSync(join(destination, 'store.db')) : null
++    const result = await prepare()
++    const storePath = join(destination, 'store.db')
++    const metaPath = join(destination, 'meta.json')
++    const directorySnapshot = () => readdirSync(destination).sort().map(file =>
++        [file, readFileSync(join(destination, file)).toString('hex')]
++    )
++    let retry
++    let retryPreserved
++    if (mode.startsWith('retry')) {
++        if (!result.success) throw new Error(JSON.stringify(result))
++        if (mode === 'retry-changed') writeFileSync(storePath, 'new content')
++        if (mode === 'retry-same-bytes') {
++            await Bun.sleep(20)
++            writeFileSync(storePath, original)
++        }
++        if (mode === 'retry-wal') writeFileSync(storePath + '-wal', 'new WAL')
++        if (mode === 'retry-partial') rmSync(metaPath)
++        if (mode === 'retry-meta-changed') writeFileSync(metaPath, '{"title":"new title"}')
++        if (mode === 'retry-source-changed') {
++            const changed = new Database(source, { readwrite: true })
++            changed.exec("INSERT INTO blobs VALUES ('new history')")
++            changed.close()
++        }
++        const before = directorySnapshot()
++        retry = await prepare()
++        retryPreserved = JSON.stringify(before) === JSON.stringify(directorySnapshot())
++    }
++    const placed = existsSync(storePath) ? readFileSync(storePath) : null
+     console.log(JSON.stringify({
+         result, originalPreserved: original.equals(readFileSync(source)),
+         copyMatches: placed?.equals(original) ?? false, existingPreserved: placed?.toString() === 'unrelated',
+-        destinationExists: existsSync(destination)
++        destinationExists: existsSync(destination), retry, retryPreserved
+     }))
+ } finally {
+     rmSync(home, { recursive: true, force: true })
+@@ -97,4 +125,27 @@ describe('legacy resume on the owning Cursor runner', () => {
+             originalPreserved: true, existingPreserved: true
+         })
+     })
++
++    it.each(['retry', 'retry-wal-source'])(
++        'can recover an unchanged copy after a lost response (%s)',
++        (mode) => {
++            expect(run(mode)).toMatchObject({
++                result: { success: true, verifiedLegacyCopy: true },
++                retry: { success: true, sourceFormat: 'legacy', verifiedLegacyCopy: true },
++                originalPreserved: true,
++                retryPreserved: true
++            })
++        }
++    )
++
++    it.each(['retry-changed', 'retry-same-bytes', 'retry-wal', 'retry-partial', 'retry-meta-changed', 'retry-source-changed'])(
++        'preserves and refuses %s',
++        (mode) => {
++            expect(run(mode)).toMatchObject({
++                result: { success: true },
++                retry: { success: false, reason: 'target_already_exists' },
++                retryPreserved: true
++            })
++        }
++    )
+ })
+diff --git a/cli/src/modules/common/cursorImportSessions.ts b/cli/src/modules/common/cursorImportSessions.ts
+index d367abc1b..58a8dfcbe 100644
+--- a/cli/src/modules/common/cursorImportSessions.ts
++++ b/cli/src/modules/common/cursorImportSessions.ts
+@@ -33,6 +33,7 @@ const DEFAULT_LOAD_TIMEOUT_MS = 30_000
+ const DEFAULT_REPLAY_DRAIN_MS = 1_500
+ const DEFAULT_VERIFY_TIMEOUT_MS = 60_000
+ const DEFAULT_LIST_LIMIT = 500
++const LEGACY_COPY_RECEIPT = '.hapi-verified-legacy-copy'
+ 
+ export type CursorImportSourceFormat = 'legacy' | 'acp'
+ 
+@@ -358,6 +359,38 @@ async function hashStore(path: string): Promise<string> {
+     return hash.digest('hex')
+ }
+ 
++function copiedFileIdentity(path: string): string {
++    const stat = lstatSync(path, { bigint: true })
++    if (!stat.isFile()) throw new Error('Legacy copy must use regular files')
++    return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(':')
++}
++
++function verifiedCopyReceipt(directory: string, workspacePath: string, sourceHash: string): string {
++    return JSON.stringify({
++        workspacePath,
++        sourceHash,
++        store: copiedFileIdentity(join(directory, 'store.db')),
++        metadata: copiedFileIdentity(join(directory, 'meta.json'))
++    })
++}
++
++async function matchesVerifiedCopy(directory: string, workspacePath: string, sourceHash: string): Promise<boolean> {
++    const receiptPath = join(directory, LEGACY_COPY_RECEIPT)
++    try {
++        const receiptIdentity = copiedFileIdentity(receiptPath)
++        const receipt = readFileSync(receiptPath, 'utf8')
++        const stillUnchanged = () =>
++            readdirSync(directory).sort().join('\n') === [LEGACY_COPY_RECEIPT, 'meta.json', 'store.db'].join('\n')
++            && copiedFileIdentity(receiptPath) === receiptIdentity
++            && verifiedCopyReceipt(directory, workspacePath, sourceHash) === receipt
++        if (!stillUnchanged()) return false
++        const hash = await hashStore(join(directory, 'store.db'))
++        return hash === sourceHash && stillUnchanged()
++    } catch {
++        return false
++    }
++}
++
+ async function verifyCursorStore(args: {
+     uuid: string
+     storeDbPath: string
+@@ -377,7 +410,8 @@ async function verifyCursorStore(args: {
+         let verifiedStoreHash: string | undefined
+         if (args.knownMessageCount !== undefined) {
+             // Apply the same shrunken-store sanity floor as the hub migrator.
+-            const db = new Database(probeStore, { readonly: true })
++            // A WAL-mode copy may need SQLite to create disposable sidecars.
++            const db = new Database(probeStore, { readwrite: true })
+             try {
+                 const { n } = db.query('SELECT COUNT(*) AS n FROM blobs').get() as { n: number }
+                 const minimum = args.knownMessageCount > 100 ? Math.floor(args.knownMessageCount / 4) : 1
+@@ -522,6 +556,17 @@ function fingerprintSqliteStoreFamily(storeDbPath: string): {
+     }
+ }
+ 
++function matchesStoreFamily(
++    storeDbPath: string,
++    expected: ReturnType<typeof fingerprintSqliteStoreFamily> | null
++): boolean {
++    if (!expected) return false
++    const current = fingerprintSqliteStoreFamily(storeDbPath)
++    return fpEqualSqliteSibling(expected.main, current.main)
++        && fpEqualSqliteSibling(expected.wal, current.wal)
++        && fpEqualSqliteSibling(expected.shm, current.shm)
++}
++
+ function prepareLegacyStoreForImport(storeDbPath: string): { ok: true; fingerprint: ReturnType<typeof fingerprintSqliteStoreFamily> } | { ok: false; message: string } {
+     try {
+         checkpointLegacySqliteStore(storeDbPath)
+@@ -583,8 +628,9 @@ export async function prepareCursorImportOnDisk(options: {
+     let sourceStorePath: string
+     let resolvedWorkspacePath: string | null = options.workspacePath ?? null
+     const strict = options.knownMessageCount !== undefined
+-    if (strict && existsSync(acpSessionDir)) {
+-        return failure('target_already_exists', 'Legacy resume requires a new ACP destination')
++    const retryVerifiedCopy = strict && existsSync(acpSessionDir)
++    if (retryVerifiedCopy && !lstatSync(join(acpSessionDir, LEGACY_COPY_RECEIPT), { throwIfNoEntry: false })?.isFile()) {
++        return failure('target_already_exists', 'Legacy resume requires a new or unchanged verified ACP destination')
+     }
+     if (strict && (!resolvedWorkspacePath || !isAbsolute(resolvedWorkspacePath))) {
+         return failure('ambiguous_legacy_store', 'Legacy resume requires the recorded workspace path')
+@@ -636,7 +682,7 @@ export async function prepareCursorImportOnDisk(options: {
+         return failure('corrupted_store', `cursor session ${options.uuid}: ${sanity.message}`)
+     }
+ 
+-    if (sourceFormat === 'legacy' && existsSync(acpSessionDir)) {
++    if (sourceFormat === 'legacy' && !retryVerifiedCopy && existsSync(acpSessionDir)) {
+         return failure('target_already_exists', `~/.cursor/acp-sessions/${options.uuid}/ already exists; refusing to overwrite`)
+     }
+ 
+@@ -681,7 +727,17 @@ export async function prepareCursorImportOnDisk(options: {
+         return failure('verify_timeout', verifyOut.message)
+     }
+ 
+-    if (sourceFormat === 'legacy') {
++    const verifiedStoreHash = verifyOut.verifiedStoreHash
++    if (strict && !verifiedStoreHash) {
++        return failure('verify_load_failed', 'Legacy resume did not verify a store snapshot')
++    }
++    if (retryVerifiedCopy) {
++        if (!verifiedStoreHash || hasStoreSymlink(options.home, sourceStorePath, acpSessionDir)
++            || !await matchesVerifiedCopy(acpSessionDir, verifyCwd, verifiedStoreHash)
++            || !matchesStoreFamily(sourceStorePath, legacyBaseline)) {
++            return failure('target_already_exists', 'The existing ACP destination no longer matches the verified legacy copy')
++        }
++    } else if (sourceFormat === 'legacy') {
+         let stage: string | undefined
+         let createdDestination = false
+         try {
+@@ -701,14 +757,8 @@ export async function prepareCursorImportOnDisk(options: {
+             const outputDir = stage ?? acpSessionDir
+             const outputStore = join(outputDir, 'store.db')
+             copyFileSync(sourceStorePath, outputStore, constants.COPYFILE_EXCL)
+-            const copyMatchesProbe = !verifyOut.verifiedStoreHash || await hashStore(outputStore) === verifyOut.verifiedStoreHash
+-            const after = fingerprintSqliteStoreFamily(sourceStorePath)
+-            if (
+-                !copyMatchesProbe || !legacyBaseline
+-                || !fpEqualSqliteSibling(legacyBaseline.main, after.main)
+-                || !fpEqualSqliteSibling(legacyBaseline.wal, after.wal)
+-                || !fpEqualSqliteSibling(legacyBaseline.shm, after.shm)
+-            ) {
++            const copyMatchesProbe = !verifiedStoreHash || await hashStore(outputStore) === verifiedStoreHash
++            if (!copyMatchesProbe || !matchesStoreFamily(sourceStorePath, legacyBaseline)) {
+                 throw new Error('legacy store changed during import; retry after Cursor exits')
+             }
+             try { chmodSync(outputStore, 0o600) } catch {}
+@@ -720,10 +770,22 @@ export async function prepareCursorImportOnDisk(options: {
+             if (titleFromMeta) sidecar.title = titleFromMeta
+             const outputMeta = join(outputDir, 'meta.json')
+             writeFileSync(outputMeta, JSON.stringify(sidecar), { mode: 0o600, flag: 'wx' })
+-            if (stage) {
++            if (stage && verifiedStoreHash) {
+                 reserveDestination()
+                 linkSync(outputMeta, acpMetaPath)
+                 linkSync(outputStore, acpStorePath)
++                // Dropping the staging links changes the files' ctimes.
++                rmtreeSafe(stage)
++                stage = undefined
++                writeFileSync(
++                    join(acpSessionDir, LEGACY_COPY_RECEIPT),
++                    verifiedCopyReceipt(acpSessionDir, verifyCwd, verifiedStoreHash),
++                    { mode: 0o600, flag: 'wx' }
++                )
++                if (!await matchesVerifiedCopy(acpSessionDir, verifyCwd, verifiedStoreHash)
++                    || !matchesStoreFamily(sourceStorePath, legacyBaseline)) {
++                    throw new Error('Legacy copy changed while publishing its verification receipt')
++                }
+             }
+             log.info('[cursor-import] transplanted legacy store to ACP location', { uuid: options.uuid, acpStorePath })
+         } catch (err) {
+@@ -737,7 +799,8 @@ export async function prepareCursorImportOnDisk(options: {
+         }
+     }
+ 
+-    const title = readMetaTitleSafe(join(acpSessionDir, 'store.db')) ?? readMetaTitleSafe(sourceStorePath) ?? `cursor:${options.uuid.slice(0, 8)}`
++    const title = (strict ? readAcpMetaJson(acpMetaPath)?.title : readMetaTitleSafe(acpStorePath) ?? readMetaTitleSafe(sourceStorePath))
++        ?? `cursor:${options.uuid.slice(0, 8)}`
+     return {
+         success: true,
+         uuid: options.uuid,
+-- 
+2.54.0 (Apple Git-157)
+

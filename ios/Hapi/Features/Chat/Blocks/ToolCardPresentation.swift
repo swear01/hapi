@@ -349,6 +349,13 @@ func toolCardPresentation(_ tool: ChatToolCall, basePath: String?) -> ToolCardPr
             subtitle: query.map { chatTruncate($0, 80) }
         )
 
+    case "CursorTask":
+        return ToolCardPresentation(
+            icon: ToolIcon.agent,
+            title: chatInputString(input, ["title", "description"]) ?? String(localized: "Launch Agent"),
+            subtitle: chatInputString(input, ["prompt"]).map { chatTruncate($0, 120) }
+        )
+
     case "Task", "Agent":
         let inputName = chatInputString(input, ["name"])
         let teamName = chatInputString(input, ["team_name"])
@@ -423,8 +430,12 @@ func toolCardPresentation(_ tool: ChatToolCall, basePath: String?) -> ToolCardPr
     case "update_plan":
         return ToolCardPresentation(icon: ToolIcon.plan, title: String(localized: "Plan"), subtitle: nil)
 
-    case "ExitPlanMode", "exit_plan_mode":
-        return ToolCardPresentation(icon: ToolIcon.plan, title: String(localized: "Plan proposal"), subtitle: nil)
+    case "ExitPlanMode", "exit_plan_mode", "CursorCreatePlan":
+        return ToolCardPresentation(
+            icon: ToolIcon.plan,
+            title: String(localized: "Plan proposal"),
+            subtitle: name == "CursorCreatePlan" ? chatInputString(input, ["name"]) : nil
+        )
 
     case "Skill":
         let skill = chatInputString(input, ["skill"])
@@ -451,7 +462,7 @@ func toolCardPresentation(_ tool: ChatToolCall, basePath: String?) -> ToolCardPr
         )
 
     case "CodexPatch":
-        let files = input?[chatKey: "changes"]?.chatObject.map { Array($0.keys).sorted() } ?? []
+        let files = codexPatchFiles(input).map(\.path)
         let subtitle = files.first.map { first -> String in
             let display = chatBasename(chatDisplayPath(first, basePath: basePath))
             return files.count > 1 ? "\(display) (+\(files.count - 1))" : display

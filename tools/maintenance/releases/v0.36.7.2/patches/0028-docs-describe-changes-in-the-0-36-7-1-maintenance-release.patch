@@ -1,0 +1,36 @@
+From db8d8712470383a2a8452b4d15444b822da75cad Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Fri, 27 Nov 2026 18:07:15 +0800
+Subject: [PATCH] docs: describe changes in the 0.36.7.1 maintenance release
+
+---
+ .github/release-notes/v0.36.7.1.md | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+ create mode 100644 .github/release-notes/v0.36.7.1.md
+
+diff --git a/.github/release-notes/v0.36.7.1.md b/.github/release-notes/v0.36.7.1.md
+new file mode 100644
+index 000000000..12263b292
+--- /dev/null
++++ b/.github/release-notes/v0.36.7.1.md
+@@ -0,0 +1,17 @@
++# HAPI v0.36.7.1
++
++## Compared with the previous maintained release
++
++- Updates from official HAPI 0.35.0 to 0.36.7 and includes the next two commits on upstream main. The update brings passkey sign-in, a shared agent session-import registry, automatic Codex desktop sync on macOS, conversation branching, and fixes to Windows process handling and Web reconnection. The registry also picks up local Cursor session import from upstream main.
++- Updates the Hub database from schema 35 to 36 to add passkey credentials. Take a verified database backup before upgrading. A rollback to 0.35.0.1 requires restoring the schema-35 backup.
++- Keeps Skillshare-compatible skill discovery. The fork-only skill installer was removed in fork PR #34. The independent Skillshare package supplies the session-control skill.
++- Ships the CLI and Hub as signed macOS and standalone Linux and Windows packages. The old Desktop Launcher packages were removed because their upstream PR #769 closed without a merge.
++- Picks up official equivalents for #1414, #1616, #2346, #2410, #2423 and #2432. The prior #2092 rewind overlay, including its associated fork fix, is deferred because the current upstream PR is not ready. The prior #1615, #1617, #1849, #1921 and #2096 overlays are also deferred. See the release audit for decisions on their current heads.
++
++## Compared with the official release
++
++- Uses four-part version `0.36.7.1` and macOS signature identifier `xyz.hapi.cli`. GitHub Release includes five platform archives and `checksums.txt`.
++- Includes upstream main's local Cursor session import (#945) and upload of browser-test failure traces (#2589).
++- Carries Web improvements for session-name display (#1158), dragging session mentions into the composer (#1418), reasoning collapse (#1592), autocomplete (#1660), generated media (#1666), cancellable file search (#1702), and expanded composer Enter behavior (#1729).
++- Carries the packaged media-helper check (#1920), test settings isolation (#2510), and handling of model controls unavailable to the local session owner (#2584).
++- Keeps two Android fixes for Codex plan actions and Unicode text paging. The installer archives contain the CLI, Hub and embedded web app.
+-- 
+2.54.0 (Apple Git-157)
+

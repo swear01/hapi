@@ -1,0 +1,204 @@
+From 8bebee55b92a8e2ee0b0ce2e764044d9623c1391 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Fri, 27 Nov 2026 18:05:34 +0800
+Subject: [PATCH] carry(upstream): PR #2510
+
+Upstream-PR-Head: 44ee0590a29e0ab9febf9d2935d32268a326b68d
+---
+ hub/src/web/routes/cli.test.ts | 42 +++++++++-------------------------
+ hub/src/web/routes/cli.ts      | 32 +++++++++++++++++---------
+ 2 files changed, 32 insertions(+), 42 deletions(-)
+
+diff --git a/hub/src/web/routes/cli.test.ts b/hub/src/web/routes/cli.test.ts
+index 0a5b0f558..d67bfbd3a 100644
+--- a/hub/src/web/routes/cli.test.ts
++++ b/hub/src/web/routes/cli.test.ts
+@@ -1,18 +1,19 @@
+ import { afterAll, afterEach, beforeAll, describe, expect, it, mock } from 'bun:test'
+-import { mkdtempSync, rmSync } from 'node:fs'
+-import { tmpdir } from 'node:os'
+-import { join } from 'node:path'
+ import { gunzipSync } from 'node:zlib'
+ import { Hono } from 'hono'
+ import type { SyncEngine } from '../../sync/syncEngine'
+-import { createConfiguration, getConfiguration, resetConfigurationForTests } from '../../configuration'
++import { mkdtemp, rm } from 'node:fs/promises'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
+ import { writeAutoBridgeTransientModelErrorsEnabled } from '../../config/autoBridgeTransientModelErrors'
+ import { createCliRoutes } from './cli'
+ import { SessionIdentityConflictError } from '../../store/sessions'
+ 
+ function createApp(engine: Partial<SyncEngine>) {
+     const app = new Hono()
+-    app.route('/cli', createCliRoutes(() => engine as SyncEngine))
++    app.route('/cli', createCliRoutes(() => engine as SyncEngine, () => ({
++        cliApiToken: 'test-token', dataDir, githubPrAwareness: true, sources: { githubPrAwareness: 'file' }
++    })))
+     return app
+ }
+ 
+@@ -22,30 +23,9 @@ function authHeaders() {
+     }
+ }
+ 
+-let homeDir = ''
+-let previousHapiHome: string | undefined
+-
+-// Actions runners under a full hub suite occasionally exceed bun's default 5s
+-// hook budget during createConfiguration (seen as an unnamed
+-// beforeEach/afterEach timeout). Give setup headroom — tiann/hapi#2514.
+-beforeAll(async () => {
+-    previousHapiHome = process.env.HAPI_HOME
+-    homeDir = mkdtempSync(join(tmpdir(), 'hapi-cli-test-'))
+-    process.env.HAPI_HOME = homeDir
+-    resetConfigurationForTests()
+-    const config = await createConfiguration()
+-    config._setCliApiToken('test-token', 'env', false)
+-    await config.setGithubPrAwareness(true)
+-}, 30_000)
+-
+-afterAll(() => {
+-    if (previousHapiHome === undefined) delete process.env.HAPI_HOME
+-    else process.env.HAPI_HOME = previousHapiHome
+-    if (homeDir) {
+-        resetConfigurationForTests(homeDir)
+-        rmSync(homeDir, { recursive: true, force: true })
+-    }
+-})
++let dataDir: string
++beforeAll(async () => { dataDir = await mkdtemp(join(tmpdir(), 'hapi-cli-routes-')) }, 30_000)
++afterAll(async () => { await rm(dataDir, { recursive: true, force: true }) }, 30_000)
+ 
+ describe('cli shutdown preparation', () => {
+     function fixture(machineId = 'machine-1') {
+@@ -488,11 +468,11 @@ describe('cli features and external-refs read', () => {
+ 
+ describe('cli autoBridgeTransientModelErrors namespace gate', () => {
+     afterEach(async () => {
+-        await writeAutoBridgeTransientModelErrorsEnabled(getConfiguration().dataDir, false)
++        await writeAutoBridgeTransientModelErrorsEnabled(dataDir, false)
+     }, 30_000)
+ 
+     it('returns hub auto-bridge only for the default namespace', async () => {
+-        await writeAutoBridgeTransientModelErrorsEnabled(getConfiguration().dataDir, true)
++        await writeAutoBridgeTransientModelErrorsEnabled(dataDir, true)
+         const sessionId = '22222222-2222-4222-8222-222222222222'
+         const app = createApp({
+             getOrCreateSession: () => ({ id: sessionId }),
+diff --git a/hub/src/web/routes/cli.ts b/hub/src/web/routes/cli.ts
+index 659b686a0..662a29c7a 100644
+--- a/hub/src/web/routes/cli.ts
++++ b/hub/src/web/routes/cli.ts
+@@ -11,7 +11,7 @@ import {
+     UpsertExternalRefRequestSchema,
+     upsertGithubPrIntoExternalRefs
+ } from '@hapi/protocol'
+-import { getConfiguration } from '../../configuration'
++import { getConfiguration, type ConfigSource } from '../../configuration'
+ import { readAutoBridgeTransientModelErrorsEnabled } from '../../config/autoBridgeTransientModelErrors'
+ import { readSessionSummaryContractEnabled } from '../../config/sessionSummaryContract'
+ import { stripExternalRefsWhenAwarenessDisabled, externalRefsInMetadataValid } from '../../sync/externalRefsPolicy'
+@@ -74,7 +74,17 @@ function clearErrorStatus(code: string): 403 | 404 | 409 | 500 {
+                 : 500
+ }
+ 
+-export function createCliRoutes(getSyncEngine: () => SyncEngine | null): Hono<CliEnv> {
++type CliRouteConfiguration = {
++    cliApiToken: string
++    dataDir: string
++    githubPrAwareness: boolean
++    sources: { githubPrAwareness: ConfigSource }
++}
++
++export function createCliRoutes(
++    getSyncEngine: () => SyncEngine | null,
++    readConfiguration: () => CliRouteConfiguration = getConfiguration
++): Hono<CliEnv> {
+     const app = new Hono<CliEnv>()
+ 
+     app.use('*', async (c, next) => {
+@@ -91,7 +101,7 @@ export function createCliRoutes(getSyncEngine: () => SyncEngine | null): Hono<Cl
+         }
+ 
+         const token = parsed.data.replace(/^Bearer\s+/i, '')
+-        const configuration = getConfiguration()
++        const configuration = readConfiguration()
+         const parsedToken = parseAccessToken(token)
+         if (!parsedToken || !constantTimeEquals(parsedToken.baseToken, configuration.cliApiToken)) {
+             return c.json({ error: 'Invalid token' }, 401)
+@@ -145,7 +155,7 @@ export function createCliRoutes(getSyncEngine: () => SyncEngine | null): Hono<Cl
+         try {
+             const metadata = stripExternalRefsWhenAwarenessDisabled(
+                 parsed.data.metadata,
+-                getConfiguration().githubPrAwareness
++                readConfiguration().githubPrAwareness
+             )
+             if (!externalRefsInMetadataValid(metadata)) {
+                 return c.json({ error: 'Invalid metadata.externalRefs' }, 400)
+@@ -171,7 +181,7 @@ export function createCliRoutes(getSyncEngine: () => SyncEngine | null): Hono<Cl
+                     parsed.data.modelReasoningEffort,
+                     parsed.data.id
+                 )
+-            const dataDir = getConfiguration().dataDir
++            const dataDir = readConfiguration().dataDir
+             const sessionSummaryContract = await readSessionSummaryContractEnabled(dataDir)
+             // Owner-only hub setting — never enable auto-bridge for tenant namespaces.
+             const autoBridgeTransientModelErrors = namespace === 'default'
+@@ -376,7 +386,7 @@ app.post('/sessions/:id/prepare-local-resume', async (c) => {
+         if (!resolved.ok) {
+             return c.json({ error: resolved.error }, resolved.status)
+         }
+-        const dataDir = getConfiguration().dataDir
++        const dataDir = readConfiguration().dataDir
+         const sessionSummaryContract = await readSessionSummaryContractEnabled(dataDir)
+         const autoBridgeTransientModelErrors = namespace === 'default'
+             ? await readAutoBridgeTransientModelErrorsEnabled(dataDir)
+@@ -419,7 +429,7 @@ app.post('/sessions/:id/prepare-local-resume', async (c) => {
+     })
+ 
+     app.get('/features', (c) => {
+-        const configuration = getConfiguration()
++        const configuration = readConfiguration()
+         return c.json({
+             githubPrAwareness: {
+                 enabled: configuration.githubPrAwareness,
+@@ -429,7 +439,7 @@ app.post('/sessions/:id/prepare-local-resume', async (c) => {
+     })
+ 
+     app.get('/sessions/:id/external-refs', async (c) => {
+-        const configuration = getConfiguration()
++        const configuration = readConfiguration()
+         if (!configuration.githubPrAwareness) {
+             return c.json({
+                 error: 'GitHub PR awareness is disabled',
+@@ -454,7 +464,7 @@ app.post('/sessions/:id/prepare-local-resume', async (c) => {
+     })
+ 
+     app.put('/sessions/:id/external-refs', async (c) => {
+-        const configuration = getConfiguration()
++        const configuration = readConfiguration()
+         if (!configuration.githubPrAwareness) {
+             return c.json({
+                 error: 'GitHub PR awareness is disabled',
+@@ -493,7 +503,7 @@ app.post('/sessions/:id/prepare-local-resume', async (c) => {
+     })
+ 
+     app.post('/sessions/:id/external-refs/upsert', async (c) => {
+-        const configuration = getConfiguration()
++        const configuration = readConfiguration()
+         if (!configuration.githubPrAwareness) {
+             return c.json({
+                 error: 'GitHub PR awareness is disabled',
+@@ -532,7 +542,7 @@ app.post('/sessions/:id/prepare-local-resume', async (c) => {
+     })
+ 
+     app.post('/sessions/:id/external-refs/remove-primary', async (c) => {
+-        const configuration = getConfiguration()
++        const configuration = readConfiguration()
+         if (!configuration.githubPrAwareness) {
+             return c.json({
+                 error: 'GitHub PR awareness is disabled',
+-- 
+2.54.0 (Apple Git-157)
+

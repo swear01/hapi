@@ -1,0 +1,39 @@
+From f791de5d42a8a508f09d4c22de496584024536d3 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 26 Sep 2026 16:36:24 +0800
+Subject: [PATCH] fix(android): retain Codex plan spinner and retry CAS
+
+(cherry picked from commit fe1b6a9b05d2caf45ef626d5738daed7cd92ed92)
+(cherry picked from commit 238bdb34672977652a0d8c6a4623fe471809985e)
+---
+ .../hapi/companion/feature/chat/ChatViewModel.kt   | 14 +++++++++-----
+ 1 file changed, 9 insertions(+), 5 deletions(-)
+
+diff --git a/android/app/src/main/kotlin/app/hapi/companion/feature/chat/ChatViewModel.kt b/android/app/src/main/kotlin/app/hapi/companion/feature/chat/ChatViewModel.kt
+index 38978b2a7..e03d9158e 100644
+--- a/android/app/src/main/kotlin/app/hapi/companion/feature/chat/ChatViewModel.kt
++++ b/android/app/src/main/kotlin/app/hapi/companion/feature/chat/ChatViewModel.kt
+@@ -1946,11 +1946,15 @@ class ChatViewModel(
+     )
+ 
+     fun implementCodexPlan(planId: String) {
+-        val previous = codexPlanOperations.value
+-        if (!currentCodexPlanActions().forPlan(planId).canAct) return
+-        if (!codexPlanOperations.compareAndSet(previous, previous.copy(
+-                pendingPlanId = planId, errors = previous.errors - planId,
+-            ))) return
++        while (true) {
++            val previous = codexPlanOperations.value
++            if (!buildCodexPlanActions(
++                    sessionStore.currentDetail(sessionId), previous,
++                    sendInFlight.value || configOpPending.value,
++                ).forPlan(planId).canAct) return
++            val next = previous.copy(pendingPlanId = planId, errors = previous.errors - planId)
++            if (codexPlanOperations.compareAndSet(previous, next)) break
++        }
+         scope.launch {
+             try {
+                 try {
+-- 
+2.54.0 (Apple Git-157)
+

@@ -40,6 +40,9 @@ object SummaryPatching {
     private val INPUT_REQUEST_TOOLS = setOf(
         "AskUserQuestion",
         "ask_user_question",
+        "CursorAskQuestion",
+        "cursor_ask_question",
+        "CursorCreatePlan",
         "ExitPlanMode",
         "exit_plan_mode",
         "request_user_input",
@@ -153,6 +156,7 @@ object SummaryPatching {
             agentSessionId = summaryAgentSessionId(metadata),
             lifecycleState = metadata.lifecycleState,
             hapiMcpUrl = metadata.hapiMcpUrl,
+            lastModelError = metadata.lastModelError,
         )
     }
 
@@ -296,6 +300,7 @@ object SummaryPatching {
             && current.path == next.path
             && current.machineId == next.machineId
             && current.summary?.text == next.summary?.text
+            && current.lastModelError == next.lastModelError
             && current.flavor == next.flavor
             && current.agentSessionId == next.agentSessionId
             && current.lifecycleState == next.lifecycleState

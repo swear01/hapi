@@ -1,0 +1,107 @@
+From 4cac0b6bae6cc08833fc8a29cbefc87f570b0c56 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Fri, 27 Nov 2026 18:06:33 +0800
+Subject: [PATCH] Avoid recursively embedding release archives in patch queues
+
+---
+ tools/maintenance/README.md                   |  6 +++++
+ tools/maintenance/sync-from-upstream.sh       | 15 +++++++++++
+ .../tests/test_sync_from_upstream.py          | 25 +++++++++++++++++++
+ 3 files changed, 46 insertions(+)
+
+diff --git a/tools/maintenance/README.md b/tools/maintenance/README.md
+index f15eb22da..6a251fb17 100644
+--- a/tools/maintenance/README.md
++++ b/tools/maintenance/README.md
+@@ -86,6 +86,12 @@ self-referential hash. Root `.gitattributes` disables
+ whitespace diagnostics for `*.patch` artifacts because unified-diff context
+ markers are significant; source files remain checked.
+ 
++Set `# previous_release_records=inherit` when carrying forward the previous
++release records unchanged. Leave `tools/maintenance/releases/` out of the
++generated patches. Rehearsal restores the archived records from the pinned
++`previous_origin_main` before validating the source tree, which avoids
++embedding the old patch queues recursively.
++
+ Release-manifest detection resolves physical paths so macOS `/var` and
+ `/private/var` aliases cannot bypass audit or header-pin enforcement.
+ 
+diff --git a/tools/maintenance/sync-from-upstream.sh b/tools/maintenance/sync-from-upstream.sh
+index d9b9110c9..430f125fd 100755
+--- a/tools/maintenance/sync-from-upstream.sh
++++ b/tools/maintenance/sync-from-upstream.sh
+@@ -89,6 +89,7 @@ old_origin_main=$(git -C "$repo" rev-parse origin/main)
+ manifest_upstream_sha=$(sed -n 's/^# upstream_sha=//p' "$manifest")
+ manifest_origin_sha=$(sed -n 's/^# previous_origin_main=//p' "$manifest")
+ expected_source_tree=$(sed -n 's/^# expected_source_tree=//p' "$manifest")
++inherit_release_records=$(sed -n 's/^# previous_release_records=//p' "$manifest")
+ if [ -n "$manifest_upstream_sha" ] && [ "$manifest_upstream_sha" != "$upstream_sha" ]; then
+     echo "MANIFEST_UPSTREAM_SHA_MISMATCH expected=$manifest_upstream_sha actual=$upstream_sha" >&2
+     exit 4
+@@ -102,6 +103,12 @@ if [ -n "$is_release_manifest" ]; then
+     [ -n "$manifest_origin_sha" ] || { echo "MISSING_MANIFEST_PIN: previous_origin_main" >&2; exit 4; }
+     [ -n "$expected_source_tree" ] || { echo "MISSING_MANIFEST_PIN: expected_source_tree" >&2; exit 4; }
+ fi
++if [ -n "$inherit_release_records" ]; then
++    if [ "$inherit_release_records" != inherit ] || [ -z "$manifest_origin_sha" ]; then
++        echo "INVALID_PREVIOUS_RELEASE_RECORDS: expected inherit with a pinned previous_origin_main" >&2
++        exit 4
++    fi
++fi
+ 
+ allowed_file=$(mktemp)
+ required_file=$(mktemp)
+@@ -339,6 +346,14 @@ while IFS=$'\t' read -r patch state upstream_ref source_commits; do
+     esac
+ done < "$manifest"
+ 
++if [ "$inherit_release_records" = inherit ]; then
++    git -C "$worktree" restore --source="$old_origin_main" --staged --worktree -- tools/maintenance/releases
++    if ! git -C "$worktree" diff --cached --quiet; then
++        git -C "$worktree" -c user.name=swear01 -c user.email=stanley.yellow1@gmail.com \
++            commit -m "Retain the pinned previous release records" >/dev/null
++    fi
++fi
++
+ if [ -n "$expected_source_tree" ]; then
+     actual_source_tree=$(git -C "$worktree" rev-parse 'HEAD^{tree}')
+     if [ -n "$release_record_rel" ]; then
+diff --git a/tools/maintenance/tests/test_sync_from_upstream.py b/tools/maintenance/tests/test_sync_from_upstream.py
+index cb1ac0770..9e4891470 100644
+--- a/tools/maintenance/tests/test_sync_from_upstream.py
++++ b/tools/maintenance/tests/test_sync_from_upstream.py
+@@ -230,6 +230,31 @@ class SyncFromUpstreamTest(unittest.TestCase):
+         self.assertNotEqual(0, result.returncode)
+         self.assertIn('REPLAY_TREE_MISMATCH', result.stderr)
+ 
++    def test_inherits_release_records_from_pinned_origin(self):
++        record = self.seed / 'tools/maintenance/releases/v0.1.0.1/audit.md'
++        record.parent.mkdir(parents=True)
++        record.write_text('Archived audit\n')
++        run('git', '-C', str(self.seed), 'add', str(record))
++        run('git', '-C', str(self.seed), 'commit', '-m', 'archive release record')
++        origin = run('git', '-C', str(self.seed), 'rev-parse', 'HEAD').stdout.strip()
++        tree = run('git', '-C', str(self.seed), 'rev-parse', 'HEAD^{tree}').stdout.strip()
++        run('git', '-C', str(self.seed), 'push', 'origin', 'HEAD:main')
++        self.manifest.write_text(
++            f'# previous_origin_main={origin}\n'
++            f'# expected_source_tree={tree}\n'
++            '# previous_release_records=inherit\n'
++            f'0001.patch\tcarry\ttest\t{self.fork_commit}\n'
++            f'-\tdrop\tinherited-record\t{origin}\n'
++        )
++
++        result = run(
++            str(SCRIPT), '--repo', str(self.repo), '--patch-dir', str(self.patch_dir),
++            '--manifest', str(self.manifest), '--skip-tests',
++        )
++
++        self.assertIn(f'REPLAY_TREE_MATCHES={tree}', result.stdout)
++        self.assertIn('TREE_MATCHES_ORIGIN_MAIN', result.stdout)
++
+     def test_rejects_unrecorded_fork_commit(self):
+         (self.seed / 'unknown.txt').write_text('unknown\n')
+         run('git', '-C', str(self.seed), 'add', 'unknown.txt')
+-- 
+2.54.0 (Apple Git-157)
+

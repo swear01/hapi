@@ -24,11 +24,14 @@ struct ToolCallBody: View {
     var body: some View {
         let questionTool = isQuestionDetailsTool(tool.name)
         let answers = questionTool ? tool.permission?.answers : nil
+        let sections = planProposalSections(tool)
+        let overview = planProposalOverview(tool)
+        let plan = planProposalMarkdown(tool)
         VStack(alignment: .leading, spacing: 12) {
             if questionTool {
                 QuestionToolBody(tool: tool)
-            } else if let plan = planProposalMarkdown(tool) {
-                PlanProposalContent(markdown: plan)
+            } else if overview != nil || plan != nil || !sections.isEmpty {
+                PlanProposalContent(overview: overview, markdown: plan, sections: sections)
                 if planProposalShowsResult(tool) { ToolResultSection(tool: tool) }
             } else {
                 SectionLabel(text: String(localized: "Input"))
@@ -60,11 +63,33 @@ struct ToolCallBody: View {
 /// Shared by the transcript and inspector. Unlike ordinary tool output, the
 /// proposal is a reading document: no preview budget or paged-source fallback.
 struct PlanProposalContent: View {
-    let markdown: String
+    let overview: String?
+    let markdown: String?
+    var sections: [JSONValue] = []
+    @Environment(\.hapiTheme) private var theme
+    @Environment(\.hapiTypography) private var typography
 
     var body: some View {
-        CachedMarkdownView(markdown: markdown)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        VStack(alignment: .leading, spacing: 8) {
+            if let overview {
+                Text(verbatim: overview)
+                    .font(typography.bodyFont)
+                    .foregroundStyle(theme.textSecondary)
+                    .textSelection(.enabled)
+            }
+            if let markdown {
+                CachedMarkdownView(markdown: markdown)
+            }
+            ForEach(Array(sections.enumerated()), id: \.offset) { _, section in
+                if let name = section[chatKey: "name"]?.chatString {
+                    Text(verbatim: name).font(typography.bodyFont.weight(.semibold))
+                }
+                ForEach(Array(checklistItems(section).enumerated()), id: \.offset) { _, item in
+                    Text(verbatim: "\(item.glyph) \(item.text)")
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -115,6 +140,17 @@ private struct ToolInputSection: View {
             ToolTextContent(language: "javascript", code: source)
         } else if name == "CodexPatch", let patch = toolSourceInput(input, keys: ["patch", "input", "command"]) {
             ToolTextContent(language: "diff", code: patch)
+        } else if name == "CodexPatch" {
+            let files = codexPatchFiles(input)
+            if files.isEmpty { GenericJSONInput(input: input) }
+            ForEach(Array(files.enumerated()), id: \.offset) { _, file in
+                let path = chatDisplayPath(file.path, basePath: basePath)
+                if let diff = file.diff, !diff.isEmpty {
+                    ToolDiffContent(text: diff, patchPath: path)
+                } else {
+                    Text(verbatim: path)
+                }
+            }
         } else if name == "Edit" {
             if let old = chatInputString(input, ["old_string"]),
                let new = chatInputString(input, ["new_string"]) {
@@ -353,21 +389,36 @@ func resultRendering(_ tool: ChatToolCall) -> ResultRendering? {
 
 private struct ToolDiffContent: View {
     let text: String
+    var patchPath: String? = nil
     @State private var files: [DiffFile]?
     var body: some View {
         Group {
             if let files { DiffTextView(files: files) }
-            else { ToolTextContent(language: "diff", code: text) }
+            else {
+                if let patchPath { Text(verbatim: patchPath) }
+                ToolTextContent(language: "diff", code: text)
+            }
         }
-        .task(id: text) {
-            let text = text
-            let parsed = await Task.detached(priority: .userInitiated) {
-                text.count <= toolTextPageSize ? tryParseDiff(text) : nil
+        .task(id: [patchPath, text]) {
+            let text = text, patchPath = patchPath
+            files = nil
+            let parsed = await Task.detached(priority: .userInitiated) { () -> [DiffFile]? in
+                guard text.count <= toolTextPageSize else { return nil }
+                if let patchPath { return codexPatchDiff(text, path: patchPath).map { [$0] } }
+                return tryParseDiff(text)
             }.value
             guard !Task.isCancelled else { return }
             files = parsed
         }
     }
+}
+
+func codexPatchDiff(_ text: String, path: String) -> DiffFile? {
+    let files = UnifiedDiffParser.parse(text)
+    guard files.count == 1, var file = files.first, !file.hunks.isEmpty else { return nil }
+    file.oldPath = path
+    file.newPath = path
+    return file
 }
 
 // MARK: - Shared helpers
@@ -431,6 +482,7 @@ func checklistItems(_ input: JSONValue?) -> [(glyph: String, text: String)] {
         let glyph: String
         switch item["status"]?.chatString {
         case "completed", "complete", "done": glyph = "☑"
+        case "cancelled": glyph = "⊘"
         case "in_progress": glyph = "◐"
         default: glyph = "☐"
         }

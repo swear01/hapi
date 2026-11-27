@@ -12,15 +12,21 @@ import app.hapi.companion.feature.chat.PermissionRowOverride
 import app.hapi.companion.feature.chat.blocks.ToolCallBlockView
 import app.hapi.companion.feature.chat.blocks.ToolGroupBlockView
 import app.hapi.companion.feature.chat.blocks.previewToolCall
+import app.hapi.companion.feature.chat.toolSummaryPresentation
 import app.hapi.protocol.chat.ToolGroupBlock
 import app.hapi.protocol.chat.ToolGroupingOptions
 import app.hapi.protocol.chat.ToolPermission
 import app.hapi.protocol.chat.ToolState
 import app.hapi.protocol.chat.buildVisibleChatBlocks
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 
@@ -34,6 +40,18 @@ class ToolCardSpecimenTest {
     @Test fun summariesDark() = summaries(SpecimenTheme.Dark)
     @Test fun approvalsLight() = approvals(SpecimenTheme.Light)
     @Test fun approvalsDark() = approvals(SpecimenTheme.Dark)
+
+    @Test fun codexPatchSummaryCountsAllFiles() {
+        val resources = RuntimeEnvironment.getApplication().resources
+        for ((changes, count) in listOf(
+            JsonArray(List(9) { index -> JsonObject(mapOf("path" to JsonPrimitive("file-$index.kt"))) }) to 9,
+            JsonObject((0 until 33).associate { "file-$it.kt" to JsonObject(emptyMap()) }) to 33,
+        )) {
+            val input = JsonObject(mapOf("changes" to changes))
+            val tool = previewToolCall("patch", "CodexPatch").tool.copy(input = input)
+            assertEquals("file-0.kt (+${count - 1})", toolSummaryPresentation(tool, null, resources).subtitle)
+        }
+    }
 
     private fun summaries(theme: SpecimenTheme) {
         compose.setContent {

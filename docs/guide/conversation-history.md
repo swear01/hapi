@@ -1,5 +1,5 @@
 ---
-description: "Fork, rewind, branch across harnesses and export HAPI conversations, with per-agent support for Claude Code, Codex, OpenCode, Grok and Pi."
+description: "Fork, rewind, branch across harnesses and export HAPI conversations, with per-agent support for Claude Code, Codex, Cursor, OpenCode, Grok and Pi."
 ---
 
 # Fork, rewind, branch and export
@@ -10,7 +10,7 @@ HAPI gives you four ways to work with a conversation's history:
 |--------|--------------|----------------|
 | **Fork** | Creates a new session that continues from a point in the agent's own (native) history | Unchanged |
 | **Rewind** | Removes history from a user message onward, in place | Shortened permanently |
-| **Branch with options** | Starts a fresh Claude Code or Codex session that gets the visible conversation text as reference, with a harness, model and workspace you choose | Unchanged |
+| **Branch with options** | Starts a fresh Claude Code, Codex or Cursor session that gets the visible conversation text as reference | Unchanged |
 | **Export** | Downloads the conversation as JSON or Markdown | Unchanged |
 
 None of these touch your files. A fork or rewind changes only the conversation; your working tree stays as it is. To get a clean copy of the code, branch into a Git worktree (see [Branch with options](#branch-with-options)).
@@ -26,10 +26,12 @@ Fork and rewind use each agent's own history API, so support depends on the agen
 | Grok Build | Yes¹ | Yes¹ | Yes¹ | — | — |
 | OpenCode | v2 only¹ | v2 only¹ | v2 only¹ | — | — |
 | Pi | Yes¹ | Yes¹ | Yes¹ | — | — |
-| Gemini, Kimi, Copilot, Cursor, Antigravity, DeepSeek Harness | — | — | — | — | — |
+| Cursor | Verified ACP store¹ | Recorded checkpoints¹ | Recorded checkpoints¹ | — | Yes |
+| Gemini, Kimi, Copilot, Antigravity, DeepSeek Harness | — | — | — | — | — |
 
-¹ Detected when the session starts. HAPI shows the control only if the installed agent version provides the API:
+¹ Availability depends on the installed agent and the current session.
 
+- **Cursor Agent:** a Bun-based runner, the stock versioned launcher for build `2026.11.22-e9042b2`, and a compatible local ACP store. Sessions started with Cursor-native worktree or additional directory flags, legacy stream-json sessions, and unrecognized builds keep the controls hidden.
 - **Grok Build:** its fork and rewind extension methods.
 - **OpenCode:** the v2 history API. OpenCode v1 never gets these controls. Rewind also needs v2's staged revert endpoints.
 - **Pi:** its fork and history-entry RPC commands. HAPI's code assumes Pi 0.83 or later.
@@ -72,7 +74,7 @@ HAPI refuses a fork, apart from the Codex cases above, when:
 
 ## Rewind
 
-**Rewind** appears on user messages for Grok Build, OpenCode v2 and Pi. It removes that message and everything after it from the session, both in the agent's native history and in HAPI's transcript. You then continue from the turn before it. After you confirm, the chat refreshes to the shortened history.
+**Rewind** appears on user messages for Grok Build, OpenCode v2, Pi and supported Cursor ACP sessions. It removes that message and everything after it from the session, both in the agent's native history and in HAPI's transcript. You then continue from the turn before it. After you confirm, the chat refreshes to the shortened history.
 
 ::: warning
 Rewind permanently deletes the later conversation, and files are not restored. To keep the original, fork instead.
@@ -80,9 +82,19 @@ Rewind permanently deletes the later conversation, and files are not restored. T
 
 You can't rewind while the agent is working, while messages are queued, in local (terminal) mode, or on an inactive session. Codex doesn't offer rewind. Fork at the message instead.
 
+### Cursor checkpoints and recovery
+
+Before truncating the chat, the runner checks that Cursor can restore the current permission mode, model and model parameters. If the replacement rejects a setting or reports a different value, the original chat remains available.
+
+HAPI records a boundary when a single plain-text user prompt matches one new native Cursor turn and its stored checkpoint. After a restart, fork or rewind, only newly verified messages gain checkpoints. Fork from the latest turn remains available when the current store can be verified.
+
+Cursor todo updates after rewind continue from the last checklist in the retained transcript, including when the runner reconnects.
+
+Rewind keeps the HAPI session ID. HAPI first loads an independent native copy at the checkpoint. The Hub then saves the new Cursor ID and shortens the transcript in a single transaction. The original Cursor store stays on disk. The Hub allows up to 255 seconds on the HTTP request so a slow native load can finish both RPC phases. If the Hub rejects the cut while the original session is still bound, the runner discards the prepared replacement and releases queued input. If the runner disconnects and input remains blocked, stop the active runner session and resume it to load the binding saved by the Hub. Workspace files stay untouched.
+
 ## Branch with options
 
-**Branch with options** starts a brand-new session in a harness you choose, seeded with the conversation's visible text. A fork copies the agent's internal state. A branch doesn't, so it works across harnesses: you can branch a Claude conversation into Codex, or the other way round.
+**Branch with options** starts a new session in the agent you choose, seeded with the conversation's visible text. You can branch between Claude Code, Codex and Cursor.
 
 **Where:** web app only. Use the **Options** button (fork icon) in a message's action row:
 
@@ -95,16 +107,17 @@ You can't rewind while the agent is working, while messages are queued, in local
 
 | Option | Choices |
 |--------|---------|
-| Harness | Claude Code or Codex |
-| Model | **Harness default**, or a model from the source machine's catalog for that harness |
-| Workspace | **Use the current directory**, or **Create a Git worktree from current HEAD**. A new worktree doesn't copy uncommitted changes. |
+| Agent | Claude Code, Codex or Cursor |
+| Model | **Harness default**, or a model from the source machine's catalog for that agent |
+| Workspace | **Use the current directory**, or **Create a Git worktree from current HEAD** for Claude Code and Codex destinations. A new worktree starts with committed files from HEAD. |
 | First instruction | Required, up to 16,000 characters |
 
 **What carries over:** only user/assistant text and tool observations, labelled as historical reference. Hidden reasoning, system prompts, attachments and native session state are not carried over. The new session is titled **Branch: _source title_** and shows a banner that links back to the source.
 
 **Requirements and limits:**
 
-- The source must be a Claude or Codex session, and its machine must be online.
+- The source must be a Claude Code, Codex or Cursor session, and its machine must be online.
+- For a Cursor source, confirm the directory shown in the dialog. HAPI uses the recorded worktree path when available and otherwise shows the session's launch directory.
 - The source can't have a turn running or queued messages. Inactive sources can be branched.
 - The reference text must fit in 256 KiB. If it doesn't, pick an earlier boundary.
 

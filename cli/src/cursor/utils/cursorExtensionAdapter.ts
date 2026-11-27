@@ -1,4 +1,5 @@
 import type { ApiSessionClient } from '@/api/apiSession';
+import { cursorTodosBySession } from './cursorTodoSnapshot';
 import type { AgentState } from '@/api/types';
 import type { AcpSdkBackend } from '@/agent/backends/acp';
 import { logger } from '@/ui/logger';
@@ -64,17 +65,17 @@ export class CursorExtensionAdapter {
         this.backend.registerExtensionRequestHandler('cursor/update_todos', async (params) => {
             this.handleTodoUpdate(params);
             return {};
-        });
+        }, { acceptNotification: true });
 
         this.backend.registerExtensionRequestHandler('cursor/task', async (params) => {
             this.handleTaskNotification(params);
             return {};
-        });
+        }, { acceptNotification: true });
 
         this.backend.registerExtensionRequestHandler('cursor/generate_image', async (params) => {
             await this.handleGenerateImage(params);
             return {};
-        });
+        }, { acceptNotification: true });
     }
 
     /**
@@ -125,16 +126,18 @@ export class CursorExtensionAdapter {
             return;
         }
 
-        this.pending.delete(response.id);
-
         const decision = response.decision ?? (response.approved ? 'approved' : 'denied');
+        const answers = pending.tool === 'CursorAskQuestion' && decision !== 'abort' && decision !== 'denied'
+            ? validateQuestionAnswers(pending.arguments, response.answers)
+            : undefined;
+        this.pending.delete(response.id);
         if (pending.tool === 'CursorAskQuestion') {
-            if (decision === 'abort' || decision === 'denied') {
-                pending.respond(wrapOutcome({ outcome: 'cancelled' }));
+            if (!answers) {
+                pending.respond(wrapOutcome({ outcome: decision === 'abort' ? 'cancelled' : 'skipped' }));
             } else {
                 pending.respond(wrapOutcome({
                     outcome: 'answered',
-                    answers: formatQuestionAnswers(pending.arguments, response.answers)
+                    answers: Object.entries(answers).map(([questionId, selectedOptionIds]) => ({ questionId, selectedOptionIds }))
                 }));
             }
         } else if (decision === 'abort') {
@@ -171,6 +174,8 @@ export class CursorExtensionAdapter {
                         createdAt: requestEntry?.createdAt ?? Date.now(),
                         completedAt: Date.now(),
                         status,
+                        ...(pending.tool === 'CursorAskQuestion' && decision === 'denied' ? { reason: 'Skipped' } : {}),
+                        ...(answers ? { answers } : {}),
                         decision
                     }
                 }
@@ -180,22 +185,29 @@ export class CursorExtensionAdapter {
 
     private handleTodoUpdate(params: unknown): void {
         if (!isObject(params)) return;
-        const todos = Array.isArray(params.todos) ? params.todos : [];
-        const items: PlanItem[] = [];
-        for (const entry of todos) {
+        if (!Array.isArray(params.todos)) return;
+        const saved = this.session.getAgentStateSnapshot?.();
+        const cached = cursorTodosBySession.get(this.session);
+        const revision = cached ? cached.revision : saved?.cursorTodoRevision;
+        const items = params.merge === true ? [...(cached?.items ?? saved?.cursorTodoSnapshot ?? [])] : [];
+        for (const entry of params.todos) {
             if (!isObject(entry)) continue;
-            const content = asString(entry.content) ?? asString(entry.title) ?? '';
+            const content = asString(entry.content) ?? asString(entry.title);
             if (!content) continue;
-            const status = normalizeTodoStatus(asString(entry.status));
-            items.push({
-                content,
-                priority: 'medium',
-                status
-            });
+            const id = asString(entry.id);
+            const item: PlanItem = {
+                ...(id ? { id } : {}), content, priority: 'medium',
+                status: normalizeTodoStatus(asString(entry.status))
+            };
+            const index = id ? items.findIndex(existing => existing.id === id) : -1;
+            if (index < 0) items.push(item);
+            else items[index] = item;
         }
-        if (items.length > 0) {
-            this.onMessage({ type: 'plan', items });
-        }
+        cursorTodosBySession.set(this.session, { revision, items });
+        this.session.updateAgentState(state => state.cursorTodoRevision === revision
+            ? { ...state, cursorTodoSnapshot: items }
+            : state);
+        this.onMessage({ type: 'plan', items });
     }
 
     private handleTaskNotification(params: unknown): void {
@@ -379,19 +391,28 @@ function extractToolCallId(params: unknown): string | null {
     return asString(params.toolCallId);
 }
 
-function formatQuestionAnswers(
-    params: unknown,
-    answers: Record<string, string[]> | undefined
-): Array<{ questionId: string; selectedOptionIds: string[] }> {
-    if (!answers) return [];
-    return Object.entries(answers).map(([questionId, selectedOptionIds]) => ({
-        questionId,
-        selectedOptionIds
-    }));
+/** ACP answers carry advertised option IDs. Keep an invalid request pending for a corrected answer or Skip. */
+function validateQuestionAnswers(params: unknown, answers?: Record<string, string[]>): Record<string, string[]> {
+    const questions = isObject(params) && Array.isArray(params.questions) ? params.questions : [];
+    if (!questions.length || !answers) throw new Error('Cursor requires a selection from its question options');
+    const validated: Record<string, string[]> = Object.create(null);
+    for (const q of questions) {
+        if (!isObject(q) || typeof q.id !== 'string' || !Array.isArray(q.options)) {
+            throw new Error('Cursor returned an invalid question');
+        }
+        const selected = answers[q.id];
+        const offered = new Set(q.options.flatMap(o => isObject(o) && typeof o.id === 'string' ? [o.id] : []));
+        if (!Array.isArray(selected) || !selected.length || (!q.allowMultiple && selected.length !== 1)
+            || selected.some(id => !offered.has(id)) || new Set(selected).size !== selected.length) {
+            throw new Error('Select an option offered by Cursor, or skip the question');
+        }
+        validated[q.id] = selected;
+    }
+    return validated;
 }
 
 function normalizeTodoStatus(status: string | null): PlanItem['status'] {
-    if (status === 'in_progress' || status === 'completed' || status === 'pending') {
+    if (status === 'in_progress' || status === 'completed' || status === 'cancelled' || status === 'pending') {
         return status;
     }
     return 'pending';

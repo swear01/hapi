@@ -31,6 +31,7 @@ import {
     type RichComposerInputHandle,
 } from '@/components/AssistantChat/RichComposerInput'
 import { useFue } from '@/lib/use-fue'
+import { CursorModelParameters } from '@/components/CursorModelParameters'
 import { FueCallout, FueDot } from '@/components/Fue'
 import type { AgentState, CodexCollaborationMode, PermissionMode, PiModelSummary } from '@/types/api'
 import type { SuggestionHandler, Suggestion } from '@/hooks/useActiveSuggestions'
@@ -61,6 +62,9 @@ import { SortableComposerAttachments } from '@/components/AssistantChat/Sortable
 import { ComposerParkingContext } from '@/components/AssistantChat/composerParkingContext'
 import type { ScratchlistParkResult } from '@/lib/scratchlistAttachmentFlow'
 import { useTranslation } from '@/lib/use-translation'
+import { isLongMessage } from '@/lib/longMessage'
+import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { getModelOptionsForFlavor, getNextModelForFlavor } from './modelOptions'
 import { getClaudeComposerEffortOptions } from './claudeEffortOptions'
 import { getCodexComposerReasoningEffortOptions } from './codexReasoningEffortOptions'
@@ -214,114 +218,6 @@ export function composerParkSnapshotUnchanged(
         )
 }
 
-/**
- * Prefer session `selectedModelVariant` only when it is still among the rows
- * currently shown. After a multi-variant base switch, session state can lag
- * while `cursorDrillDownDefaultVariant` already points at the new base's
- * default — stale variants must not win highlight.
- */
-export function resolveVisibleModelEffortSelectedValue(args: {
-    options: ReadonlyArray<{ value: string }> | null | undefined
-    selectedModelVariant?: string | null
-    cursorDrillDownDefaultVariant?: string | null
-    model?: string | null
-}): string | null | undefined {
-    const {
-        options,
-        selectedModelVariant,
-        cursorDrillDownDefaultVariant,
-        model
-    } = args
-    const selectedVisibleVariant = options?.some((option) => option.value === selectedModelVariant)
-        ? selectedModelVariant
-        : null
-    return selectedVisibleVariant ?? cursorDrillDownDefaultVariant ?? model
-}
-
-export function ModelEffortSettingsSection(props: {
-    agentFlavor?: string | null
-    options: Array<{ value: string; label: string }>
-    selectedValue: string | null | undefined
-    controlsDisabled: boolean
-    onChange: (value: string) => void
-    /** Override the section title (e.g. Cursor base id during nested drill-down). */
-    title?: string | null
-    /** When set, show a back control above the title (Cursor nested variant drill-down). */
-    onBack?: () => void
-    backLabel?: string
-}) {
-    const { t } = useTranslation()
-    const {
-        agentFlavor,
-        options,
-        selectedValue,
-        controlsDisabled,
-        onChange,
-        title,
-        onBack,
-        backLabel
-    } = props
-
-    const heading = title
-        ?? (agentFlavor === 'cursor' ? t('misc.variant') : t('misc.effort'))
-
-    return (
-        <div className="py-2">
-            {onBack ? (
-                <button
-                    type="button"
-                    disabled={controlsDisabled}
-                    className={`flex w-full items-center px-3 pb-1 text-left text-xs text-[var(--app-hint)] transition-colors ${
-                        controlsDisabled
-                            ? 'cursor-not-allowed opacity-50'
-                            : 'cursor-pointer hover:bg-[var(--app-secondary-bg)] hover:text-[var(--app-link)]'
-                    }`}
-                    onClick={onBack}
-                    onMouseDown={(e) => e.preventDefault()}
-                    aria-label={backLabel ?? t('misc.backToModelList')}
-                >
-                    {backLabel ?? t('misc.backToModelList')}
-                </button>
-            ) : null}
-            <div className="px-3 pb-1 text-xs font-semibold text-[var(--app-hint)]">
-                {heading}
-            </div>
-            {options.map((option) => {
-                const isSelected = selectedValue === option.value
-                return (
-                    <button
-                        key={option.value}
-                        type="button"
-                        disabled={controlsDisabled}
-                        className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
-                            controlsDisabled
-                                ? 'cursor-not-allowed opacity-50'
-                                : 'cursor-pointer hover:bg-[var(--app-secondary-bg)]'
-                        }`}
-                        onClick={() => onChange(option.value)}
-                        onMouseDown={(e) => e.preventDefault()}
-                    >
-                        <div
-                            className={`flex h-4 w-4 items-center justify-center rounded-full border-2 ${
-                                isSelected
-                                    ? 'border-[var(--app-link)]'
-                                    : 'border-[var(--app-hint)]'
-                            }`}
-                        >
-                            {isSelected && (
-                                <div className="h-2 w-2 rounded-full bg-[var(--app-link)]" />
-                            )}
-                        </div>
-                        <span className={isSelected ? 'text-[var(--app-link)]' : ''}>
-                            {option.label}
-                        </span>
-                    </button>
-                )
-            })}
-        </div>
-    )
-}
-
 export function HappyComposer(props: {
     sessionId?: string
     focusInputRef?: MutableRefObject<(() => void) | null>
@@ -352,6 +248,7 @@ export function HappyComposer(props: {
     contextModel?: string | null
     controlledByUser?: boolean
     agentFlavor?: string | null
+    cursorAcpPermissionModes?: string[]
     /** Session machine, for the plan-quota readout in the status bar. */
     machineId?: string | null
     availableModelOptions?: Array<{ value: string | null; label: string; group?: string }>
@@ -364,12 +261,11 @@ export function HappyComposer(props: {
     availableEffortOptions?: Array<{ value: string; name?: string }>
     /** Cursor: selected base model key (not wire id). */
     selectedModelBase?: string | null
+    modelChangePending?: boolean
     /** Cursor: selected variant sku/wire for highlight when session stores an ACP wire id. */
     selectedModelVariant?: string | null
     /** Cursor: effort/variant wire ids for the selected base model. */
     modelEffortOptions?: Array<{ value: string; label: string }>
-    /** Cursor: variant rows for a base key (used for in-place drill-down before parent re-renders). */
-    resolveModelVariantsForBase?: (baseKey: string) => readonly { value: string; label: string }[]
     onCollaborationModeChange?: (mode: CodexCollaborationMode) => void
     onCopilotAgentModeChange?: (mode: CopilotAgentMode) => void
     onPermissionModeChange?: (mode: PermissionMode) => void
@@ -477,6 +373,7 @@ export function HappyComposer(props: {
         contextModel,
         controlledByUser = false,
         agentFlavor,
+        cursorAcpPermissionModes,
         machineId,
         availableModelOptions,
         piModels,
@@ -486,7 +383,6 @@ export function HappyComposer(props: {
         selectedModelBase,
         selectedModelVariant,
         modelEffortOptions,
-        resolveModelVariantsForBase,
         onCollaborationModeChange,
         onCopilotAgentModeChange,
         onPermissionModeChange,
@@ -615,6 +511,9 @@ export function HappyComposer(props: {
 
     const configurationControlsDisabled = (!active && !allowSendWhenInactive) || isParkingScratchlist
     const controlsDisabled = disabled || threadIsDisabled || configurationControlsDisabled
+    // Pi can change models mid-turn; other agents use the standard control gate.
+    const settingsControlsDisabled = agentFlavor === 'pi' ? configurationControlsDisabled : controlsDisabled
+    const modelEffortControlsDisabled = settingsControlsDisabled || (agentFlavor === 'cursor' && !!props.modelChangePending)
     const trimmed = composerText.trim()
     const hasText = trimmed.length > 0
     const hasAttachments = attachments.length > 0
@@ -648,6 +547,18 @@ export function HappyComposer(props: {
     const setPendingSchedule = isControlled ? onScheduleProp : setPendingScheduleLocal
 
     const textareaRef = useRef<HTMLTextAreaElement>(null)
+    const textareaPasteHistory = useRef<{
+        before: TextInputState
+        after: TextInputState
+        applied: boolean
+    } | null>(null)
+
+    useEffect(() => {
+        const history = textareaPasteHistory.current
+        if (history && composerText !== (history.applied ? history.after.text : history.before.text)) {
+            textareaPasteHistory.current = null
+        }
+    }, [composerText])
     const richInputRef = useRef<RichComposerInputHandle>(null)
     const richComposerFueAnchorRef = useRef<HTMLDivElement>(null)
     const settingsButtonRef = useRef<HTMLButtonElement>(null)
@@ -1090,8 +1001,8 @@ export function HappyComposer(props: {
     }, [switchDisabled, onSwitchToRemote, haptic])
 
     const permissionModeOptions = useMemo(
-        () => getPermissionModeOptionsForFlavor(agentFlavor),
-        [agentFlavor]
+        () => getPermissionModeOptionsForFlavor(agentFlavor, cursorAcpPermissionModes),
+        [agentFlavor, cursorAcpPermissionModes]
     )
     const collaborationModeOptions = useMemo(
         () => agentFlavor === 'codex' ? getCodexCollaborationModeOptions() : [],
@@ -1106,29 +1017,6 @@ export function HappyComposer(props: {
         [agentFlavor, model, availableModelOptions]
     )
 
-    // Cursor dual picker: after choosing a multi-variant base, drill into variant
-    // rows in-place (picker stays open). Variant pick dismisses; back returns to
-    // the full base list.
-    const [cursorDrillDownBase, setCursorDrillDownBase] = useState<string | null>(null)
-    const [cursorDrillDownDefaultVariant, setCursorDrillDownDefaultVariant] = useState<string | null>(null)
-    useEffect(() => {
-        if (!selectedModelBase || selectedModelBase === 'auto') {
-            setCursorDrillDownBase(null)
-            setCursorDrillDownDefaultVariant(null)
-        }
-    }, [selectedModelBase])
-
-    const cursorDrillDownVariantOptions = useMemo(() => {
-        if (!cursorDrillDownBase || !resolveModelVariantsForBase) {
-            return null
-        }
-        const options = resolveModelVariantsForBase(cursorDrillDownBase)
-        return options.length > 1 ? options : null
-    }, [cursorDrillDownBase, resolveModelVariantsForBase])
-
-    const cursorVariantDrillDownActive = agentFlavor === 'cursor' && cursorDrillDownVariantOptions !== null
-
-    const visibleModelEffortOptions = cursorDrillDownVariantOptions ?? modelEffortOptions
     const codexReasoningEffortOptions = useMemo(
         () => agentFlavor === 'codex' || agentFlavor === 'opencode' || agentFlavor === 'dsh'
             ? getCodexComposerReasoningEffortOptions(
@@ -1382,16 +1270,10 @@ export function HappyComposer(props: {
         void handleSend(intent)
     }, [handleSend])
 
-    const clearCursorDrillDown = useCallback(() => {
-        setCursorDrillDownBase(null)
-        setCursorDrillDownDefaultVariant(null)
-    }, [])
-
     const dismissSettings = useCallback(() => {
-        clearCursorDrillDown()
         setShowSettings(false)
         setSettingsSection(null)
-    }, [clearCursorDrillDown])
+    }, [])
 
     const dismissSettingsWithFocus = useCallback(() => {
         const trigger = settingsSection === 'model' ? modelValueButtonRef.current
@@ -1401,12 +1283,38 @@ export function HappyComposer(props: {
         trigger?.focus({ preventScroll: true })
     }, [dismissSettings, settingsSection])
 
+    const applyTextareaEdit = useCallback((input: HTMLTextAreaElement, next: TextInputState) => {
+        api.composer().setText(next.text)
+        setInputState(next)
+        handleUserEdit()
+        requestAnimationFrame(() => {
+            if (textareaRef.current === input && input.value === next.text) {
+                input.setSelectionRange(next.selection.start, next.selection.end)
+            }
+        })
+    }, [api, handleUserEdit])
+
     const handleKeyDown = useCallback((e: ReactKeyboardEvent<HTMLTextAreaElement | HTMLDivElement>) => {
         const key = e.key
 
         // Avoid intercepting IME composition keystrokes (Enter, arrows, etc.)
         if (e.nativeEvent.isComposing) {
             return
+        }
+
+        const history = textareaPasteHistory.current
+        const input = e.currentTarget
+        if (history && input instanceof HTMLTextAreaElement && (e.ctrlKey || e.metaKey) && !e.altKey) {
+            const shortcut = key.toLowerCase()
+            const undo = shortcut === 'z' && !e.shiftKey
+            const redo = (shortcut === 'z' && e.shiftKey) || (shortcut === 'y' && !e.shiftKey)
+            const from = history.applied ? history.after : history.before
+            if ((history.applied ? undo : redo) && input.value === from.text) {
+                e.preventDefault()
+                history.applied = redo
+                applyTextareaEdit(input, redo ? history.after : history.before)
+                return
+            }
         }
 
         // Alt+S is an explicit send shortcut, independent of the Enter setting.
@@ -1514,6 +1422,7 @@ export function HappyComposer(props: {
             haptic('light')
         }
     }, [
+        applyTextareaEdit,
         suggestions,
         selectedIndex,
         moveUp,
@@ -1549,16 +1458,23 @@ export function HappyComposer(props: {
             if (agentFlavor === 'pi') return
             if (e.key === 'm' && (e.metaKey || e.ctrlKey) && onModelChange && supportsModelChange(agentFlavor)) {
                 e.preventDefault()
-                onModelChange(getNextModelForFlavor(agentFlavor, model, availableModelOptions))
+                if (agentFlavor === 'cursor') {
+                    if (modelEffortControlsDisabled || modelOptions.length < 2) return
+                    const currentIndex = modelOptions.findIndex((option) => option.value === (selectedModelBase ?? model))
+                    onModelChange(modelOptions[(currentIndex + 1) % modelOptions.length].value)
+                } else {
+                    onModelChange(getNextModelForFlavor(agentFlavor, model, availableModelOptions))
+                }
                 haptic('light')
             }
         }
 
         window.addEventListener('keydown', handleGlobalKeyDown)
         return () => window.removeEventListener('keydown', handleGlobalKeyDown)
-    }, [model, onModelChange, haptic, agentFlavor, availableModelOptions])
+    }, [model, onModelChange, haptic, agentFlavor, availableModelOptions, modelOptions, selectedModelBase, modelEffortControlsDisabled])
 
     const handleChange = useCallback((e: ReactChangeEvent<HTMLTextAreaElement>) => {
+        textareaPasteHistory.current = null
         const selection = {
             start: e.target.selectionStart,
             end: e.target.selectionEnd
@@ -1575,10 +1491,56 @@ export function HappyComposer(props: {
         }))
     }, [])
 
-    const handlePaste = useCallback(async (e: ReactClipboardEvent<HTMLTextAreaElement | HTMLDivElement>) => {
+    const [longPaste, setLongPaste] = useState<{ text: string; insert: () => void } | null>(null)
+    const pasteOnCloseRef = useRef<(() => void) | null>(null)
+    const canAttachPaste = !controlsDisabled && pendingSchedule == null && props.attachmentsEnabled !== false
+
+    const offerLongPaste = useCallback((text: string, insert: () => void) => {
+        if (!canAttachPaste || !isLongMessage(text)) return false
+        setLongPaste({ text, insert })
+        return true
+    }, [canAttachPaste])
+
+    const addPastedFiles = useCallback(async (files: File[]) => {
+        try {
+            for (const file of files) {
+                await api.composer().addAttachment(file)
+            }
+        } catch (error) {
+            console.error('Error adding pasted file:', error)
+        }
+    }, [api])
+
+    const handlePaste = useCallback((e: ReactClipboardEvent<HTMLTextAreaElement | HTMLDivElement>) => {
         const files = Array.from(e.clipboardData?.files || [])
 
-        if (files.length === 0) return
+        if (files.length === 0) {
+            const input = e.currentTarget
+            if (!(input instanceof HTMLTextAreaElement)) return
+            const { value, selectionStart, selectionEnd } = input
+            const text = e.clipboardData.getData('text/plain')
+            const handled = offerLongPaste(text, () => {
+                if (textareaRef.current !== input) return
+                const pastedText = text.replace(/\r\n?/g, '\n')
+                const currentText = input.value
+                // A draft may be restored while the choice is open.
+                const start = currentText === value ? selectionStart : currentText.length
+                const end = currentText === value ? selectionEnd : start
+                const cursor = start + pastedText.length
+                const after = {
+                    text: currentText.slice(0, start) + pastedText + currentText.slice(end),
+                    selection: { start: cursor, end: cursor },
+                }
+                textareaPasteHistory.current = {
+                    before: { text: currentText, selection: { start, end } },
+                    after,
+                    applied: true,
+                }
+                applyTextareaEdit(input, after)
+            })
+            if (handled) e.preventDefault()
+            return
+        }
 
         // The backend rejects scheduledAt + attachments (per-CLI upload dir is
         // torn down before a mature emit could read the files). The button-based
@@ -1592,14 +1554,8 @@ export function HappyComposer(props: {
 
         e.preventDefault()
 
-        try {
-            for (const file of files) {
-                await api.composer().addAttachment(file)
-            }
-        } catch (error) {
-            console.error('Error adding pasted file:', error)
-        }
-    }, [api, pendingSchedule])
+        void addPastedFiles(files)
+    }, [addPastedFiles, applyTextareaEdit, offerLongPaste, pendingSchedule])
 
     // Opens (or closes) the settings sheet. `section` anchors the sheet to a
     // single section ('model' / 'effort'); the gear passes nothing = full sheet.
@@ -1613,8 +1569,6 @@ export function HappyComposer(props: {
             return
         }
         if (showSettings) {
-            setCursorDrillDownBase(null)
-            setCursorDrillDownDefaultVariant(null)
             setShowSettings(false)
             setSettingsSection(null)
             return
@@ -1624,52 +1578,20 @@ export function HappyComposer(props: {
     }, [haptic, showSettings, settingsSection])
 
     const handleModelChange = useCallback((nextModel: { provider: string; modelId: string } | string | null) => {
-        if (!onModelChange || configurationControlsDisabled) return
-        onModelChange(nextModel)
-        dismissSettings()
-        haptic('light')
-    }, [onModelChange, configurationControlsDisabled, haptic, dismissSettings])
-
-    const handleCursorModelRowClick = useCallback((nextModel: string | null) => {
-        if (!onModelChange || controlsDisabled) return
-
-        const variants = nextModel && nextModel !== 'auto' && resolveModelVariantsForBase
-            ? resolveModelVariantsForBase(nextModel)
-            : []
-
-        const isMultiVariantBasePick = selectedModelBase !== undefined
-            && nextModel !== null
-            && nextModel !== 'auto'
-            && !nextModel.includes('[')
-            && variants.length > 1
-
-        if (isMultiVariantBasePick) {
-            setCursorDrillDownBase(nextModel)
-            setCursorDrillDownDefaultVariant(variants[0]?.value ?? null)
+        if (!onModelChange || modelEffortControlsDisabled) return
+        if (agentFlavor !== 'cursor' || nextModel !== (selectedModelBase ?? model)) {
             onModelChange(nextModel)
-            haptic('light')
-            return
         }
-
-        onModelChange(nextModel)
         dismissSettings()
         haptic('light')
-    }, [
-        onModelChange,
-        controlsDisabled,
-        resolveModelVariantsForBase,
-        selectedModelBase,
-        haptic,
-        dismissSettings
-    ])
+    }, [onModelChange, modelEffortControlsDisabled, haptic, dismissSettings, agentFlavor, selectedModelBase, model])
 
     const handleModelEffortChange = useCallback((nextWireId: string | null) => {
-        const handler = onModelEffortChange ?? onModelChange
-        if (!handler || controlsDisabled) return
-        handler(nextWireId)
+        if (!onModelEffortChange || modelEffortControlsDisabled) return
+        onModelEffortChange(nextWireId)
         dismissSettings()
         haptic('light')
-    }, [onModelEffortChange, onModelChange, controlsDisabled, haptic, dismissSettings])
+    }, [onModelEffortChange, modelEffortControlsDisabled, haptic, dismissSettings])
 
     useEffect(() => {
         if (!showSettings) return
@@ -1766,14 +1688,7 @@ export function HappyComposer(props: {
         // bare model id the Pi runner cannot resolve to a provider).
         ? Boolean(onModelChange && piModelGroups)
         : Boolean(onModelChange && supportsModelChange(agentFlavor) && modelOptions.length > 0)
-        && !cursorVariantDrillDownActive
-    const showModelEffortSettings = cursorVariantDrillDownActive
-        ? Boolean((onModelEffortChange ?? onModelChange) && visibleModelEffortOptions && visibleModelEffortOptions.length > 0)
-        : Boolean(
-            (onModelEffortChange ?? onModelChange)
-            && modelEffortOptions
-            && modelEffortOptions.length > 1
-        )
+    const showCursorParameters = Boolean(agentFlavor === 'cursor' && onModelEffortChange && modelEffortOptions && modelEffortOptions.length > 1)
     const showModelReasoningEffortSettings = Boolean(onModelReasoningEffortChange && codexReasoningEffortOptions.length > 0)
     // For Pi: hide effort while the selected model is unresolved (catalog
     // still loading/failed) or explicitly has reasoning: false — the generic
@@ -1783,14 +1698,14 @@ export function HappyComposer(props: {
     const showEffortSettings = Boolean(onEffortChange && supportsEffort(agentFlavor) && !piEffortUnavailable
         && (agentFlavor !== 'agy' || availableEffortOptions?.length))
     const showFastModeSettings = Boolean(onServiceTierChange)
-    const showModelAreaSettings = showModelSettings || showModelEffortSettings || showModelReasoningEffortSettings || showEffortSettings
+    const showModelAreaSettings = showModelSettings || showCursorParameters || showModelReasoningEffortSettings || showEffortSettings
     const showOtherSettings = showFastModeSettings || showCollaborationSettings || showCopilotAgentModeSettings
     const showSettingsButton = Boolean(
         showCollaborationSettings
         || showCopilotAgentModeSettings
         || showPermissionSettings
         || showModelSettings
-        || showModelEffortSettings
+        || showCursorParameters
         || showModelReasoningEffortSettings
         || showEffortSettings
         || showFastModeSettings
@@ -1841,10 +1756,6 @@ export function HappyComposer(props: {
     // the button caption; clicking opens the settings sheet. Hidden on narrow
     // viewports where only the settings button remains.
     const isNarrowViewport = useNarrowViewport()
-    // Pi turns run for minutes with thread.isDisabled set the whole time, so
-    // Pi keeps its model/effort controls live mid-turn (#1442) — the generic
-    // disable rule (controlsDisabled) would lock them for the entire turn.
-    const modelEffortControlsDisabled = agentFlavor === 'pi' ? configurationControlsDisabled : controlsDisabled
     const modelValueLabel = useMemo(() => {
         if (isNarrowViewport) return undefined
         if (!onModelChange || !supportsModelChange(agentFlavor)) return undefined
@@ -1859,13 +1770,14 @@ export function HappyComposer(props: {
         if (modelOptions.length === 0) return undefined
         const rawKey = selectedModelBase !== undefined ? selectedModelBase : model
         const normalizedKey = agentFlavor === 'cursor'
-            ? (!rawKey || rawKey === 'auto' || rawKey === 'default' || rawKey === 'default[]' ? 'auto' : rawKey)
+            ? selectedModelBase ?? (!model || model === 'default' || model === 'default[]' ? 'auto' : model)
             : (!rawKey || rawKey === 'auto' || rawKey === 'default' ? null : rawKey)
         const option = modelOptions.find((candidate) => candidate.value === normalizedKey)
         return option?.label ?? rawKey ?? undefined
     }, [isNarrowViewport, onModelChange, agentFlavor, selectedPiModel, model, modelOptions, selectedModelBase])
     const effortValueLabel = useMemo(() => {
         if (isNarrowViewport) return undefined
+        if (showCursorParameters) return t('misc.modelOptions')
         // Codex/OpenCode keep effort in modelReasoningEffort; same button, same wording.
         if (showModelReasoningEffortSettings) {
             if (!modelReasoningEffort) return t('composer.effortDefault')
@@ -1888,7 +1800,7 @@ export function HappyComposer(props: {
         if (!effort) return t('composer.effortDefault')
         const option = claudeEffortOptions.find((candidate) => candidate.value === effort)
         return option?.label ?? effort
-    }, [isNarrowViewport, showModelReasoningEffortSettings, modelReasoningEffort, codexReasoningEffortOptions, t, onEffortChange, agentFlavor, selectedPiModel, effort, claudeEffortOptions, availableEffortOptions])
+    }, [isNarrowViewport, showCursorParameters, showModelReasoningEffortSettings, modelReasoningEffort, codexReasoningEffortOptions, t, onEffortChange, agentFlavor, selectedPiModel, effort, claudeEffortOptions, availableEffortOptions])
 
     // Wrapper for DOM onClick consumers: never leak the MouseEvent into the
     // `section` parameter (the gear must always open the full sheet).
@@ -1918,16 +1830,16 @@ export function HappyComposer(props: {
         const sheetEffortAreaOn = settingsSection !== 'model'
         const sheetOthersOn = settingsSection === null
         const sheetModelSettings = showModelSettings && sheetModelAreaOn
-        const sheetModelEffortSettings = showModelEffortSettings && sheetModelAreaOn
+        const sheetCursorParameters = showCursorParameters && sheetEffortAreaOn
         const sheetModelReasoningEffortSettings = showModelReasoningEffortSettings && sheetEffortAreaOn
         const sheetEffortSettings = showEffortSettings && sheetEffortAreaOn
         const sheetPermissionSettings = showPermissionSettings && sheetOthersOn
         const sheetFastModeSettings = showFastModeSettings && (sheetOthersOn || settingsSection === 'model')
         const sheetCollaborationSettings = showCollaborationSettings && sheetOthersOn
         const sheetCopilotAgentModeSettings = showCopilotAgentModeSettings && sheetOthersOn
-        const sheetModelAreaSettings = sheetModelSettings || sheetModelEffortSettings || sheetModelReasoningEffortSettings || sheetEffortSettings
+        const sheetModelAreaSettings = sheetModelSettings || sheetCursorParameters || sheetModelReasoningEffortSettings || sheetEffortSettings
         const sheetOtherSettings = sheetFastModeSettings || sheetCollaborationSettings || sheetCopilotAgentModeSettings
-        if (showSettings && (sheetCollaborationSettings || sheetCopilotAgentModeSettings || sheetPermissionSettings || sheetModelSettings || sheetModelEffortSettings || sheetModelReasoningEffortSettings || sheetEffortSettings || sheetFastModeSettings)) {
+        if (showSettings && (sheetCollaborationSettings || sheetCopilotAgentModeSettings || sheetPermissionSettings || sheetModelSettings || sheetCursorParameters || sheetModelReasoningEffortSettings || sheetEffortSettings || sheetFastModeSettings)) {
             return (
                 <div ref={settingsOverlayRef} className={`${overlayPositionClass} w-full`}>
                     <FloatingOverlay maxHeight={320}>
@@ -2000,13 +1912,7 @@ export function HappyComposer(props: {
                                                     ? 'cursor-not-allowed opacity-50'
                                                     : 'cursor-pointer hover:bg-[var(--app-secondary-bg)]'
                                             }`}
-                                            onClick={() => {
-                                                if (resolveModelVariantsForBase) {
-                                                    handleCursorModelRowClick(option.value)
-                                                } else {
-                                                    handleModelChange(option.value)
-                                                }
-                                            }}
+                                            onClick={() => handleModelChange(option.value)}
                                             onMouseDown={(e) => e.preventDefault()}
                                         >
                                             <div
@@ -2030,30 +1936,20 @@ export function HappyComposer(props: {
                             </div>
                         ) : null}
 
-                        {sheetModelSettings && sheetModelEffortSettings ? (
+                        {sheetModelSettings && sheetCursorParameters ? (
                             <div className="mx-3 h-px bg-[var(--app-divider)]" />
                         ) : null}
 
-                        {sheetModelEffortSettings ? (
-                            <ModelEffortSettingsSection
-                                agentFlavor={agentFlavor}
-                                options={[...(visibleModelEffortOptions ?? [])]}
-                                selectedValue={resolveVisibleModelEffortSelectedValue({
-                                    options: visibleModelEffortOptions,
-                                    selectedModelVariant,
-                                    cursorDrillDownDefaultVariant,
-                                    model
-                                })}
-                                controlsDisabled={controlsDisabled}
+                        {sheetCursorParameters && modelEffortOptions ? (
+                            <CursorModelParameters
+                                options={modelEffortOptions}
+                                selectedValue={selectedModelVariant ?? model}
+                                disabled={modelEffortControlsDisabled}
                                 onChange={handleModelEffortChange}
-                                title={cursorVariantDrillDownActive && cursorDrillDownBase
-                                    ? cursorDrillDownBase
-                                    : undefined}
-                                onBack={cursorVariantDrillDownActive ? clearCursorDrillDown : undefined}
                             />
                         ) : null}
 
-                        {(sheetModelSettings || sheetModelEffortSettings) && sheetModelReasoningEffortSettings ? (
+                        {(sheetModelSettings || sheetCursorParameters) && sheetModelReasoningEffortSettings ? (
                             <div className="mx-3 h-px bg-[var(--app-divider)]" />
                         ) : null}
 
@@ -2328,11 +2224,7 @@ export function HappyComposer(props: {
         showCopilotAgentModeSettings,
         showPermissionSettings,
         showModelSettings,
-        showModelEffortSettings,
-        visibleModelEffortOptions,
-        cursorVariantDrillDownActive,
-        cursorDrillDownBase,
-        cursorDrillDownDefaultVariant,
+        showCursorParameters,
         modelEffortOptions,
         piModelGroups,
         selectedModelBase,
@@ -2363,13 +2255,10 @@ export function HappyComposer(props: {
         copilotAgentMode,
         handlePermissionChange,
         handleModelChange,
-        handleCursorModelRowClick,
         handleModelEffortChange,
         handleModelReasoningEffortChange,
         handleEffortChange,
         handleServiceTierChange,
-        clearCursorDrillDown,
-        resolveModelVariantsForBase,
         handleSuggestionSelect,
         overlayPositionClass,
         t
@@ -2506,6 +2395,7 @@ export function HappyComposer(props: {
                                             onPaste={handlePaste}
                                             onSessionMentionDrop={handleSessionMentionDrop}
                                             excludeSessionId={sessionId}
+                                            onTextPaste={offerLongPaste}
                                             onFocus={() => engageRichComposerFue()}
                                             resolveSessionMentionTooltip={resolveSessionMentionTooltip}
                                             onEdit={handleRichEdit}
@@ -2576,7 +2466,7 @@ export function HappyComposer(props: {
                                 controlsDisabled={controlsDisabled}
                                 showSettingsButton={showSettingsButton}
                                 settingsButtonRef={settingsButtonRef}
-                                settingsDisabled={modelEffortControlsDisabled}
+                                settingsDisabled={settingsControlsDisabled}
                                 modelValueButtonRef={modelValueButtonRef}
                                 effortValueButtonRef={effortValueButtonRef}
                                 onSettingsToggle={handleGearToggle}
@@ -2649,6 +2539,48 @@ export function HappyComposer(props: {
                         </div>
                     </div>
                 </ComposerPrimitive.Root>
+                <Dialog open={longPaste !== null} onOpenChange={(open) => { if (!open) setLongPaste(null) }}>
+                    <DialogContent
+                        aria-describedby={undefined}
+                        onCloseAutoFocus={(event) => {
+                            event.preventDefault()
+                            if (richMentionsEnabled) richInputRef.current?.focus()
+                            else textareaRef.current?.focus({ preventScroll: true })
+                            const insert = pasteOnCloseRef.current
+                            pasteOnCloseRef.current = null
+                            insert?.()
+                        }}
+                    >
+                        <DialogHeader>
+                            <DialogTitle>{t('composer.longPaste.title')}</DialogTitle>
+                        </DialogHeader>
+                        <div className="mt-4 flex flex-wrap justify-end gap-2">
+                            <Button
+                                type="button"
+                                variant="secondary"
+                                disabled={controlsDisabled}
+                                onClick={() => {
+                                    pasteOnCloseRef.current = longPaste?.insert ?? null
+                                    setLongPaste(null)
+                                }}
+                            >
+                                {t('composer.longPaste.asText')}
+                            </Button>
+                            <Button
+                                type="button"
+                                disabled={!canAttachPaste}
+                                onClick={() => {
+                                    if (!longPaste) return
+                                    const file = new File([longPaste.text], 'pasted-text.txt', { type: 'text/plain' })
+                                    void addPastedFiles([file])
+                                    setLongPaste(null)
+                                }}
+                            >
+                                {t('composer.longPaste.asFile')}
+                            </Button>
+                        </div>
+                    </DialogContent>
+                </Dialog>
             </div>
         </div>
         </ComposerParkingContext.Provider>

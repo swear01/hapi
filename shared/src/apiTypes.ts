@@ -145,6 +145,29 @@ export type AuthResponse = {
 }
 
 export type SessionsResponse = { sessions: SessionSummary[]; serverTime?: number }
+const SessionFolderIdSchema = z.string().uuid()
+const SessionFolderSchema = z.object({
+    id: SessionFolderIdSchema,
+    name: z.string(),
+    parentId: SessionFolderIdSchema.nullable()
+})
+export type SessionFolder = z.infer<typeof SessionFolderSchema>
+export const SessionFoldersResponseSchema = z.object({
+    folders: z.array(SessionFolderSchema),
+    assignments: z.record(z.string(), SessionFolderIdSchema)
+})
+export type SessionFoldersResponse = z.infer<typeof SessionFoldersResponseSchema>
+export const CreateSessionFolderRequestSchema = z.object({
+    name: z.string().trim().min(1).max(100),
+    parentId: SessionFolderIdSchema.nullable()
+})
+export type CreateSessionFolderRequest = z.infer<typeof CreateSessionFolderRequestSchema>
+export type CreateSessionFolderResponse = { folder: SessionFolder }
+
+export const SetSessionFolderRequestSchema = z.object({
+    folderId: SessionFolderIdSchema.nullable()
+})
+export type SetSessionFolderRequest = z.infer<typeof SetSessionFolderRequestSchema>
 export type ScratchlistSessionIdsResponse = { sessionIds: string[] }
 export type SessionContentMatch = {
     messageId: string
@@ -414,16 +437,30 @@ export const ClaudeLocalSessionWithMessagesSchema = ClaudeLocalSessionSummarySch
 export type ClaudeLocalSessionSummary = z.infer<typeof ClaudeLocalSessionSummarySchema>
 export type ClaudeLocalSessionWithMessages = z.infer<typeof ClaudeLocalSessionWithMessagesSchema>
 
-export const PrepareCursorImportRpcRequestSchema = z.object({
+const cursorImportRequest = z.object({
     uuid: z.string().min(1),
     workspacePath: z.string().nullable().optional()
 })
+
+// A nested request has no top-level UUID, so older runners reject it
+// before their generic import handler can select or copy an unrelated store.
+export const PrepareCursorImportRpcRequestSchema = z.union([
+    z.object({
+        legacyResume: z.object({
+            uuid: z.string().min(1),
+            workspacePath: z.string().min(1),
+            knownMessageCount: z.number().int().nonnegative()
+        })
+    }).transform(({ legacyResume }) => legacyResume),
+    cursorImportRequest
+])
 
 export const PrepareCursorImportRpcResponseSchema = z.union([
     z.object({
         success: z.literal(true),
         uuid: z.string().min(1),
         sourceFormat: z.enum(['acp', 'legacy']),
+        verifiedLegacyCopy: z.literal(true).optional(),
         workspacePath: z.string().min(1),
         title: z.string(),
         hostName: z.string(),
@@ -818,15 +855,25 @@ export const SendMessageRequestSchema = z.object({
 export type SendMessageRequest = z.infer<typeof SendMessageRequestSchema>
 
 /** Portable visible-history branch; native fork remains a separate operation. */
+export const BranchConversationAgentSchema = z.enum(['claude', 'codex', 'cursor'])
+
+export function resolveBranchSourceDirectory(metadata: Session['metadata']): string | undefined {
+    if (metadata?.flavor === 'cursor' && metadata.worktree?.worktreePath) {
+        return metadata.worktree.worktreePath
+    }
+    return metadata?.path
+}
+
 export const BranchConversationRequestSchema = z.object({
     requestId: z.uuid(),
     messageLocalId: z.string().min(1).optional(),
     messageId: z.string().min(1).optional(),
     boundary: z.enum(['before', 'after']).default('before'),
-    agent: z.enum(['claude', 'codex']),
+    agent: BranchConversationAgentSchema,
     model: z.string().trim().min(1).max(256).optional(),
     workspace: z.enum(['current', 'worktree']).default('current'),
     worktreeName: z.string().trim().min(1).max(100).optional(),
+    sourceDirectory: z.string().min(1).max(4096).optional(),
     instruction: z.string().trim().min(1).max(16_000)
 }).strict().refine(data => !(data.messageLocalId && data.messageId), {
     message: 'Specify only one branch boundary identifier', path: ['messageId']
@@ -933,8 +980,19 @@ export const OpenCodeRewindReportSchema = z.object({
 })
 export type OpenCodeRewindReport = z.infer<typeof OpenCodeRewindReportSchema>
 
+export type CursorRewindRpcParams = {
+    messageLocalId: string
+    cursorSourceSessionId?: string
+    cursorPrepareOperationId?: string
+    cursorAbortOperationId?: string
+    cursorCommittedSessionId?: string
+    cursorTodoSnapshot?: import('./schemas').CursorTodoSnapshot
+}
+
 export type RewindConversationRpcResult = {
     success: true
+    /** Exact ACP-loaded Cursor copy, prepared before the Hub commits a rewind. */
+    nativeSessionId?: string
     /** Truncate HAPI transcript at/after this localId, then accept rehydrated history. */
     truncateFromLocalId: string
     messages?: Array<{

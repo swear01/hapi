@@ -3,6 +3,7 @@ package app.hapi.companion.feature.chat
 import android.content.res.Resources
 import androidx.annotation.DrawableRes
 import app.hapi.companion.R
+import app.hapi.companion.feature.chat.blocks.codexPatchFiles
 import app.hapi.companion.feature.chat.blocks.toolPresentationName
 import app.hapi.protocol.chat.ChatToolCall
 import app.hapi.protocol.chat.getInputStringAny
@@ -284,6 +285,12 @@ fun toolCardPresentation(
             return ToolCardPresentation(ToolIcons.WEB, query ?: res.getString(R.string.tool_web_search), query?.let { truncate(it, 80) })
         }
 
+        "CursorTask" -> return ToolCardPresentation(
+            ToolIcons.AGENT,
+            getInputStringAny(input, listOf("title", "description")) ?: res.getString(R.string.tool_task),
+            getInputStringAny(input, listOf("prompt"))?.let { truncate(it, 120) },
+        )
+
         "Task", "Agent" -> {
             val inputName = getInputStringAny(input, listOf("name"))
             val teamName = getInputStringAny(input, listOf("team_name"))
@@ -348,7 +355,10 @@ fun toolCardPresentation(
 
         "update_plan" -> return ToolCardPresentation(ToolIcons.PLAN, res.getString(R.string.tool_plan), null)
 
-        "ExitPlanMode", "exit_plan_mode" -> return ToolCardPresentation(ToolIcons.PLAN, res.getString(R.string.tool_plan_proposal), null)
+        "ExitPlanMode", "exit_plan_mode", "CursorCreatePlan" -> return ToolCardPresentation(
+            ToolIcons.PLAN, res.getString(R.string.tool_plan_proposal),
+            if (name == "CursorCreatePlan") getInputStringAny(input, listOf("name")) else null,
+        )
 
         "Skill" -> {
             val skill = getInputStringAny(input, listOf("skill"))
@@ -374,8 +384,7 @@ fun toolCardPresentation(
         }
 
         "CodexPatch" -> {
-            val changes = input.asObjectOrNull()?.get("changes").asObjectOrNull()
-            val files = changes?.keys?.toList().orEmpty()
+            val files = codexPatchFiles(input).map { it.path }
             val subtitle = files.firstOrNull()?.let { first ->
                 val display = basename(displayPath(first, basePath))
                 if (files.size > 1) "$display (+${files.size - 1})" else display
@@ -461,7 +470,8 @@ internal fun toolSummaryPresentation(tool: ChatToolCall, basePath: String?, res:
         value is JsonArray -> JsonArray(value.take(8).mapNotNull { bounded(it, depth + 1) })
         else -> value
     }
-    val presentation = toolCardPresentation(tool.copy(input = bounded(tool.input), description = tool.description?.take(240), result = null), basePath, res)
+    val input = if (name == "CodexPatch") tool.input else bounded(tool.input)
+    val presentation = toolCardPresentation(tool.copy(input = input, description = tool.description?.take(240), result = null), basePath, res)
     return presentation.copy(title = presentation.title.take(240),
         subtitle = presentation.subtitle?.take(240)?.split(Regex("\\s+"))?.joinToString(" ")?.takeIf { it != presentation.title })
 }

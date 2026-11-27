@@ -246,6 +246,8 @@ export const MetadataSchema = z.object({
     agyProtocol: z.literal('acp').optional(),
     cursorSessionId: z.string().optional(),
     cursorSessionProtocol: z.enum(['acp', 'stream-json']).optional(),
+    // HAPI mode IDs from the live ACP catalog, including HAPI-managed default and yolo.
+    cursorAcpPermissionModes: z.array(z.string()).optional(),
     // Drives the web `CursorMigrationBanner`:
     //   'in_progress' = legacy-to-ACP transplant currently running; banner shows spinner + "Upgrading..."
     //   'ambiguous'   = migrator refused to transplant (ambiguous source drawer OR size mismatch);
@@ -446,6 +448,7 @@ export type Metadata = z.infer<typeof MetadataSchema>
 
 export const AgentStateRequestSchema = z.object({
     tool: z.string(),
+    acpAllowOptions: z.record(z.string(), z.string()).optional(),
     // Correlation only; replies use the request map key, never this tool id.
     toolCallId: z.string().optional(),
     arguments: z.unknown(),
@@ -475,8 +478,19 @@ export const AgentStateCompletedRequestSchema = z.object({
 
 export type AgentStateCompletedRequest = z.infer<typeof AgentStateCompletedRequestSchema>
 
+export const CursorTodoSnapshotSchema = z.array(z.object({
+    id: z.string().optional(),
+    content: z.string(),
+    priority: z.enum(['high', 'medium', 'low']),
+    status: z.enum(['pending', 'in_progress', 'completed', 'cancelled']),
+}))
+export type CursorTodoSnapshot = z.infer<typeof CursorTodoSnapshotSchema>
+
 export const AgentStateSchema = z.object({
     controlledByUser: z.boolean().nullish(),
+    cursorTodoSnapshot: CursorTodoSnapshotSchema.optional(),
+    // A committed rewind starts a new timeline. Older pending writes must not replace its snapshot.
+    cursorTodoRevision: z.string().optional(),
     // Current actionable shared Codex proposal; content remains in the transcript.
     codexPlanProposalId: z.string().nullish(),
     // Observed dequeue during live context compaction; not a consumption ACK.
@@ -941,6 +955,10 @@ const MachineChangedSchema = SessionEventBaseSchema.extend({
 })
 
 export const SyncEventSchema = z.discriminatedUnion('type', [
+    z.object({
+        type: z.literal('session-folders-updated'),
+        namespace: z.string()
+    }),
     SessionChangedSchema.extend({
         type: z.literal('session-added'),
         data: z.unknown().optional()

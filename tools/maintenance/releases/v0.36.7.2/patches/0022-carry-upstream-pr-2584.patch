@@ -1,0 +1,585 @@
+From 19cc30a661e01eabca3091baf4c1fd968047f99d Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Fri, 27 Nov 2026 18:05:34 +0800
+Subject: [PATCH] carry(upstream): PR #2584
+
+Upstream-PR-Head: 5cbcf187441b3238c7026f2650989b76652f9a5c
+---
+ hub/src/web/routes/sessions.test.ts           | 215 ++++++++++++++++++
+ hub/src/web/routes/sessions.ts                |  31 ++-
+ ...SessionChat.model-effort-controls.test.tsx | 194 ++++++++++++++++
+ web/src/components/SessionChat.tsx            |  27 ++-
+ 4 files changed, 462 insertions(+), 5 deletions(-)
+ create mode 100644 web/src/components/SessionChat.model-effort-controls.test.tsx
+
+diff --git a/hub/src/web/routes/sessions.test.ts b/hub/src/web/routes/sessions.test.ts
+index 044b70f6a..9289f1c9b 100644
+--- a/hub/src/web/routes/sessions.test.ts
++++ b/hub/src/web/routes/sessions.test.ts
+@@ -1165,6 +1165,57 @@ describe('sessions routes', () => {
+         expect(applySessionConfigCalls).toEqual([])
+     })
+ 
++    // The existing local-mode gate runs before the combined payload check, so a
++    // locally driven Codex session keeps its 409 even when effort is included.
++    it.each([null, 'high'])('rejects a model change with effort %s for a locally driven Codex session', async (effort) => {
++        const session = createSession({
++            agentState: {
++                controlledByUser: true,
++                requests: {},
++                completedRequests: {}
++            }
++        })
++        const { app, applySessionConfigCalls } = createApp(session)
++
++        const response = await app.request('/api/sessions/session-1/model', {
++            method: 'POST',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({ model: 'gpt-5.5', effort })
++        })
++
++        expect(response.status).toBe(409)
++        expect(await response.json()).toEqual({
++            error: 'Model selection can only be changed for remote Codex sessions'
++        })
++        expect(applySessionConfigCalls).toEqual([])
++    })
++
++    // Claude allows effort with the model, so the local-mode gate is reached
++    // after the combined payload check and still returns the Claude 409.
++    it('rejects a model change with effort for a locally driven Claude session', async () => {
++        const session = createSession({
++            metadata: { path: '/tmp/project', host: 'localhost', flavor: 'claude' },
++            agentState: {
++                controlledByUser: true,
++                requests: {},
++                completedRequests: {}
++            }
++        })
++        const { app, applySessionConfigCalls } = createApp(session)
++
++        const response = await app.request('/api/sessions/session-1/model', {
++            method: 'POST',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({ model: 'haiku', effort: null })
++        })
++
++        expect(response.status).toBe(409)
++        expect(await response.json()).toEqual({
++            error: 'Model selection can only be changed for remote Claude sessions'
++        })
++        expect(applySessionConfigCalls).toEqual([])
++    })
++
+     it('applies model changes for OpenCode sessions', async () => {
+         const session = createSession({
+             metadata: {
+@@ -1295,6 +1346,107 @@ describe('sessions routes', () => {
+         expect(applySessionConfigCalls).toEqual([])
+     })
+ 
++    // A locally driven session's launcher only receives the model at spawn, so a
++    // later web switch is rejected before it is forwarded. concurrentClients (or
++    // a session that is not locally controlled) keeps the switch valid.
++    it.each([
++        ['claude', 'haiku', 'Model selection can only be changed for remote Claude sessions'],
++        ['kimi', 'kimi-k2', 'Model selection can only be changed for remote Kimi sessions'],
++        ['opencode', 'ollama/exaone:4.5-33b-q8', 'Model selection can only be changed for remote OpenCode sessions'],
++        ['copilot', 'gpt-5.5', 'Model selection can only be changed for remote Copilot sessions'],
++    ] as const)('rejects local model changes for %s sessions and allows shared or remote switches', async (flavor, model, message) => {
++        const metadata = { path: '/tmp/project', host: 'localhost', flavor }
++        const local = createSession({
++            metadata,
++            agentState: { controlledByUser: true, requests: {}, completedRequests: {} }
++        })
++        const localApp = createApp(local)
++        const localResponse = await localApp.app.request('/api/sessions/session-1/model', {
++            method: 'POST',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({ model })
++        })
++        expect(localResponse.status).toBe(409)
++        expect(await localResponse.json()).toEqual({ error: message })
++        expect(localApp.applySessionConfigCalls).toEqual([])
++
++        const shared = createSession({
++            metadata: { ...metadata, capabilities: { concurrentClients: true } },
++            agentState: { controlledByUser: true, requests: {}, completedRequests: {} }
++        })
++        const sharedApp = createApp(shared)
++        const sharedResponse = await sharedApp.app.request('/api/sessions/session-1/model', {
++            method: 'POST',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({ model })
++        })
++        expect(sharedResponse.status).toBe(200)
++        expect(sharedApp.applySessionConfigCalls).toEqual([['session-1', { model }]])
++
++        const remoteApp = createApp(createSession({ metadata }))
++        const remoteResponse = await remoteApp.app.request('/api/sessions/session-1/model', {
++            method: 'POST',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({ model })
++        })
++        expect(remoteResponse.status).toBe(200)
++        expect(remoteApp.applySessionConfigCalls).toEqual([['session-1', { model }]])
++    })
++
++    // The effort flavor restriction is a payload check, so it is reported before
++    // the local-mode gate. An invalid combination keeps the 400 from a remote
++    // session, while a valid model-only switch still reaches the 409.
++    it.each([
++        ['kimi', 'kimi-k2', 'Model selection can only be changed for remote Kimi sessions'],
++        ['opencode', 'ollama/exaone:4.5-33b-q8', 'Model selection can only be changed for remote OpenCode sessions'],
++        ['copilot', 'gpt-5.5', 'Model selection can only be changed for remote Copilot sessions'],
++    ] as const)('validates the model payload before the local-mode gate for %s', async (flavor, model, message) => {
++        const session = createSession({
++            metadata: { path: '/tmp/project', host: 'localhost', flavor },
++            agentState: { controlledByUser: true, requests: {}, completedRequests: {} }
++        })
++        const { app, applySessionConfigCalls } = createApp(session)
++
++        for (const effort of [null, 'high']) {
++            const invalid = await app.request('/api/sessions/session-1/model', {
++                method: 'POST',
++                headers: { 'content-type': 'application/json' },
++                body: JSON.stringify({ model, effort })
++            })
++            expect(invalid.status).toBe(400)
++            expect(await invalid.json()).toEqual({
++                error: 'Effort can only be sent with a model change for Claude and Antigravity sessions'
++            })
++        }
++
++        const valid = await app.request('/api/sessions/session-1/model', {
++            method: 'POST',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({ model })
++        })
++        expect(valid.status).toBe(409)
++        expect(await valid.json()).toEqual({ error: message })
++        expect(applySessionConfigCalls).toEqual([])
++    })
++
++    it('rejects local model changes when the session has no flavor (treated as Claude)', async () => {
++        const local = createSession({
++            metadata: { path: '/tmp/project', host: 'localhost', flavor: undefined },
++            agentState: { controlledByUser: true, requests: {}, completedRequests: {} }
++        })
++        const { app, applySessionConfigCalls } = createApp(local)
++
++        const response = await app.request('/api/sessions/session-1/model', {
++            method: 'POST',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({ model: 'haiku' })
++        })
++
++        expect(response.status).toBe(409)
++        expect(await response.json()).toEqual({ error: 'Model selection can only be changed for remote Claude sessions' })
++        expect(applySessionConfigCalls).toEqual([])
++    })
++
+     it('rejects effort changes for non-Claude sessions', async () => {
+         const { app, applySessionConfigCalls } = createApp(createSession())
+ 
+@@ -1379,6 +1531,69 @@ describe('sessions routes', () => {
+         expect(localApp.applySessionConfigCalls).toEqual([])
+     })
+ 
++    // Effort mirrors model: a locally driven launcher never receives a later
++    // effort change, while shared or remote sessions keep applying it.
++    it.each([
++        ['claude', 'max', 'Effort can only be changed for remote Claude sessions'],
++        ['kimi', 'high', 'Effort can only be changed for remote Kimi sessions'],
++        ['copilot', 'low', 'Effort can only be changed for remote Copilot sessions'],
++    ] as const)('rejects local effort changes for %s sessions and allows shared or remote changes', async (flavor, effort, message) => {
++        const metadata = { path: '/tmp/project', host: 'localhost', flavor }
++        const local = createSession({
++            metadata,
++            agentState: { controlledByUser: true, requests: {}, completedRequests: {} }
++        })
++        const localApp = createApp(local)
++        const localResponse = await localApp.app.request('/api/sessions/session-1/effort', {
++            method: 'POST',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({ effort })
++        })
++        expect(localResponse.status).toBe(409)
++        expect(await localResponse.json()).toEqual({ error: message })
++        expect(localApp.applySessionConfigCalls).toEqual([])
++
++        const shared = createSession({
++            metadata: { ...metadata, capabilities: { concurrentClients: true } },
++            agentState: { controlledByUser: true, requests: {}, completedRequests: {} }
++        })
++        const sharedApp = createApp(shared)
++        const sharedResponse = await sharedApp.app.request('/api/sessions/session-1/effort', {
++            method: 'POST',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({ effort })
++        })
++        expect(sharedResponse.status).toBe(200)
++        expect(sharedApp.applySessionConfigCalls).toEqual([['session-1', { effort }]])
++
++        const remoteApp = createApp(createSession({ metadata }))
++        const remoteResponse = await remoteApp.app.request('/api/sessions/session-1/effort', {
++            method: 'POST',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({ effort })
++        })
++        expect(remoteResponse.status).toBe(200)
++        expect(remoteApp.applySessionConfigCalls).toEqual([['session-1', { effort }]])
++    })
++
++    it('rejects local effort changes when the session has no flavor (treated as Claude)', async () => {
++        const local = createSession({
++            metadata: { path: '/tmp/project', host: 'localhost', flavor: undefined },
++            agentState: { controlledByUser: true, requests: {}, completedRequests: {} }
++        })
++        const { app, applySessionConfigCalls } = createApp(local)
++
++        const response = await app.request('/api/sessions/session-1/effort', {
++            method: 'POST',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({ effort: 'high' })
++        })
++
++        expect(response.status).toBe(409)
++        expect(await response.json()).toEqual({ error: 'Effort can only be changed for remote Claude sessions' })
++        expect(applySessionConfigCalls).toEqual([])
++    })
++
+     it('returns OpenCode reasoning effort options for active OpenCode sessions', async () => {
+         const session = createSession({
+             metadata: { path: '/tmp/project', host: 'localhost', flavor: 'opencode' }
+diff --git a/hub/src/web/routes/sessions.ts b/hub/src/web/routes/sessions.ts
+index 10f819aba..076426d30 100644
+--- a/hub/src/web/routes/sessions.ts
++++ b/hub/src/web/routes/sessions.ts
+@@ -1521,6 +1521,7 @@ export function createSessionsRoutes(
+         if (!supportsModelChange(flavor)) {
+             return c.json({ error: 'Model selection is not supported for this session' }, 400)
+         }
++
+         if (sessionResult.session.agentState?.controlledByUser === true && !sessionResult.session.metadata?.capabilities?.concurrentClients) {
+             if (flavor === 'codex') {
+                 return c.json({ error: 'Model selection can only be changed for remote Codex sessions' }, 409)
+@@ -1540,6 +1541,21 @@ export function createSessionsRoutes(
+             return c.json({ error: 'Effort can only be sent with a model change for Claude and Antigravity sessions' }, 400)
+         }
+ 
++        if (sessionResult.session.agentState?.controlledByUser === true && !sessionResult.session.metadata?.capabilities?.concurrentClients) {
++            if (flavor === 'claude') {
++                return c.json({ error: 'Model selection can only be changed for remote Claude sessions' }, 409)
++            }
++            if (flavor === 'kimi') {
++                return c.json({ error: 'Model selection can only be changed for remote Kimi sessions' }, 409)
++            }
++            if (flavor === 'opencode') {
++                return c.json({ error: 'Model selection can only be changed for remote OpenCode sessions' }, 409)
++            }
++            if (flavor === 'copilot') {
++                return c.json({ error: 'Model selection can only be changed for remote Copilot sessions' }, 409)
++            }
++        }
++
+         try {
+             await engine.applySessionConfig(sessionResult.sessionId, effort === undefined ? { model } : { model, effort })
+             return c.json({ ok: true })
+@@ -1606,8 +1622,19 @@ export function createSessionsRoutes(
+         if (!supportsEffort(flavor)) {
+             return c.json({ error: 'Effort selection is not supported for this session type' }, 400)
+         }
+-        if (flavor === 'grok' && sessionResult.session.agentState?.controlledByUser === true && !sessionResult.session.metadata?.capabilities?.concurrentClients) {
+-            return c.json({ error: 'Effort can only be changed for remote Grok sessions' }, 409)
++        if (sessionResult.session.agentState?.controlledByUser === true && !sessionResult.session.metadata?.capabilities?.concurrentClients) {
++            if (flavor === 'claude') {
++                return c.json({ error: 'Effort can only be changed for remote Claude sessions' }, 409)
++            }
++            if (flavor === 'kimi') {
++                return c.json({ error: 'Effort can only be changed for remote Kimi sessions' }, 409)
++            }
++            if (flavor === 'copilot') {
++                return c.json({ error: 'Effort can only be changed for remote Copilot sessions' }, 409)
++            }
++            if (flavor === 'grok') {
++                return c.json({ error: 'Effort can only be changed for remote Grok sessions' }, 409)
++            }
+         }
+ 
+         try {
+diff --git a/web/src/components/SessionChat.model-effort-controls.test.tsx b/web/src/components/SessionChat.model-effort-controls.test.tsx
+new file mode 100644
+index 000000000..cdbc0c31a
+--- /dev/null
++++ b/web/src/components/SessionChat.model-effort-controls.test.tsx
+@@ -0,0 +1,194 @@
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import { cleanup, render } from '@testing-library/react'
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
++import type { ReactNode } from 'react'
++import type { ApiClient } from '@/api/client'
++import type { Session } from '@/types/api'
++import { I18nProvider } from '@/lib/i18n-context'
++import { ToastProvider } from '@/lib/toast-context'
++import { SessionChat } from './SessionChat'
++
++vi.mock('@tanstack/react-router', async (importOriginal) => ({
++    ...(await importOriginal<Record<string, unknown>>()),
++    useNavigate: () => async () => {}
++}))
++
++// SessionChat hands these straight to HappyComposer, whose toolbar hides the
++// value buttons when their callbacks are absent. Capture the props so the test
++// asserts the wiring without the composer's catalog-dependent labels.
++const captured = vi.hoisted(() => ({ props: null as Record<string, unknown> | null }))
++vi.mock('@/components/AssistantChat/HappyComposer', () => ({
++    HappyComposer: (props: Record<string, unknown>) => {
++        captured.props = props
++        return null
++    }
++}))
++
++vi.mock('@/hooks/queries/useClaudeModels', () => ({
++    useClaudeModels: () => ({ availableModels: [] })
++}))
++vi.mock('@/hooks/queries/useKimiModelsForSession', () => ({
++    useKimiModelsForSession: () => ({ availableModels: [] })
++}))
++vi.mock('@/hooks/queries/useKimiReasoningEffortOptions', () => ({
++    useKimiReasoningEffortOptions: () => []
++}))
++vi.mock('@/hooks/queries/useOpencodeModels', () => ({
++    useOpencodeModels: () => ({ availableModels: [], currentModelId: null, isLoading: false, error: null })
++}))
++vi.mock('@/hooks/queries/useOpencodeReasoningEffortOptions', () => ({
++    useOpencodeReasoningEffortOptions: () => ({ options: [], currentValue: null, isLoading: false, error: null })
++}))
++vi.mock('@/hooks/queries/usePiModels', () => ({
++    usePiModels: () => ({
++        availableModels: [{ provider: 'test', modelId: 'pi-model', name: 'Pi Model' }],
++        currentModelId: 'pi-model',
++        isLoading: false,
++        error: null
++    })
++}))
++
++class ResizeObserverStub {
++    observe() {}
++    unobserve() {}
++    disconnect() {}
++}
++if (typeof globalThis.ResizeObserver === 'undefined') {
++    ;(globalThis as Record<string, unknown>).ResizeObserver = ResizeObserverStub
++}
++if (typeof Element.prototype.scrollTo !== 'function') {
++    Element.prototype.scrollTo = function scrollTo() {}
++}
++
++function makeSession(opts: { flavor: string; controlledByUser?: boolean; shared?: boolean; active?: boolean }): Session {
++    return {
++        id: 'ses-mc',
++        active: opts.active ?? true,
++        thinking: false,
++        activeTurnStartedAt: null,
++        metadata: {
++            path: '/tmp/project',
++            host: 'localhost',
++            flavor: opts.flavor,
++            ...(opts.shared ? { capabilities: { concurrentClients: true } } : {})
++        },
++        agentState: {
++            controlledByUser: opts.controlledByUser ?? false,
++            requests: {},
++            completedRequests: {}
++        }
++    } as unknown as Session
++}
++
++function renderChat(session: Session): void {
++    const api = {
++        forkConversation: vi.fn(),
++        rewindConversation: vi.fn(),
++        forkPreview: vi.fn(),
++        fetchTranscriptionProviders: vi.fn(async () => [])
++    } as unknown as ApiClient
++    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
++    const node = (
++        <QueryClientProvider client={queryClient}>
++            <I18nProvider>
++                <ToastProvider>
++                    <SessionChat
++                        api={api}
++                        session={session}
++                        messages={[]}
++                        messagesWarning={null}
++                        hasMoreMessages={false}
++                        isSyncingTail={false}
++                        isCatchingUpFromCache={false}
++                        cachedTailFirstFrame={false}
++                        isLoadingMoreMessages={false}
++                        isSending={false}
++                        viewMode="tail"
++                        messagesVersion={0}
++                        historyVersion={0}
++                        tailRevision={0}
++                        onBack={() => {}}
++                        onRefresh={() => {}}
++                        onLoadMore={async () => 'terminal-stop' as never}
++                        onCancelLoadMore={() => {}}
++                        onSend={async () => false}
++                        onViewModeChange={() => {}}
++                        onJumpToTail={() => {}}
++                    />
++                </ToastProvider>
++            </I18nProvider>
++        </QueryClientProvider>
++    ) as ReactNode
++    render(node)
++}
++
++function capturedProps(): { onModelChange?: unknown; onEffortChange?: unknown; onModelReasoningEffortChange?: unknown; piModels?: unknown } {
++    return (captured.props ?? {}) as {
++        onModelChange?: unknown
++        onEffortChange?: unknown
++        onModelReasoningEffortChange?: unknown
++        piModels?: unknown
++    }
++}
++
++describe('SessionChat locally driven model and effort controls', () => {
++    afterEach(() => {
++        cleanup()
++        captured.props = null
++    })
++
++    it('hides the model and effort controls for a locally driven Claude session', () => {
++        renderChat(makeSession({ flavor: 'claude', controlledByUser: true }))
++        const props = capturedProps()
++        expect(props.onModelChange).toBeUndefined()
++        expect(props.onEffortChange).toBeUndefined()
++    })
++
++    it('hides the model control for a locally driven Kimi session', () => {
++        renderChat(makeSession({ flavor: 'kimi', controlledByUser: true }))
++        expect(capturedProps().onModelChange).toBeUndefined()
++    })
++
++    it('hides the model control for a locally driven OpenCode session', () => {
++        renderChat(makeSession({ flavor: 'opencode', controlledByUser: true }))
++        expect(capturedProps().onModelChange).toBeUndefined()
++    })
++
++    it('still shows the model and effort controls when the session is not locally driven', () => {
++        renderChat(makeSession({ flavor: 'claude', controlledByUser: false }))
++        const props = capturedProps()
++        expect(props.onModelChange).toBeTypeOf('function')
++        expect(props.onEffortChange).toBeTypeOf('function')
++    })
++
++    it('still shows the model and effort controls when concurrent clients are enabled', () => {
++        renderChat(makeSession({ flavor: 'claude', controlledByUser: true, shared: true }))
++        const props = capturedProps()
++        expect(props.onModelChange).toBeTypeOf('function')
++        expect(props.onEffortChange).toBeTypeOf('function')
++    })
++
++    it('still shows the Pi model control for a locally driven session', () => {
++        renderChat(makeSession({ flavor: 'pi', controlledByUser: true }))
++        const props = capturedProps()
++        expect(props.onModelChange).toBeTypeOf('function')
++        expect(props.piModels).toBeDefined()
++    })
++
++    it('keeps the model and effort controls for an inactive Claude session', () => {
++        renderChat(makeSession({ flavor: 'claude', controlledByUser: true, active: false }))
++        const props = capturedProps()
++        expect(props.onModelChange).toBeTypeOf('function')
++        expect(props.onEffortChange).toBeTypeOf('function')
++    })
++
++    it('keeps the model control for an inactive Kimi session', () => {
++        renderChat(makeSession({ flavor: 'kimi', controlledByUser: true, active: false }))
++        expect(capturedProps().onModelChange).toBeTypeOf('function')
++    })
++
++    it('keeps the model control for an inactive OpenCode session', () => {
++        renderChat(makeSession({ flavor: 'opencode', controlledByUser: true, active: false }))
++        expect(capturedProps().onModelChange).toBeTypeOf('function')
++    })
++})
+diff --git a/web/src/components/SessionChat.tsx b/web/src/components/SessionChat.tsx
+index d481ea46c..093533204 100644
+--- a/web/src/components/SessionChat.tsx
++++ b/web/src/components/SessionChat.tsx
+@@ -1250,7 +1250,7 @@ function SessionChatInner(props: SessionChatProps) {
+     const opencodeModelsState = useOpencodeModels({
+         api: props.api,
+         sessionId: props.session.id,
+-        enabled: agentFlavor === 'opencode' && props.session.active
++        enabled: agentFlavor === 'opencode' && props.session.active && !controlledByUser
+     })
+     const opencodeReasoningEffortState = useOpencodeReasoningEffortOptions({
+         api: props.api,
+@@ -1335,10 +1335,12 @@ function SessionChatInner(props: SessionChatProps) {
+     // A running session discovers its models over its own connection (kimi
+     // provider list --json), so this works without a background runner;
+     // switching itself still goes through the existing ACP setModel path.
++    // A locally driven session cannot apply a later switch, so hide the picker
++    // under the shared controlledByUser condition.
+     const kimiModelsState = useKimiModelsForSession({
+         api: props.api,
+         sessionId: props.session.id,
+-        enabled: agentFlavor === 'kimi' && props.session.active
++        enabled: agentFlavor === 'kimi' && props.session.active && !controlledByUser
+     })
+     const kimiEffortOptions = useKimiReasoningEffortOptions({
+         api: props.api,
+@@ -1430,10 +1432,13 @@ function SessionChatInner(props: SessionChatProps) {
+         value: level,
+         name: level === 'xhigh' ? 'XHigh' : level.charAt(0).toUpperCase() + level.slice(1)
+     })) ?? []
++    // A locally driven session's launcher passes the model only at spawn and
++    // never forwards a later switch, exactly like codex/grok/copilot above, so
++    // the picker is hidden rather than offered a change the runner drops.
+     const claudeModelsState = useClaudeModels({
+         api: props.api,
+         machineId: sessionMachineId,
+-        enabled: agentFlavor === 'claude' && props.session.active && Boolean(sessionMachineId)
++        enabled: agentFlavor === 'claude' && props.session.active && !controlledByUser && Boolean(sessionMachineId)
+     })
+     // Until the catalog arrives (or on a runner without discovery) this stays
+     // undefined and the composer keeps its built-in Claude presets.
+@@ -2756,6 +2761,18 @@ function SessionChatInner(props: SessionChatProps) {
+                                             ? (props.session.active && !controlledByUser
+                                                 ? handleModelChange
+                                                 : undefined)
++                                        : agentFlavor === 'claude'
++                                            ? (props.session.active && controlledByUser
++                                                ? undefined
++                                                : handleModelChange)
++                                        : agentFlavor === 'kimi'
++                                            ? (props.session.active && controlledByUser
++                                                ? undefined
++                                                : handleModelChange)
++                                        : agentFlavor === 'opencode'
++                                            ? (props.session.active && controlledByUser
++                                                ? undefined
++                                                : handleModelChange)
+                                         : handleModelChange
+                         }
+                         onModelEffortChange={
+@@ -2792,6 +2809,10 @@ function SessionChatInner(props: SessionChatProps) {
+                                 ? (props.session.active && !controlledByUser && kimiEffortOptions.length > 0
+                                     ? handleEffortChange
+                                     : undefined)
++                                : agentFlavor === 'claude'
++                                ? (props.session.active && controlledByUser
++                                    ? undefined
++                                    : handleEffortChange)
+                                 : handleEffortChange
+                         }
+                         serviceTier={effectiveCodexServiceTier}
+-- 
+2.54.0 (Apple Git-157)
+

@@ -25,6 +25,7 @@ import {
 import { createEventsRoutes } from './routes/events'
 import { createFeaturesRoutes } from './routes/features'
 import { createSessionsRoutes } from './routes/sessions'
+import { createSessionFoldersRoutes } from './routes/sessionFolders'
 import { createMessagesRoutes } from './routes/messages'
 import { createPermissionsRoutes } from './routes/permissions'
 import { createMachinesRoutes } from './routes/machines'
@@ -397,6 +398,7 @@ export function createWebApp(options: {
     app.route('/api', createPasskeyManagementRoutes(passkeyDeps))
     app.route('/api', createEventsRoutes(options.getSseManager, options.getSyncEngine, options.getVisibilityTracker))
     app.route('/api', createSessionsRoutes(options.getSyncEngine))
+    app.route('/api', createSessionFoldersRoutes(options.store.sessionFolders, options.getSyncEngine, options.getSseManager))
     app.route('/api', createMessagesRoutes(options.getSyncEngine))
     app.route('/api', createPermissionsRoutes(options.getSyncEngine))
     app.route('/api', createMachinesRoutes(options.getSyncEngine, { dataDir: configuration.dataDir }))
@@ -654,7 +656,7 @@ export async function startWebServer(options: {
                 }
             }
         },
-        fetch: async (req: Request, server: { upgrade: (req: Request, opts?: unknown) => boolean }) => {
+        fetch: async (req: Request, server: BunServer<WebSocketData>) => {
             const url = new URL(req.url)
             if (url.pathname.startsWith('/socket.io/')) {
                 return socketHandler.fetch(req, server as never)
@@ -713,7 +715,7 @@ export async function startWebServer(options: {
                 return undefined as unknown as Response
             }
 
-            return app.fetch(req)
+            return app.fetch(req, { server })
         }
     })
 

@@ -1,0 +1,743 @@
+From b24f1c63d6766122d152ab448684ac42993c06e7 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 28 Nov 2026 06:00:00 +0800
+Subject: [PATCH] Carry #2651: fix(opencode): restore Windows v2 compact and
+ retry status
+
+Upstream head: ccc871be08c8512b6257b1d0d0b793767fe6de2f
+---
+ .../agent/backends/acp/AcpSdkBackend.test.ts  |  11 ++
+ cli/src/agent/backends/acp/AcpSdkBackend.ts   |  17 +-
+ .../opencode/opencodeRemoteLauncher.test.ts   | 172 +++++++++++++++++-
+ cli/src/opencode/opencodeRemoteLauncher.ts    | 169 ++++++++++++++---
+ cli/src/opencode/utils/opencodeBackend.ts     |   7 +
+ cli/src/opencode/utils/opencodeEventStream.ts |  20 +-
+ docs/guide/agents.md                          |   2 +-
+ 7 files changed, 361 insertions(+), 37 deletions(-)
+
+diff --git a/cli/src/agent/backends/acp/AcpSdkBackend.test.ts b/cli/src/agent/backends/acp/AcpSdkBackend.test.ts
+index 678f79b94..a30c6a960 100644
+--- a/cli/src/agent/backends/acp/AcpSdkBackend.test.ts
++++ b/cli/src/agent/backends/acp/AcpSdkBackend.test.ts
+@@ -2917,6 +2917,17 @@ describe('AcpSdkBackend OpenCode child session updates', () => {
+         expect(answerIdx).toBeGreaterThan(turnCompleteIdx);
+     });
+ 
++    it('keeps the existing child output handler through a compact prompt', async () => {
++        useFastDrains();
++        const { backend, internal } = makeBackend();
++        const messages: AgentMessage[] = [];
++        await backend.prompt('session-1', [{ type: 'text', text: 'start a background task' }], (message) => messages.push(message));
++        await backend.prompt('session-1', [{ type: 'text', text: '/compact' }], () => {}, { preserveChildUpdates: true });
++        notify(internal, childText('ses_child', 'background result'));
++        notify(internal, childStatus('ses_child', 'completed'));
++        await vi.waitFor(() => expect(texts(messages)).toEqual(['background result']));
++    });
++
+     it('flushes pending child text on disconnect (f)', async () => {
+         useFastDrains();
+         const { backend, internal } = makeBackend();
+diff --git a/cli/src/agent/backends/acp/AcpSdkBackend.ts b/cli/src/agent/backends/acp/AcpSdkBackend.ts
+index 63ae9e517..72ad4167f 100644
+--- a/cli/src/agent/backends/acp/AcpSdkBackend.ts
++++ b/cli/src/agent/backends/acp/AcpSdkBackend.ts
+@@ -256,6 +256,9 @@ export class AcpSdkBackend implements AgentBackend {
+          * new model's options this way instead.
+          */
+         configOptionUpdates?: boolean;
++        /** Advertise support for ACP compaction updates and their structured summary. */
++        sessionCompaction?: boolean;
++        onSessionUpdate?: (sessionId: string, update: unknown) => void;
+         textChunkMode?: AcpTextChunkMode;
+         flavor?: AgentFlavor;
+         /**
+@@ -330,6 +333,7 @@ export class AcpSdkBackend implements AgentBackend {
+                 clientCapabilities: {
+                     fs: { readTextFile: false, writeTextFile: false },
+                     terminal: false,
++                    ...(this.options.sessionCompaction ? { session: { compaction: {} } } : {}),
+                     ...(this.options.elicitationForm ? { elicitation: { form: {} } } : {}),
+                     _meta: {
+                         // Cursor ACP exposes Composer's non-fast/fast choice as separate
+@@ -736,6 +740,10 @@ export class AcpSdkBackend implements AgentBackend {
+             ?? this.initialAvailableCommands.has(command);
+     }
+ 
++    hasSessionAvailableCommands(sessionId: string): boolean {
++        return this.sessionAvailableCommands.has(sessionId);
++    }
++
+     /**
+      * Returns the slash commands negotiated via ACP `available_commands_update`
+      * (or `initialize` / `session/new` / `session/resume` metadata) for the
+@@ -846,6 +854,8 @@ export class AcpSdkBackend implements AgentBackend {
+             shouldSend?: () => boolean
+             /** Runs after the pre-prompt drain, right before the new handler replaces the old one. */
+             beforeHandlerSwap?: () => Promise<void>
++            /** Keep forwarding background child output to the previous prompt handler. */
++            preserveChildUpdates?: boolean;
+             // prompt() waits for earlier output before it sends and for late output
+             // after the answer; callers timing the agent itself need both moments.
+             timing?: { onSent?: () => void; onAnswered?: () => void }
+@@ -884,7 +894,7 @@ export class AcpSdkBackend implements AgentBackend {
+         this.latestUsageUpdate = null;
+         this.lastForwardedUsageUpdate = null;
+         this.promptUsageCallback = onUpdate;
+-        this.childEmitSink = onUpdate;
++        if (!options?.preserveChildUpdates) this.childEmitSink = onUpdate;
+         let stopReason: string | null = null;
+         let numTurns: number | undefined = undefined;
+         let promptUsage: AcpPromptUsage | null = null;
+@@ -1513,8 +1523,8 @@ export class AcpSdkBackend implements AgentBackend {
+      * its own handler keyed by `childSessionId`, kept across parent prompt
+      * changes, unaffected by `suppressUpdatesDuring` and by abort (OpenCode
+      * keeps children running after a cancelled turn). Emission goes through
+-     * the most recent prompt()'s onUpdate; before any prompt has run there
+-     * is no sink, so updates are dropped.
++     * the most recent prompt handler that did not retain the previous sink.
++     * Without a sink, updates are dropped.
+      */
+     private handleChildSessionUpdate(params: unknown): void {
+         if (!isObject(params)) return;
+@@ -1638,6 +1648,7 @@ export class AcpSdkBackend implements AgentBackend {
+                 this.captureSessionConfigOptions(sessionId, update);
+             }
+         }
++        if (sessionId) this.options.onSessionUpdate?.(sessionId, update);
+         this.forwardSessionInfoUpdate(sessionId, update);
+         this.captureUsageUpdate(update);
+         this.notifyAgentActivity(update);
+diff --git a/cli/src/opencode/opencodeRemoteLauncher.test.ts b/cli/src/opencode/opencodeRemoteLauncher.test.ts
+index 209a2e64c..4f7b2700c 100644
+--- a/cli/src/opencode/opencodeRemoteLauncher.test.ts
++++ b/cli/src/opencode/opencodeRemoteLauncher.test.ts
+@@ -101,6 +101,10 @@ const harness = vi.hoisted(() => ({
+     promptRequestInFlight: null as null | boolean,
+     // v2-compat harness: flavor detection + port/password discovery stubs.
+     detectedVersion: null as null | 'v1' | 'v2',
++    discoverV2Rest: true,
++    advertisesCompact: true,
++    commandCatalogPending: false,
++    onAvailableCommandsUpdate: null as null | ((sessionId: string) => void),
+     loopbackListeners: [] as number[],
+     discoveredPort: null as null | number,
+     discoveredPassword: null as null | string,
+@@ -171,7 +175,9 @@ vi.mock('./utils/opencodeBackend', () => ({
+                 harness.thoughtLevelOption = { ...harness.thoughtLevelOption, currentValue: value };
+             }
+         }),
+-        prompt: vi.fn(async (_sessionId: string, content: PromptContent[], onMessage?: (message: unknown) => void) => {
++        prompt: vi.fn(async (_sessionId: string, content: PromptContent[], onMessage?: (message: unknown) => void,
++            options?: { shouldSend?: () => boolean }) => {
++            if (options?.shouldSend?.() === false) return false;
+             harness.promptOnMessage = onMessage ?? null;
+             harness.promptContents.push(content);
+             harness.events.push('prompt:start');
+@@ -186,6 +192,7 @@ vi.mock('./utils/opencodeBackend', () => ({
+                 await new Promise<void>((resolve) => setImmediate(resolve));
+             }
+             harness.events.push('prompt:end');
++            return true;
+         }),
+         isPromptRequestInFlight: vi.fn(() =>
+             // The override models the real backend's window where ACP already
+@@ -228,6 +235,11 @@ vi.mock('./utils/opencodeBackend', () => ({
+             }
+         }),
+         getSessionModelsMetadata: vi.fn(() => harness.sessionModelsMetadata),
++        hasAvailableCommand: vi.fn((_id: string, command: string) => command === 'compact' && harness.advertisesCompact),
++        hasSessionAvailableCommands: vi.fn(() => !harness.commandCatalogPending),
++        setAvailableCommandsUpdateListener: vi.fn((listener: ((sessionId: string) => void) | null) => {
++            harness.onAvailableCommandsUpdate = listener;
++        }),
+         getThoughtLevelConfigOption: vi.fn(() => {
+             harness.thoughtLevelLookups.push(harness.events.length);
+             return harness.thoughtLevelOption ?? undefined;
+@@ -240,6 +252,7 @@ vi.mock('./utils/opencodeBackend', () => ({
+         getProcessPid: vi.fn(() => harness.backendPid)
+         };
+     }),
++    shouldDiscoverOpencodeV2Rest: () => harness.discoverV2Rest,
+     listChildPids: vi.fn(async () => []),
+     detectOpencodeFlavorVersion: vi.fn(async () => harness.detectedVersion ?? 'v1'),
+     listLoopbackListeners: vi.fn(async () => new Set(harness.loopbackListeners)),
+@@ -790,6 +803,10 @@ afterEach(async () => {
+     harness.abortSoftSteersCalls = 0;
+     harness.promptRequestInFlight = null;
+     harness.detectedVersion = null;
++    harness.discoverV2Rest = true;
++    harness.advertisesCompact = true;
++    harness.commandCatalogPending = false;
++    harness.onAvailableCommandsUpdate = null;
+     harness.loopbackListeners = [];
+     harness.discoveredPort = null;
+     harness.discoveredPassword = null;
+@@ -9073,3 +9090,156 @@ describe('opencodeRemoteLauncher v2 compact verification and discovery notice',
+         expect(String((notice as { message?: string }).message)).toContain('upstream retry status and /compact are unavailable');
+     });
+ });
++
++describe('OpenCode v2 ACP on Windows', () => {
++    function useWindowsAcp() {
++        harness.detectedVersion = 'v2';
++        harness.discoverV2Rest = false;
++        return (sessionId: string, update: unknown) => {
++            const handler = harness.createBackendArgs[0]?.onSessionUpdate as (id: string, update: unknown) => void;
++            handler(sessionId, update);
++        };
++    }
++
++    it('skips REST discovery and reports only current-session ACP retries and the verified compact summary', async () => {
++        const notify = useWindowsAcp();
++        const retry = (pending: unknown, sessionId = 'acp-session-1') => notify(sessionId, {
++            sessionUpdate: 'session_info_update', _meta: { 'opencode/retry': pending }
++        });
++        const compact = (compactionId: string, status: string, text?: string) => ({
++            sessionUpdate: 'compaction_update', compactionId, status, summary: [{ type: 'text', text }]
++        });
++        const firstRetry = { attempt: 2, error: { message: 'Rate limited', response: { body: 'private fixture data' } } };
++        harness.promptImpl = async () => {
++            if (harness.promptCount === 1) {
++                retry(firstRetry, 'another-session');
++                retry(firstRetry);
++                retry(firstRetry);
++                retry(null);
++                retry(firstRetry);
++                return;
++            }
++            notify('acp-session-1', compact('old', 'completed', 'old summary'));
++            notify('acp-session-1', compact('current', 'in_progress'));
++            notify('another-session', compact('current', 'completed', 'foreign summary'));
++            notify('acp-session-1', compact('current', 'completed', 'native summary'));
++        };
++        const { session, claudeSessionMessages, sentAgentMessages } = createSessionStub([
++            { message: 'hello', mode: createMode(), localId: 'prompt' },
++            { message: '', mode: createCompactMode(), localId: 'compact' }
++        ]);
++        const availability: boolean[] = [];
++
++        await opencodeRemoteLauncher(session as never, { onCompactAvailabilityChange: value => availability.push(value) });
++
++        expect(availability).toContain(true);
++        expect(harness.v2DiscoveryCalls).toHaveLength(0);
++        expect(harness.v2PasswordCalls).toHaveLength(0);
++        expect(harness.eventStreamOptions).toHaveLength(0);
++        expect(harness.promptContents.at(-1)).toEqual([{ type: 'text', text: '/compact' }]);
++        expect(claudeSessionMessages).toEqual(Array.from({ length: 2 }, () => expect.objectContaining({
++            subtype: 'api_error', retryAttempt: 1, error: { message: 'Rate limited (attempt 1)' }
++        })));
++        expect(sentAgentMessages.filter(message => (message as { type: string }).type === 'compact-summary'))
++            .toEqual([{ type: 'compact-summary', summary: 'native summary' }]);
++    });
++
++    it('accepts native provider compaction without a text summary', async () => {
++        const notify = useWindowsAcp();
++        harness.promptImpl = async () => {
++            const update = { sessionUpdate: 'compaction_update', compactionId: 'native' };
++            notify('acp-session-1', { ...update, status: 'in_progress' });
++            notify('acp-session-1', { ...update, status: 'completed', summary: null });
++        };
++        const { session, sentAgentMessages } = createSessionStub([{ message: '', mode: createCompactMode() }]);
++        await opencodeRemoteLauncher(session as never);
++        expect(sentAgentMessages).toContainEqual({ type: 'compact-summary', summary: '' });
++    });
++
++    it('does not send compact as a prompt when the agent did not advertise it', async () => {
++        useWindowsAcp();
++        harness.advertisesCompact = false;
++        const availability: boolean[] = [];
++        const { session } = createSessionStub([{ message: '', mode: createCompactMode() }]);
++        await opencodeRemoteLauncher(session as never, { onCompactAvailabilityChange: value => availability.push(value) });
++        expect(availability).not.toContain(true);
++        expect(harness.promptContents).toHaveLength(0);
++    });
++
++    it('waits for the current session to advertise a startup-queued compact without signaling teardown', async () => {
++        const notify = useWindowsAcp();
++        harness.advertisesCompact = false;
++        harness.commandCatalogPending = true;
++        harness.promptImpl = async () => {
++            const update = { sessionUpdate: 'compaction_update', compactionId: 'early' };
++            notify('acp-session-1', { ...update, status: 'in_progress' });
++            notify('acp-session-1', { ...update, status: 'completed', summary: [{ type: 'text', text: 'early compact' }] });
++        };
++        const availability: boolean[] = [];
++        const { session, thinkingChangeCalls, sentAgentMessages } = createSessionStub([{
++            message: '', mode: createCompactMode(), localId: 'early'
++        }], { keepOpen: true });
++        const run = opencodeRemoteLauncher(session as never, { onCompactAvailabilityChange: value => availability.push(value) });
++        try {
++            await vi.waitFor(() => expect(thinkingChangeCalls).toContain(true));
++            expect(availability).toEqual([]);
++            expect(harness.promptContents).toHaveLength(0);
++            harness.onAvailableCommandsUpdate?.('another-session');
++            expect(availability).toEqual([]);
++            harness.advertisesCompact = true;
++            harness.onAvailableCommandsUpdate?.('acp-session-1');
++            await vi.waitFor(() => expect(sentAgentMessages).toContainEqual({ type: 'compact-summary', summary: 'early compact' }));
++            expect(availability).toEqual([true]);
++        } finally {
++            session.queue.close();
++            await run;
++        }
++        expect(availability).toEqual([true, false]);
++        expect(harness.onAvailableCommandsUpdate).toBeNull();
++    });
++
++    it('cancels a startup-queued compact while waiting for the command catalog', async () => {
++        useWindowsAcp();
++        harness.advertisesCompact = false;
++        harness.commandCatalogPending = true;
++        const { session, rpcHandlers, sessionEvents, thinkingChangeCalls } = createSessionStub([{
++            message: '', mode: createCompactMode(), localId: 'early'
++        }], { keepOpen: true });
++        const run = opencodeRemoteLauncher(session as never);
++        try {
++            await vi.waitFor(() => expect(thinkingChangeCalls).toContain(true));
++            await rpcHandlers.get('abort')!({});
++            await vi.waitFor(() => expect(sessionEvents).toContainEqual({ type: 'ready' }));
++            harness.advertisesCompact = true;
++            harness.onAvailableCommandsUpdate?.('acp-session-1');
++            expect(harness.promptContents).toHaveLength(0);
++        } finally {
++            session.queue.close();
++            await run;
++        }
++    });
++
++    it('keeps a stopped compact result out of the timeline', async () => {
++        const notify = useWindowsAcp();
++        const { session, rpcHandlers, sentAgentMessages } = createSessionStub([
++            { message: '', mode: createCompactMode(), localId: 'compact' }
++        ], { keepOpen: true });
++        harness.hangPrompt = true;
++        const run = opencodeRemoteLauncher(session as never);
++        try {
++            await vi.waitFor(() => expect(harness.resolvePrompt).toBeTypeOf('function'));
++            notify('acp-session-1', { sessionUpdate: 'compaction_update', compactionId: 'stopped', status: 'in_progress' });
++            await rpcHandlers.get('abort')!({});
++            expect(harness.cancelPrompt).toHaveBeenCalledWith('acp-session-1');
++            notify('acp-session-1', {
++                sessionUpdate: 'compaction_update', compactionId: 'stopped', status: 'completed',
++                summary: [{ type: 'text', text: 'late summary' }]
++            });
++        } finally {
++            harness.resolvePrompt?.();
++            session.queue.close();
++            await run;
++        }
++        expect(sentAgentMessages).not.toContainEqual({ type: 'compact-summary', summary: 'late summary' });
++    });
++});
+diff --git a/cli/src/opencode/opencodeRemoteLauncher.ts b/cli/src/opencode/opencodeRemoteLauncher.ts
+index 09ef6ce17..f74efc3a8 100644
+--- a/cli/src/opencode/opencodeRemoteLauncher.ts
++++ b/cli/src/opencode/opencodeRemoteLauncher.ts
+@@ -1,5 +1,7 @@
+ import { randomUUID } from 'node:crypto';
+ import { Buffer } from 'node:buffer';
++import { once } from 'node:events';
++import { isObject } from '@hapi/protocol';
+ import { createAcpSessionTitleSync, registerAcpSessionTitleSync } from '@/agent/acpSessionTitle';
+ import { logger } from '@/ui/logger';
+ import { buildHapiMcpBridge } from '@/codex/utils/buildHapiMcpBridge';
+@@ -24,6 +26,7 @@ import {
+     findOpencodeServePid,
+     listChildPids,
+     listLoopbackListeners,
++    shouldDiscoverOpencodeV2Rest,
+     type OpencodeFlavorVersion
+ } from './utils/opencodeBackend';
+ import {
+@@ -42,6 +45,8 @@ import { opencodeCompactionEventId } from './utils/opencodeCompactionProjector';
+ import { formatOpencodePromptError, truncateOpencodeProviderText } from './utils/opencodeErrorText';
+ import {
+     formatOpencodeRetryStatus,
++    isReportableRetryAttempt,
++    parseOpencodeV2RetryStatus,
+     subscribeToOpencodeEvents,
+     type OpencodeEventSubscription,
+     type OpencodeRetryStatus
+@@ -62,8 +67,7 @@ type OpencodeRemoteLauncherOptions = {
+     onSteerCancelHandlerChange?: (handler: OpencodeSteerCancelHandler | null) => void;
+     onModelRollback?: (model: string | null) => void;
+     onReasoningEffortRollback?: (effort: string | null) => void;
+-    // Called with `true` once the ACP backend + internal HTTP baseUrl are
+-    // ready (so /compact can actually run) and with `false` whenever this
++    // Called with `true` once the session can run /compact and with `false` whenever this
+     // session leaves remote mode. runOpencode.ts uses this to decide whether
+     // a `/compact` message should be queued or immediately answered with a
+     // "not yet supported" reply — see its `slash.kind === 'compact'` branch.
+@@ -89,10 +93,11 @@ export type AbortStatusDecision = {
+     shouldClearThinking: boolean;
+ };
+ 
+-type CompactOperationPhase = 'idle' | 'snapshot' | 'summarize' | 'post-summarize' | 'verification';
++type CompactOperationPhase = 'idle' | 'await-commands' | 'snapshot' | 'summarize' | 'post-summarize' | 'verification';
+ type RoundSummaryPhase = 'idle' | 'snapshot' | 'prompt' | 'settle';
+ 
+ const ROUND_SUMMARY_SETTLE_TIMEOUT_MS = 1_000;
++const V2_COMMAND_CATALOG_WAIT_MS = 2_000;
+ 
+ async function settleRoundSummary<T>(promise: Promise<T>, controller: AbortController): Promise<T | null> {
+     return await new Promise<T | null>((resolve) => {
+@@ -290,6 +295,10 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
+     private majorVersion: OpencodeFlavorVersion | null = null;
+     /** v2-only REST access discovered after spawn; null unless both port and OPENCODE_PASSWORD were found. */
+     private v2RestInfo: { baseUrl: string; password: string } | null = null;
++    private useV2AcpUpdates = false;
++    private v2CompactCommandCatalog: AbortSignal | null = null;
++    private lastAcpRetryAttempt = 0;
++    private onAcpCompactionUpdate: ((update: Record<string, unknown>) => void) | null = null;
+     private readonly workerId: string;
+     private readonly runtimeGate: OpenCodeRuntimeGate;
+     private nativeProcess: { pid: number; startMarker: string } | undefined;
+@@ -437,6 +446,7 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
+         // session; any detection failure falls back to the v1 path.
+         this.majorVersion = await detectOpencodeFlavorVersion();
+         const isV2 = this.majorVersion === 'v2';
++        this.useV2AcpUpdates = isV2 && !shouldDiscoverOpencodeV2Rest();
+         if (!isV2) {
+             // v1 keeps upstream's non-history behavior; the fork/rewind
+             // machinery must never advertise or mutate history there.
+@@ -454,7 +464,7 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
+         let beforeSnapshot: Set<number> | null = null;
+         let v1Port: number | null = null;
+         if (isV2) {
+-            beforeSnapshot = await listLoopbackListeners();
++            if (!this.useV2AcpUpdates) beforeSnapshot = await listLoopbackListeners();
+             this.baseUrl = null;
+         } else {
+             v1Port = await allocateFreePort(hostname);
+@@ -464,7 +474,10 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
+         const backend = isV2
+             ? createOpencodeBackend({
+                 cwd: session.path,
+-                majorVersion: 'v2' as OpencodeFlavorVersion
++                majorVersion: 'v2' as OpencodeFlavorVersion,
++                ...(this.useV2AcpUpdates ? {
++                    onSessionUpdate: (sessionId: string, update: unknown) => this.handleV2AcpUpdate(sessionId, update)
++                } : {})
+             })
+             : createOpencodeBackend({
+                 cwd: session.path,
+@@ -564,13 +577,10 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
+         }
+         this.activeAcpSessionId = acpSessionId;
+ 
+-        // v2: the internal HTTP API port is bound randomly after spawn and
+-        // exposed nowhere, so discover it now that the ACP session is up
+-        // (the server is listening by then). Both the port and the
+-        // OPENCODE_PASSWORD (injected into the serve --stdio child env by
+-        // the acp parent) must be found; otherwise /compact stays disabled
+-        // exactly like the pre-v2 "not yet supported" fallback.
+-        if (isV2) {
++        // Keep the existing REST bridge on platforms with discovery support.
++        // On Windows, ACP owns the current v2 session. OpenCode chooses its
++        // private server endpoint and credentials itself.
++        if (isV2 && !this.useV2AcpUpdates) {
+             const acpPid = backend.getProcessPid?.() ?? null;
+             // v2's random port is owned by the `serve --stdio` process, not
+             // the acp parent — and the tree can own OTHER listeners too
+@@ -606,12 +616,8 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
+             }
+         }
+ 
+-        // Upstream retries are announced only on the agent's own event
+-        // stream — not as ACP notifications and not on stderr. Measured
+-        // against a provider stubbed to answer 429: 40 minutes, 85 retries,
+-        // zero ACP updates, zero stderr bytes, and a prompt that never
+-        // settled. Without this the user watches a session that looks like
+-        // it is thinking and never learns it is rate limited.
++        // OpenCode v1 reports retries on its HTTP event stream. The same
++        // stream supplies retry and transcript events for v2 sessions with REST access.
+         //
+         // Attached here rather than at spawn time because the stream is
+         // filtered by ACP session id, which only exists once new/loadSession
+@@ -619,8 +625,6 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
+         // nothing else, so it is deliberately neither awaited nor
+         // error-checked; the subscription reports its own failures at debug
+         // level and keeps the session running.
+-        // v2 keeps baseUrl null until discovery succeeds above; skipping the
+-        // subscription then only degrades upstream-retry visibility.
+         const restBaseUrl = this.v2RestInfo?.baseUrl ?? this.baseUrl;
+         if (restBaseUrl) {
+         const nativeHeaders = this.v2RestInfo ? {
+@@ -1109,14 +1113,32 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
+         }
+ 
+         // Let the caller (runOpencode.ts) know native /compact can actually
+-        // run now that the ACP backend + internal HTTP baseUrl exist. The
++        // run now that its ACP or HTTP path is ready. The
+         // dequeue loop below (not an externally-invoked trigger) is what
+         // executes it, in its actual FIFO queue position.
+         //
+         // Terminal switch/exit handlers are active during newSession/loadSession.
+         // requestExit() synchronously withdraws availability and sets shouldExit;
+         // finishing initialization must not advertise compact again mid-teardown.
+-        if (!this.shouldExit && (this.v2RestInfo !== null || this.baseUrl !== null)) {
++        if (this.useV2AcpUpdates) {
++            // The command catalog can arrive after the session replies. Only an
++            // early /compact waits for it. The rest of remote startup continues.
++            const catalog = new AbortController();
++            this.v2CompactCommandCatalog = AbortSignal.any([catalog.signal, AbortSignal.timeout(V2_COMMAND_CATALOG_WAIT_MS)]);
++            const publishCompactAvailability = () => {
++                // The caller treats false as a remote teardown notification.
++                if (!this.rewindStopped && !this.shouldExit && backend.hasAvailableCommand(acpSessionId, 'compact')) {
++                    this.options.onCompactAvailabilityChange?.(true);
++                }
++            };
++            backend.setAvailableCommandsUpdateListener(sessionId => {
++                if (sessionId !== acpSessionId) return;
++                catalog.abort();
++                publishCompactAvailability();
++            });
++            if (backend.hasSessionAvailableCommands(acpSessionId)) catalog.abort();
++            publishCompactAvailability();
++        } else if (!this.shouldExit && (this.v2RestInfo !== null || this.baseUrl !== null)) {
+             this.options.onCompactAvailabilityChange?.(true);
+         }
+ 
+@@ -1567,6 +1589,7 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
+                 // Only a normal prompt is steerable: /compact and /clear leave this
+                 // false, so a steer arriving during either is rejected rather than
+                 // injected into a turn the agent is not running.
++                this.lastAcpRetryAttempt = 0;
+                 this.promptInFlight = true;
+                 this.permissionHandler?.beginTurn();
+                 this.activePromptModeHash = session.queue.modeHasher({ ...batch.mode, model: steeringModel });
+@@ -2434,6 +2457,7 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
+         // already on its way out.
+         this.historyProbeAbortController.abort();
+         this.closeSteerGate();
++        if (this.useV2AcpUpdates) this.backend?.setAvailableCommandsUpdateListener(null);
+         this.options.onCompactAvailabilityChange?.(false);
+         // Withdraw history affordances for the teardown window and any
+         // subsequent local mode: the loopback server is going away, so forks
+@@ -2523,6 +2547,26 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
+         }
+     }
+ 
++    private handleV2AcpUpdate(sessionId: string, update: unknown): void {
++        if (this.shouldExit || sessionId !== this.activeAcpSessionId || !isObject(update)) return;
++        if (update.sessionUpdate === 'compaction_update') {
++            this.onAcpCompactionUpdate?.(update);
++            return;
++        }
++        if ((!this.promptInFlight && !this.onAcpCompactionUpdate) || update.sessionUpdate !== 'session_info_update'
++            || !isObject(update._meta)) return;
++
++        const pending = update._meta['opencode/retry'];
++        if (pending === null) {
++            this.lastAcpRetryAttempt = 0;
++            return;
++        }
++        const retry = parseOpencodeV2RetryStatus(pending);
++        if (!retry || retry.attempt === this.lastAcpRetryAttempt) return;
++        this.lastAcpRetryAttempt = retry.attempt;
++        if (isReportableRetryAttempt(retry.attempt)) this.surfaceUpstreamRetry(retry);
++    }
++
+     /**
+      * Reports an upstream retry as progress, not as a failure: the agent is
+      * still working and will try again on its own.
+@@ -2682,8 +2726,6 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
+         onMutationIssued?: () => void
+     ): Promise<void> {
+         const session = this.session;
+-        session.sendSessionEvent({ type: 'message', message: '📦 Compaction started' });
+-
+         try {
+             const isCancelled = (): boolean =>
+                 (localId ? (this.options.isLocalIdCancelled?.(localId) ?? false) : false)
+@@ -2691,6 +2733,26 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
+                 || this.compactResultSuppressed;
+ 
+             const backend = this.backend;
++            if (backend && this.useV2AcpUpdates) {
++                if (isCancelled()) return;
++                const catalog = this.v2CompactCommandCatalog;
++                if (catalog && !catalog.aborted && !backend.hasAvailableCommand(acpSessionId, 'compact')) {
++                    this.compactOperationPhase = 'await-commands';
++                    await once(catalog, 'abort', { signal: compactAbortController.signal }).catch(error => {
++                        if (!compactAbortController.signal.aborted) throw error;
++                    });
++                    if (isCancelled()) return;
++                }
++                if (!backend.hasAvailableCommand(acpSessionId, 'compact')) {
++                    session.sendSessionEvent({ type: 'message', message: 'OpenCode does not advertise /compact for this session.' });
++                    return;
++                }
++            }
++            session.sendSessionEvent({ type: 'message', message: '📦 Compaction started' });
++            if (backend && this.useV2AcpUpdates) {
++                await this.runV2AcpCompact(backend, acpSessionId, isCancelled);
++                return;
++            }
+             const v2Rest = this.majorVersion === 'v2' ? this.v2RestInfo : null;
+             const baseUrl = v2Rest?.baseUrl ?? this.baseUrl;
+             if (!baseUrl || !backend) {
+@@ -2956,6 +3018,64 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
+         }
+     }
+ 
++    private async runV2AcpCompact(
++        backend: AcpSdkBackend, sessionId: string, isCancelled: () => boolean
++    ): Promise<void> {
++        if (isCancelled()) return;
++
++        // ACP gives the terminal update the same ID as the start. Ignore
++        // orphan updates, including replayed results from an older compact.
++        let compactionId: string | undefined;
++        let result: Record<string, unknown> | undefined;
++        this.lastAcpRetryAttempt = 0;
++        this.onAcpCompactionUpdate = update => {
++            if (this.compactOperationPhase !== 'summarize' || typeof update.compactionId !== 'string') return;
++            if (update.status === 'in_progress') {
++                compactionId ??= update.compactionId;
++            } else if (update.compactionId === compactionId
++                && (update.status === 'completed' || update.status === 'failed' || update.status === 'cancelled')) {
++                result ??= update;
++            }
++        };
++
++        try {
++            const sent = await backend.prompt(sessionId, [{ type: 'text', text: '/compact' }], () => {}, {
++                preserveChildUpdates: true,
++                shouldSend: () => {
++                    if (isCancelled()) return false;
++                    this.compactOperationPhase = 'summarize';
++                    return true;
++                }
++            });
++            if (!sent || isCancelled()) return;
++
++            if (result?.status === 'completed' && compactionId) {
++                // A provider can compact its context without generating a text summary.
++                const summary = Array.isArray(result.summary) ? result.summary.flatMap(part =>
++                    isObject(part) && part.type === 'text' && typeof part.text === 'string' ? [part.text] : []
++                ).join('\n') : '';
++                this.session.client.sendAgentMessage({ type: 'compact-summary', summary },
++                    opencodeCompactionEventId(sessionId, compactionId));
++                return;
++            }
++            let message = '📦 Compaction result could not be verified.';
++            if (result?.status === 'failed') {
++                const reason = typeof result.error === 'string' && result.error.trim()
++                    ? truncateOpencodeProviderText(result.error) : 'OpenCode reported a failure.';
++                message = '📦 Compaction failed: ' + reason;
++            } else if (result?.status === 'cancelled') {
++                message = '📦 Compaction cancelled.';
++            }
++            this.session.sendSessionEvent({ type: 'message', message });
++        } catch (error) {
++            if (!isCancelled()) {
++                this.session.sendSessionEvent({ type: 'message', message: formatOpencodePromptError(error) });
++            }
++        } finally {
++            this.onAcpCompactionUpdate = null;
++        }
++    }
++
+     private handleAgentMessage(rawMessage: AgentMessage): void {
+         const message = presentQuestionToolCall(rawMessage);
+         // v1 ACP strips the native summary/parent metadata (and old versions
+@@ -3162,6 +3282,7 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
+                 // waits for an in-flight POST to complete server-side.
+                 if (
+                     leavingRemote
++                    || this.compactOperationPhase === 'await-commands'
+                     || this.compactOperationPhase === 'snapshot'
+                     || this.compactOperationPhase === 'post-summarize'
+                     || this.compactOperationPhase === 'verification'
+diff --git a/cli/src/opencode/utils/opencodeBackend.ts b/cli/src/opencode/utils/opencodeBackend.ts
+index 78499b520..0c92bf284 100644
+--- a/cli/src/opencode/utils/opencodeBackend.ts
++++ b/cli/src/opencode/utils/opencodeBackend.ts
+@@ -104,11 +104,16 @@ export function allocateFreePort(hostname = '127.0.0.1'): Promise<number> {
+     });
+ }
+ 
++export function shouldDiscoverOpencodeV2Rest(): boolean {
++    return process.platform !== 'win32';
++}
++
+ export function createOpencodeBackend(opts: {
+     cwd?: string;
+     port?: number;
+     hostname?: string;
+     majorVersion?: 'v1' | 'v2';
++    onSessionUpdate?: (sessionId: string, update: unknown) => void;
+ }): AcpSdkBackend {
+     const env = buildOpencodeEnv();
+     if (opts.majorVersion === 'v2') {
+@@ -122,6 +127,8 @@ export function createOpencodeBackend(opts: {
+             spawnCwd: opts.cwd ?? getInvokedCwd(),
+             acpModelSwitchViaConfigOption: true,
+             childSessionUpdates: true,
++            sessionCompaction: opts.onSessionUpdate !== undefined,
++            onSessionUpdate: opts.onSessionUpdate,
+             // OpenCode asks `question` tool calls through form elicitation; the
+             // permission handler answers them from the web card.
+             elicitationForm: true,
+diff --git a/cli/src/opencode/utils/opencodeEventStream.ts b/cli/src/opencode/utils/opencodeEventStream.ts
+index ddf5b8c63..9553cd729 100644
+--- a/cli/src/opencode/utils/opencodeEventStream.ts
++++ b/cli/src/opencode/utils/opencodeEventStream.ts
+@@ -99,7 +99,7 @@ const UNPRODUCTIVE_ATTEMPTS_BEFORE_WARNING = 5;
+  * come through unfiltered and the rest grow logarithmically: 1, 2, 3, 4, 8,
+  * 16, 32 … Progress stays legible without the row count tracking wall time.
+  */
+-function isReportableRetryAttempt(attempt: number): boolean {
++export function isReportableRetryAttempt(attempt: number): boolean {
+     if (attempt <= RETRY_REPORT_DENSE_THRESHOLD) {
+         return true;
+     }
+@@ -186,6 +186,16 @@ function parseRetryStatus(attemptValue: unknown, messageValue: unknown): Opencod
+     return { attempt, message: truncateOpencodeProviderText(message) };
+ }
+ 
++export function parseOpencodeV2RetryStatus(value: unknown): OpencodeRetryStatus | null {
++    if (!isObject(value)) return null;
++    // OpenCode counts the initial request as attempt 1. HAPI counts retries from 1.
++    const attempt = asNumber(value.attempt);
++    return parseRetryStatus(
++        attempt === null ? null : attempt - 1,
++        isObject(value.error) ? value.error.message : null
++    );
++}
++
+ /**
+  * Subscribes to an `opencode acp` subprocess's server event stream
+  * (`/event` for v1, `/api/event` for v2, Server-Sent Events) and reports this session's
+@@ -320,13 +330,7 @@ export function subscribeToOpencodeEvents(options: OpencodeEventStreamOptions):
+ 
+         let retry: OpencodeRetryStatus | null;
+         if (event.type === 'session.retry.scheduled') {
+-            // OpenCode 2.2.5 counts the initial request as attempt 1, then
+-            // increments before scheduling a retry. HAPI counts retries from 1.
+-            const attempt = asNumber(properties.attempt);
+-            retry = parseRetryStatus(
+-                attempt === null ? null : attempt - 1,
+-                isObject(properties.error) ? properties.error.message : null
+-            );
++            retry = parseOpencodeV2RetryStatus(properties);
+         } else {
+             const status = properties.status;
+             if (!isObject(status) || status.type !== 'retry') {
+diff --git a/docs/guide/agents.md b/docs/guide/agents.md
+index 97dad2460..0c0a5cf01 100644
+--- a/docs/guide/agents.md
++++ b/docs/guide/agents.md
+@@ -435,7 +435,7 @@ the prompt is loaded by DSH through its own `skill` tool and catalog.
+   The composer remembers and toggles **fast mode** (Codex's fast service tier) for remote sessions. Remote sessions also load the MCP servers configured in your Codex config alongside HAPI's own tools. To use a custom model catalog, set `HAPI_CODEX_MODEL_CATALOG_JSON` to an absolute path (or `~/…`); HAPI passes it to Codex as `model_catalog_json` unless you already pass that setting with `-c`.
+ - **GitHub Copilot** (`hapi copilot`) — Copilot CLI over ACP (`copilot --acp --stdio`). Remote sessions can pick a reasoning effort in the composer when the active model offers one; HAPI applies it before the next turn through ACP `session/set_config_option`. [GitHub Copilot](https://github.com/features/copilot)
+ - **Kimi** (`hapi kimi`) — Moonshot AI's Kimi CLI over ACP (`kimi acp`). Remote sessions can pick a thinking level in the composer when the active model offers one; HAPI applies it before the next turn through ACP `session/set_config_option`. [MoonshotAI/kimi-cli](https://github.com/MoonshotAI/kimi-cli)
+-- **OpenCode** (`hapi opencode`) — the open-source OpenCode agent over ACP (`opencode acp`). Remote sessions support **Steer**; on OpenCode v2, steered messages are delivered at the next step boundary, and HAPI can fork and rewind the conversation through OpenCode's native history. Local OpenCode sessions can be imported into HAPI ([Import local sessions](./import-local-sessions.md)). [opencode.ai](https://opencode.ai)
++- **OpenCode** (`hapi opencode`) — the open-source OpenCode agent over ACP (`opencode acp`). Remote sessions support **Steer**; on OpenCode v2, steered messages are delivered at the next step boundary, and HAPI can fork and rewind the conversation through OpenCode's native history. Remote sessions on Windows with OpenCode v2 support `/compact` and show upstream retry status in the chat. Local OpenCode sessions can be imported into HAPI ([Import local sessions](./import-local-sessions.md)). [opencode.ai](https://opencode.ai)
+ - **Antigravity** (`hapi agy`) — Google's Antigravity CLI (`agy`) over ACP
+   (`agy acp`, added in agy 1.5.0). HAPI checks `agy --version` when the
+   session starts; older agy releases, an agy whose version cannot be read,
+-- 
+2.54.0 (Apple Git-157)
+

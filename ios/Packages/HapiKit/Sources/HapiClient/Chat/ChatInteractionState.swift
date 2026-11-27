@@ -113,6 +113,7 @@ public enum PermissionAction: Equatable, Sendable {
 /// a codex-dialect tool name — selects both the button set and the plain
 /// allow body.
 public func isCodexPermissionUX(flavor: String?, toolName: String?) -> Bool {
+    if toolName == "CursorCreatePlan" { return false }
     if isCodexFamilyFlavor(flavor) || flavor == "cursor" {
         return true
     }
@@ -405,7 +406,11 @@ public func buildSessionConfigState(
         active: active,
         controlledByUser: controlledByUser,
         permissionMode: detail?.permissionMode,
-        permissionModes: permissionModeOptions(forFlavor: flavor),
+        permissionModes: permissionModeOptions(forFlavor: flavor).filter {
+            option in
+            guard flavor == "cursor", active, !controlledByUser, let supported = detail?.metadata?.cursorAcpPermissionModes else { return true }
+            return supported.contains(option.mode.rawValue)
+        },
         collaborationMode: detail?.collaborationMode,
         canChangeCollaborationMode: detail != nil && flavor == "codex" && active && !controlledByUser,
         model: model,

@@ -1,0 +1,174 @@
+From ef273674c35cb12b99c6c8d02a01a20c533e44ea Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 28 Nov 2026 06:01:40 +0800
+Subject: [PATCH] Fix Codex patch preview interactions and summaries
+
+---
+ .../feature/chat/ToolCardPresentation.kt       |  3 ++-
+ .../specimens/ToolCardSpecimenTest.kt          | 18 ++++++++++++++++++
+ ios/Hapi/Features/Chat/Blocks/ToolBodies.swift |  5 +++--
+ web/src/components/ToolCard/ToolCard.tsx       |  2 +-
+ .../components/ToolCard/codexPatch.test.tsx    |  3 +++
+ web/src/components/ToolCard/codexPatch.ts      |  7 ++++---
+ .../ToolCard/views/CodexPatchView.tsx          |  6 +++---
+ 7 files changed, 34 insertions(+), 10 deletions(-)
+
+diff --git a/android/app/src/main/kotlin/app/hapi/companion/feature/chat/ToolCardPresentation.kt b/android/app/src/main/kotlin/app/hapi/companion/feature/chat/ToolCardPresentation.kt
+index e91a45c93..3f8ad7f1e 100644
+--- a/android/app/src/main/kotlin/app/hapi/companion/feature/chat/ToolCardPresentation.kt
++++ b/android/app/src/main/kotlin/app/hapi/companion/feature/chat/ToolCardPresentation.kt
+@@ -470,7 +470,8 @@ internal fun toolSummaryPresentation(tool: ChatToolCall, basePath: String?, res:
+         value is JsonArray -> JsonArray(value.take(8).mapNotNull { bounded(it, depth + 1) })
+         else -> value
+     }
+-    val presentation = toolCardPresentation(tool.copy(input = bounded(tool.input), description = tool.description?.take(240), result = null), basePath, res)
++    val input = if (name == "CodexPatch") tool.input else bounded(tool.input)
++    val presentation = toolCardPresentation(tool.copy(input = input, description = tool.description?.take(240), result = null), basePath, res)
+     return presentation.copy(title = presentation.title.take(240),
+         subtitle = presentation.subtitle?.take(240)?.split(Regex("\\s+"))?.joinToString(" ")?.takeIf { it != presentation.title })
+ }
+diff --git a/android/app/src/test/kotlin/app/hapi/companion/specimens/ToolCardSpecimenTest.kt b/android/app/src/test/kotlin/app/hapi/companion/specimens/ToolCardSpecimenTest.kt
+index 7ded22353..548ba66f9 100644
+--- a/android/app/src/test/kotlin/app/hapi/companion/specimens/ToolCardSpecimenTest.kt
++++ b/android/app/src/test/kotlin/app/hapi/companion/specimens/ToolCardSpecimenTest.kt
+@@ -12,15 +12,21 @@ import app.hapi.companion.feature.chat.PermissionRowOverride
+ import app.hapi.companion.feature.chat.blocks.ToolCallBlockView
+ import app.hapi.companion.feature.chat.blocks.ToolGroupBlockView
+ import app.hapi.companion.feature.chat.blocks.previewToolCall
++import app.hapi.companion.feature.chat.toolSummaryPresentation
+ import app.hapi.protocol.chat.ToolGroupBlock
+ import app.hapi.protocol.chat.ToolGroupingOptions
+ import app.hapi.protocol.chat.ToolPermission
+ import app.hapi.protocol.chat.ToolState
+ import app.hapi.protocol.chat.buildVisibleChatBlocks
++import kotlinx.serialization.json.JsonArray
++import kotlinx.serialization.json.JsonObject
++import kotlinx.serialization.json.JsonPrimitive
++import org.junit.Assert.assertEquals
+ import org.junit.Rule
+ import org.junit.Test
+ import org.junit.runner.RunWith
+ import org.robolectric.RobolectricTestRunner
++import org.robolectric.RuntimeEnvironment
+ import org.robolectric.annotation.Config
+ import org.robolectric.annotation.GraphicsMode
+ 
+@@ -35,6 +41,18 @@ class ToolCardSpecimenTest {
+     @Test fun approvalsLight() = approvals(SpecimenTheme.Light)
+     @Test fun approvalsDark() = approvals(SpecimenTheme.Dark)
+ 
++    @Test fun codexPatchSummaryCountsAllFiles() {
++        val resources = RuntimeEnvironment.getApplication().resources
++        for ((changes, count) in listOf(
++            JsonArray(List(9) { index -> JsonObject(mapOf("path" to JsonPrimitive("file-$index.kt"))) }) to 9,
++            JsonObject((0 until 33).associate { "file-$it.kt" to JsonObject(emptyMap()) }) to 33,
++        )) {
++            val input = JsonObject(mapOf("changes" to changes))
++            val tool = previewToolCall("patch", "CodexPatch").tool.copy(input = input)
++            assertEquals("file-0.kt (+${count - 1})", toolSummaryPresentation(tool, null, resources).subtitle)
++        }
++    }
++
+     private fun summaries(theme: SpecimenTheme) {
+         compose.setContent {
+             Specimen(theme) {
+diff --git a/ios/Hapi/Features/Chat/Blocks/ToolBodies.swift b/ios/Hapi/Features/Chat/Blocks/ToolBodies.swift
+index fd8814fa3..aaada70ce 100644
+--- a/ios/Hapi/Features/Chat/Blocks/ToolBodies.swift
++++ b/ios/Hapi/Features/Chat/Blocks/ToolBodies.swift
+@@ -146,7 +146,7 @@ private struct ToolInputSection: View {
+             ForEach(Array(files.enumerated()), id: \.offset) { _, file in
+                 let path = chatDisplayPath(file.path, basePath: basePath)
+                 if let diff = file.diff, !diff.isEmpty {
+-                    ToolDiffContent(text: diff, patchPath: path).id(path)
++                    ToolDiffContent(text: diff, patchPath: path)
+                 } else {
+                     Text(verbatim: path)
+                 }
+@@ -399,8 +399,9 @@ private struct ToolDiffContent: View {
+                 ToolTextContent(language: "diff", code: text)
+             }
+         }
+-        .task(id: text) {
++        .task(id: [patchPath, text]) {
+             let text = text, patchPath = patchPath
++            files = nil
+             let parsed = await Task.detached(priority: .userInitiated) { () -> [DiffFile]? in
+                 guard text.count <= toolTextPageSize else { return nil }
+                 if let patchPath { return codexPatchDiff(text, path: patchPath).map { [$0] } }
+diff --git a/web/src/components/ToolCard/ToolCard.tsx b/web/src/components/ToolCard/ToolCard.tsx
+index 5df6cbb86..ef80fff0d 100644
+--- a/web/src/components/ToolCard/ToolCard.tsx
++++ b/web/src/components/ToolCard/ToolCard.tsx
+@@ -478,7 +478,7 @@ function ToolCardInner(props: ToolCardProps) {
+     const useCompactTerminalCard = shouldUseCompactTerminalToolCard(toolName, props.terminalToolDisplayMode, isTerminalTool)
+     const showInline = shouldShowInlineToolCardBody(toolName, presentation.minimal, props.terminalToolDisplayMode, isTerminalTool)
+     const CompactToolView = showInline ? getToolViewComponent(toolName, props.block.tool) : null
+-    const compactViewOwnsInteractions = toolName === 'CodexDiff'
++    const compactViewOwnsInteractions = toolName === 'CodexDiff' || toolName === 'CodexPatch'
+     const ResultToolView = getToolResultViewComponent(toolName, props.block)
+     const permission = props.block.tool.permission
+     const isAskUserQuestion = isAskUserQuestionToolName(toolName)
+diff --git a/web/src/components/ToolCard/codexPatch.test.tsx b/web/src/components/ToolCard/codexPatch.test.tsx
+index 44bcd27d7..86a0c97eb 100644
+--- a/web/src/components/ToolCard/codexPatch.test.tsx
++++ b/web/src/components/ToolCard/codexPatch.test.tsx
+@@ -25,6 +25,7 @@ function renderPatch(changes: unknown) {
+ describe('CodexPatch', () => {
+     it.each([
+         { [path]: { type: 'update', unified_diff: diff } },
++        { [path]: { kind: {}, type: 'update', unified_diff: diff } },
+         [{ path, kind: { type: 'update', move_path: null }, diff }],
+     ])('shows one attributed hunk inline and in details', (changes) => {
+         renderPatch(changes)
+@@ -34,6 +35,8 @@ describe('CodexPatch', () => {
+             expect(file.getByText('+const retries = 3;').className).toContain('--app-diff-added-bg')
+         }
+         check(screen)
++        fireEvent.click(screen.getByText('+const retries = 3;'))
++        expect(screen.queryByRole('dialog')).toBeNull()
+         fireEvent.click(screen.getByRole('button', { name: /Apply changes/ }))
+         check(within(screen.getByRole('dialog')))
+     })
+diff --git a/web/src/components/ToolCard/codexPatch.ts b/web/src/components/ToolCard/codexPatch.ts
+index d9dd6bc1a..3bc6c9b8f 100644
+--- a/web/src/components/ToolCard/codexPatch.ts
++++ b/web/src/components/ToolCard/codexPatch.ts
+@@ -1,13 +1,14 @@
+ import { isObject } from '@hapi/protocol'
++import { getInputString } from '@/lib/toolInputUtils'
+ 
+ function patchDiff(change: unknown): string | null {
+     if (!isObject(change)) return null
+     // Legacy patch events carry unified_diff. App-server "diff" is a hunk
+     // for updates, but the literal file contents for additions and deletions.
+-    const kind = isObject(change.kind) ? change.kind.type : change.type
++    const kind = getInputString(change.kind, 'type') ?? getInputString(change, 'type')
+     if (kind !== 'update') return null
+-    const diff = change.unified_diff ?? change.diff
+-    return typeof diff === 'string' && diff.trim() ? diff : null
++    const diff = getInputString(change, 'unified_diff') ?? getInputString(change, 'diff')
++    return diff?.trim() ? diff : null
+ }
+ 
+ export function codexPatchFiles(input: unknown): { path: string; diff: string | null }[] {
+diff --git a/web/src/components/ToolCard/views/CodexPatchView.tsx b/web/src/components/ToolCard/views/CodexPatchView.tsx
+index 90008d0c1..6f6a1a613 100644
+--- a/web/src/components/ToolCard/views/CodexPatchView.tsx
++++ b/web/src/components/ToolCard/views/CodexPatchView.tsx
+@@ -10,9 +10,9 @@ function PatchLines({ diff }: { diff: string }) {
+         <pre className="overflow-x-auto rounded-md bg-[var(--app-code-bg)] text-xs">
+             {lines.map((line, index) => {
+                 const body = firstHunk < 0 || index > firstHunk
+-                const color = body && line.startsWith('+') ? 'bg-[var(--app-diff-added-bg)] text-[var(--app-diff-added-text)]'
+-                    : body && line.startsWith('-') ? 'bg-[var(--app-diff-removed-bg)] text-[var(--app-diff-removed-text)]'
+-                    : 'text-[var(--app-hint)]'
++                let color = 'text-[var(--app-hint)]'
++                if (body && line.startsWith('+')) color = 'bg-[var(--app-diff-added-bg)] text-[var(--app-diff-added-text)]'
++                else if (body && line.startsWith('-')) color = 'bg-[var(--app-diff-removed-bg)] text-[var(--app-diff-removed-text)]'
+                 return <span key={index} className={`block min-w-max px-2 ${color}`}>{line || ' '}</span>
+             })}
+         </pre>
+-- 
+2.54.0 (Apple Git-157)
+

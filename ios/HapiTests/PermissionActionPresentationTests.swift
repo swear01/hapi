@@ -148,6 +148,15 @@ final class PermissionActionPresentationTests: XCTestCase {
         }
     }
 
+    func testACPUsesOnlyAdvertisedGrants() {
+        let once = PermissionActionOptions(flavor: "cursor", toolName: "Read", acpAllowOptions: ["allow_once": "Only this call"])
+        XCTAssertTrue(once.canAllowOnce)
+        XCTAssertFalse(once.canAllowForSession)
+        let durable = PermissionActionOptions(flavor: "cursor", toolName: "Read", acpAllowOptions: ["allow_always": "Remember"])
+        XCTAssertFalse(durable.canAllowOnce)
+        XCTAssertTrue(durable.canAllowForSession)
+    }
+
     func testFlavorAndToolGatesRetainTheirExistingPermissionSemantics() {
         for (flavor, tool, deny, session, edits) in [
             ("claude", "Bash", PermissionAction.deny, true, false),
@@ -156,6 +165,7 @@ final class PermissionActionPresentationTests: XCTestCase {
             ("codex", "exec_command", .abort, true, false),
             ("codex", "Edit", .abort, true, false),
             ("cursor", "CursorBash", .abort, true, false),
+            ("cursor", "CursorCreatePlan", .deny, false, false),
             ("gemini", "GeminiBash", .abort, true, false),
         ] {
             let options = PermissionActionOptions(flavor: flavor, toolName: tool)
@@ -164,6 +174,7 @@ final class PermissionActionPresentationTests: XCTestCase {
             XCTAssertEqual(options.canAllowAllEdits, edits)
             XCTAssertEqual(options.hasMore, session || edits)
         }
+        XCTAssertNil(permissionApproveBody(action: .allow, flavor: "cursor", toolName: "CursorCreatePlan", arguments: nil).decision)
         XCTAssertEqual(PermissionActionOptions(flavor: nil, toolName: "CodexPermission").denyAction, .abort)
         for tool in PermissionGates.editTools {
             XCTAssertTrue(PermissionActionOptions(flavor: "claude", toolName: tool).canAllowAllEdits)

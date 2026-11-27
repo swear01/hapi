@@ -126,6 +126,7 @@ function userMessageChunkText(update: unknown): string | null {
 
 export class AcpSdkBackend implements AgentBackend {
     private transport: AcpStdioTransport | null = null;
+    private readonly extensionNotifications = new Map<string, (params: unknown, id: null) => Promise<unknown>>();
     private permissionHandler: ((request: PermissionRequest) => void) | null = null;
     private stderrErrorHandler: ((error: AcpStderrError) => void) | null = null;
     private readonly pendingPermissions = new Map<string, PendingPermission>();
@@ -255,6 +256,9 @@ export class AcpSdkBackend implements AgentBackend {
          * new model's options this way instead.
          */
         configOptionUpdates?: boolean;
+        /** Advertise support for ACP compaction updates and their structured summary. */
+        sessionCompaction?: boolean;
+        onSessionUpdate?: (sessionId: string, update: unknown) => void;
         textChunkMode?: AcpTextChunkMode;
         flavor?: AgentFlavor;
         /**
@@ -329,6 +333,7 @@ export class AcpSdkBackend implements AgentBackend {
                 clientCapabilities: {
                     fs: { readTextFile: false, writeTextFile: false },
                     terminal: false,
+                    ...(this.options.sessionCompaction ? { session: { compaction: {} } } : {}),
                     ...(this.options.elicitationForm ? { elicitation: { form: {} } } : {}),
                     _meta: {
                         // Cursor ACP exposes Composer's non-fast/fast choice as separate
@@ -447,12 +452,15 @@ export class AcpSdkBackend implements AgentBackend {
 
     registerExtensionRequestHandler(
         method: string,
-        handler: (params: unknown, requestId: string | number | null) => Promise<unknown>
+        handler: (params: unknown, requestId: string | number | null) => Promise<unknown>,
+        options?: { acceptNotification?: boolean }
     ): void {
         if (!this.transport) {
             throw new Error('ACP transport not initialized');
         }
         this.transport.registerRequestHandler(method, handler);
+        if (options?.acceptNotification) this.extensionNotifications.set(method, handler);
+        else this.extensionNotifications.delete(method);
     }
 
     async setMode(sessionId: string, modeId: string): Promise<void> {
@@ -676,7 +684,7 @@ export class AcpSdkBackend implements AgentBackend {
         sessionId: string,
         configId: string,
         value: string
-    ): Promise<void> {
+    ): Promise<AcpConfigOptionDescriptor[] | undefined> {
         if (!this.transport) {
             throw new Error('ACP transport not initialized');
         }
@@ -688,7 +696,10 @@ export class AcpSdkBackend implements AgentBackend {
             configId,
             value
         });
+        const previous = this.sessionConfigOptions.get(sessionId);
         this.captureSessionMetadata(sessionId, response);
+        const captured = this.sessionConfigOptions.get(sessionId);
+        return captured === previous ? undefined : captured;
     }
 
     /**
@@ -738,6 +749,10 @@ export class AcpSdkBackend implements AgentBackend {
         const sessionCommands = sessionId ? this.sessionAvailableCommands.get(sessionId) : undefined;
         const source = sessionCommands ?? this.initialAvailableCommands;
         return Array.from(source.values(), (command) => ({ ...command }));
+    }
+
+    hasSessionAvailableCommands(sessionId: string): boolean {
+        return this.sessionAvailableCommands.has(sessionId);
     }
 
     setAvailableCommandsUpdateListener(
@@ -835,6 +850,8 @@ export class AcpSdkBackend implements AgentBackend {
             shouldSend?: () => boolean
             /** Runs after the pre-prompt drain, right before the new handler replaces the old one. */
             beforeHandlerSwap?: () => Promise<void>
+            /** Keep forwarding background child output to the previous prompt handler. */
+            preserveChildUpdates?: boolean;
             // prompt() waits for earlier output before it sends and for late output
             // after the answer; callers timing the agent itself need both moments.
             timing?: { onSent?: () => void; onAnswered?: () => void }
@@ -873,7 +890,7 @@ export class AcpSdkBackend implements AgentBackend {
         this.latestUsageUpdate = null;
         this.lastForwardedUsageUpdate = null;
         this.promptUsageCallback = onUpdate;
-        this.childEmitSink = onUpdate;
+        if (!options?.preserveChildUpdates) this.childEmitSink = onUpdate;
         let stopReason: string | null = null;
         let numTurns: number | undefined = undefined;
         let promptUsage: AcpPromptUsage | null = null;
@@ -1474,6 +1491,11 @@ export class AcpSdkBackend implements AgentBackend {
     }
 
     private handleNotification(method: string, params: unknown): void {
+        const extension = this.extensionNotifications.get(method);
+        if (extension) {
+            void extension(params, null).catch(error => logger.debug('[ACP] Failed to handle extension notification', { method, error }));
+            return;
+        }
         if (method === 'session/update') {
             this.handleSessionUpdate(params);
         } else if (method === OPENCODE_CHILD_UPDATE_METHOD && this.options.childSessionUpdates) {
@@ -1497,8 +1519,8 @@ export class AcpSdkBackend implements AgentBackend {
      * its own handler keyed by `childSessionId`, kept across parent prompt
      * changes, unaffected by `suppressUpdatesDuring` and by abort (OpenCode
      * keeps children running after a cancelled turn). Emission goes through
-     * the most recent prompt()'s onUpdate; before any prompt has run there
-     * is no sink, so updates are dropped.
+     * the most recent prompt handler that did not retain the previous sink.
+     * Without a sink, updates are dropped.
      */
     private handleChildSessionUpdate(params: unknown): void {
         if (!isObject(params)) return;
@@ -1622,6 +1644,7 @@ export class AcpSdkBackend implements AgentBackend {
                 this.captureSessionConfigOptions(sessionId, update);
             }
         }
+        if (sessionId) this.options.onSessionUpdate?.(sessionId, update);
         this.forwardSessionInfoUpdate(sessionId, update);
         this.captureUsageUpdate(update);
         this.notifyAgentActivity(update);

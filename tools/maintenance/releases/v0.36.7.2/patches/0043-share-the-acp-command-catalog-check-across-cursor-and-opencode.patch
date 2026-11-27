@@ -1,0 +1,28 @@
+From b6d6a38ffcd82ccab9fc2c2d8b83998d18b80ebd Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 28 Nov 2026 06:03:03 +0800
+Subject: [PATCH] Share the ACP command catalog check across Cursor and
+ OpenCode
+
+---
+ cli/src/agent/backends/acp/AcpSdkBackend.ts | 4 ----
+ 1 file changed, 4 deletions(-)
+
+diff --git a/cli/src/agent/backends/acp/AcpSdkBackend.ts b/cli/src/agent/backends/acp/AcpSdkBackend.ts
+index 72ad4167f..6fa7a80aa 100644
+--- a/cli/src/agent/backends/acp/AcpSdkBackend.ts
++++ b/cli/src/agent/backends/acp/AcpSdkBackend.ts
+@@ -740,10 +740,6 @@ export class AcpSdkBackend implements AgentBackend {
+             ?? this.initialAvailableCommands.has(command);
+     }
+ 
+-    hasSessionAvailableCommands(sessionId: string): boolean {
+-        return this.sessionAvailableCommands.has(sessionId);
+-    }
+-
+     /**
+      * Returns the slash commands negotiated via ACP `available_commands_update`
+      * (or `initialize` / `session/new` / `session/resume` metadata) for the
+-- 
+2.54.0 (Apple Git-157)
+

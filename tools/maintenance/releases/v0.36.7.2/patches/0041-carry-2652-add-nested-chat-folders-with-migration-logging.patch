@@ -1,0 +1,1802 @@
+From 3e6794fe4f59347a8ce980140d3a119edaa5dafc Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 28 Nov 2026 06:00:18 +0800
+Subject: [PATCH] Carry #2652: add nested chat folders with migration logging
+
+Upstream head: 9db5759f52aae796097e07006fc7eb804dc09fd2
+---
+ docs/api/client-contract/rest.md              |  13 ++
+ docs/api/client-contract/sse.md               |   4 +-
+ docs/guide/session-list.md                    |  12 ++
+ e2e/auth-network-recovery.spec.ts             |   1 +
+ hub/src/store/index.ts                        |  18 +-
+ hub/src/store/migration-v13.test.ts           |   6 +-
+ hub/src/store/migration-v15.test.ts           |   6 +-
+ hub/src/store/migration-v18.test.ts           |   2 +-
+ hub/src/store/migration-v19.test.ts           |   2 +-
+ hub/src/store/migration-v20.test.ts           |   2 +-
+ hub/src/store/migration-v23.test.ts           |  10 +-
+ hub/src/store/migration-v24.test.ts           |   4 +-
+ hub/src/store/migration-v25.test.ts           |   2 +-
+ hub/src/store/migration-v26.test.ts           |   2 +-
+ hub/src/store/migration-v28.test.ts           |   2 +-
+ hub/src/store/migration-v30.test.ts           |   4 +-
+ hub/src/store/migration-v36.test.ts           |   2 +-
+ hub/src/store/sessionFolderStore.ts           | 113 ++++++++++
+ hub/src/sync/sessionCache.ts                  |  16 +-
+ hub/src/web/routes/sessionFolders.test.ts     | 138 ++++++++++++
+ hub/src/web/routes/sessionFolders.ts          |  66 ++++++
+ hub/src/web/server.ts                         |   2 +
+ shared/src/apiTypes.ts                        |  23 ++
+ shared/src/schemas.ts                         |   4 +
+ web/src/api/client.test.ts                    |   5 +
+ web/src/api/client.ts                         |  25 ++-
+ web/src/components/SessionActionMenu.tsx      |  16 +-
+ web/src/components/SessionFolders.test.tsx    |  26 +++
+ web/src/components/SessionFolders.tsx         | 197 ++++++++++++++++++
+ web/src/components/SessionList.order.test.tsx |  38 +++-
+ web/src/components/SessionList.tsx            | 156 ++++++++++++--
+ web/src/components/icons.tsx                  |  14 ++
+ web/src/hooks/useSSE.test.ts                  |  35 ++++
+ web/src/hooks/useSSE.ts                       |   7 +
+ web/src/lib/locales/en.ts                     |  14 ++
+ web/src/lib/locales/ja.ts                     |  14 ++
+ web/src/lib/locales/ru.ts                     |  14 ++
+ web/src/lib/locales/zh-CN.ts                  |  14 ++
+ web/src/lib/query-keys.ts                     |   1 +
+ 39 files changed, 980 insertions(+), 50 deletions(-)
+ create mode 100644 hub/src/store/sessionFolderStore.ts
+ create mode 100644 hub/src/web/routes/sessionFolders.test.ts
+ create mode 100644 hub/src/web/routes/sessionFolders.ts
+ create mode 100644 web/src/components/SessionFolders.test.tsx
+ create mode 100644 web/src/components/SessionFolders.tsx
+
+diff --git a/docs/api/client-contract/rest.md b/docs/api/client-contract/rest.md
+index 8d90830d7..9c5111cd6 100644
+--- a/docs/api/client-contract/rest.md
++++ b/docs/api/client-contract/rest.md
+@@ -70,6 +70,19 @@ the `content-search` routes above. List badges come from
+ `pendingRequests` (capped at 5, oldest-first) — do not derive counts from
+ `pendingRequests.length`.
+ 
++### Session folders
++
++Source: `hub/src/web/routes/sessionFolders.ts`. Requests and response types
++are defined in `shared/src/apiTypes.ts`. Folders and assignments are scoped
++to the caller’s namespace.
++
++| Method & path | Request | Response |
++|---|---|---|
++| `GET /api/session-folders` | — | `{folders: [{id, name, parentId}], assignments}` where `assignments` maps session IDs to folder IDs |
++| `POST /api/session-folders` | `{name, parentId}` where `null` creates a root folder | `201 {folder}`; `404` if the parent is missing; `409` if that name already exists under the same parent |
++| `PUT /api/sessions/:id/folder` | `{folderId}` where `null` removes the assignment | `{ok: true}`; `404` if the session or folder is missing |
++| `DELETE /api/session-folders/:id` | — | `{ok: true}`; deletes the folder tree and clears its assignments while keeping every session |
++
+ ### Sessions — lifecycle
+ 
+ Source: `hub/src/web/routes/sessions.ts`; request schemas in `shared/src/apiTypes.ts`.
+diff --git a/docs/api/client-contract/sse.md b/docs/api/client-contract/sse.md
+index e1c852332..5c4f7dff7 100644
+--- a/docs/api/client-contract/sse.md
++++ b/docs/api/client-contract/sse.md
+@@ -126,6 +126,7 @@ Hub-side delivery (`SSEManager.shouldSend`):
+ | `toast` | every **visible** connection in the namespace, regardless of filter (no `id`, never replayed) |
+ | `message-received`, `scheduled-matured` | `all=true` connections + matching `sessionId` connections |
+ | `session-added` / `session-updated` / `session-removed` / `session-ended` / `messages-invalidated` / `messages-consumed` / `messages-indeterminate` / `messages-requeued` / `message-cancelled` | `all=true` connections + matching `sessionId` connections |
++| `session-folders-updated` | `all=true` connections in the event namespace |
+ | `machine-updated`, `machine-agy-models-updated` | `all=true` connections + matching `machineId` connections |
+ 
+ **The global connection must also handle the message-stream events** (`message-received`, `messages-consumed`, `messages-indeterminate`, `messages-requeued`, `message-cancelled`, `scheduled-matured`): while a session connection is down (reconnect gap) or the session isn't open, the global pipe is the only one alive, and it must still keep queued/optimistic bookkeeping correct — mark local messages consumed, remove cancelled rows, and refresh session-list scheduled counts. The session-scoped connection additionally ingests `message-received` into the message window.
+@@ -134,7 +135,7 @@ The two connections have **no ordering relationship with each other** — the sa
+ 
+ ---
+ 
+-## SyncEvent union (16 types)
++## SyncEvent union
+ 
+ Schema: `SyncEventSchema` in `shared/src/schemas.ts` (discriminated on `type`). All events except `connection-changed` carry `namespace?: string`. Ignore unknown event types.
+ 
+@@ -143,6 +144,7 @@ Schema: `SyncEventSchema` in `shared/src/schemas.ts` (discriminated on `type`).
+ | `session-added` | `sessionId`, `data?: unknown` | Handle exactly like `session-updated` (the reference client shares the branch): a full `Session` upserts; anything else falls back to refetching the session list. |
+ | `session-updated` | `sessionId`, `data?: Session \| SessionPatch` | See [Versioned patch algorithm](#versioned-patch-algorithm). |
+ | `session-removed` | `sessionId` | Drop the session from the list, drop its detail cache, clear its message window. |
++| `session-folders-updated` | — | Refetch `GET /api/session-folders` after a folder or assignment changes. |
+ | `message-received` | `sessionId`, `message: DecryptedMessage` | Ingest into the message window; advance the tail cursor (see [pagination](./pagination.md)). Also fired for the caller's own send (the localId echo). |
+ | `messages-invalidated` | `sessionId`; rewind may also include `reason: 'rewind'` and `truncateFromLocalId` | Message history changed **structurally** (rewind, fork, import, clear). For a rewind, retain only the known prefix through the client boundary before tail-syncing; for every other invalidation, discard the whole window and run a fresh tail sync. Global scope: refetch the session list. |
+ | `scheduled-matured` | `sessionId` | A scheduled message became due and was handed to the agent. Refetch list/queue indicators. |
+diff --git a/docs/guide/session-list.md b/docs/guide/session-list.md
+index 8a4eceba0..4d23cf93e 100644
+--- a/docs/guide/session-list.md
++++ b/docs/guide/session-list.md
+@@ -63,6 +63,18 @@ A session counts as working while it has open tool calls, even between agent
+ rounds. Autonomous loops that keep running tools therefore show as working
+ rather than as waiting for input.
+ 
++## Custom folders
++
++Use **New folder** in the session list to create a folder. Open it and choose
++**New subfolder** to organize sessions further. From a session’s row menu,
++choose **Move to folder** and select a destination. Choose **No folder** to
++return the session to its regular list grouping.
++
++The Hub saves folders and assignments for the current namespace. Search can
++find sessions across folders. Filed sessions still appear in the root
++**Pinned sessions** and **In progress** sections when they qualify. Deleting
++a folder removes its subfolders and returns their sessions to the regular list.
++
+ ## Text search
+ 
+ The search field has two scopes. The icon at its left edge switches between
+diff --git a/e2e/auth-network-recovery.spec.ts b/e2e/auth-network-recovery.spec.ts
+index 564f14d8a..36972abc0 100644
+--- a/e2e/auth-network-recovery.spec.ts
++++ b/e2e/auth-network-recovery.spec.ts
+@@ -54,6 +54,7 @@ test.beforeAll(async () => {
+             res.on('close', () => { clearInterval(timer); streams.delete(res) }); return
+         }
+         if (path === '/api/sessions') { json({ sessions }); return }
++        if (path === '/api/session-folders') { json({ folders: [], assignments: {} }); return }
+         if (path === '/api/features') { json({ githubPrAwareness: { enabled: false, source: 'default' } }); return }
+         if (path === '/api/machines') {
+             json({ machines: skewedRunner ? [{
+diff --git a/hub/src/store/index.ts b/hub/src/store/index.ts
+index 705057028..d8e896e97 100644
+--- a/hub/src/store/index.ts
++++ b/hub/src/store/index.ts
+@@ -11,6 +11,7 @@ import type { StoredMessage } from './types'
+ import { PushStore } from './pushStore'
+ import { FcmStore } from './fcmStore'
+ import { ScratchlistStore } from './scratchlistStore'
++import { SESSION_FOLDERS_TABLES_SQL, SessionFolderStore } from './sessionFolderStore'
+ import { SessionJobsStore } from './sessionJobsStore'
+ import { SessionRedirectStore } from './sessionRedirectStore'
+ import { SessionStore } from './sessionStore'
+@@ -60,7 +61,7 @@ export {
+     WorkGraphValidationError
+ } from './workGraph'
+ 
+-const SCHEMA_VERSION: number = 36
++const SCHEMA_VERSION: number = 37
+ const REQUIRED_TABLES = [
+     'sessions',
+     'machines',
+@@ -80,7 +81,9 @@ const REQUIRED_TABLES = [
+     'event_links',
+     'session_turns',
+     'session_redirects',
+-    'passkey_credentials'
++    'passkey_credentials',
++    'session_folders',
++    'session_folder_assignments'
+ ] as const
+ 
+ export class Store {
+@@ -96,6 +99,7 @@ export class Store {
+     readonly push: PushStore
+     readonly fcm: FcmStore
+     readonly scratchlist: ScratchlistStore
++    readonly sessionFolders: SessionFolderStore
+     readonly sessionJobs: SessionJobsStore
+     readonly sessionRedirects: SessionRedirectStore
+     readonly usage: UsageStore
+@@ -154,6 +158,7 @@ export class Store {
+         this.push = new PushStore(this.db)
+         this.fcm = new FcmStore(this.db)
+         this.scratchlist = new ScratchlistStore(this.db)
++        this.sessionFolders = new SessionFolderStore(this.db)
+         this.sessionJobs = new SessionJobsStore(this.db)
+         this.sessionRedirects = new SessionRedirectStore(this.db)
+         this.usage = new UsageStore(this.db)
+@@ -405,7 +410,7 @@ export class Store {
+             // upstream read-state at v29→v30;
+             // #1404 session_jobs at v31→v32 (after upstream FTS v30→v31); run_id fence at v32→v33;
+             // #1489 wake-on-terminal at v33→v34; session_redirects at v34→v35;
+-            // passkey_credentials at v35→v36
++            // passkey_credentials at v35→v36; session folders at v36→v37
+             // (jobs remapped again after upstream took 28/29/30).
+             21: () => this.migrateFromV21ToV22(),
+             22: () => this.migrateFromV22ToV23(),
+@@ -422,6 +427,7 @@ export class Store {
+             33: () => this.migrateFromV33ToV34(),
+             34: () => this.migrateFromV34ToV35(),
+             35: () => this.migrateFromV35ToV36(),
++            36: () => this.migrateFromV36ToV37(),
+         }
+ 
+         if (currentVersion !== 0 && (currentVersion > SCHEMA_VERSION || !stepMigrations[currentVersion])) {
+@@ -452,6 +458,7 @@ export class Store {
+             this.migrateFromV33ToV34()
+             this.migrateFromV34ToV35()
+             this.migrateFromV35ToV36()
++            this.migrateFromV36ToV37()
+         } else {
+             for (let v = currentVersion; v < SCHEMA_VERSION; v++) {
+                 const step = stepMigrations[v]
+@@ -636,6 +643,7 @@ export class Store {
+                 ON session_redirects(namespace, new_id);
+ 
+             ${PASSKEY_CREDENTIALS_TABLE_SQL}
++            ${SESSION_FOLDERS_TABLES_SQL}
+ 
+             CREATE TABLE IF NOT EXISTS usage_events (
+                 session_id TEXT NOT NULL,
+@@ -1390,6 +1398,10 @@ export class Store {
+         this.db.exec(PASSKEY_CREDENTIALS_TABLE_SQL)
+     }
+ 
++    private migrateFromV36ToV37(): void {
++        this.db.exec(SESSION_FOLDERS_TABLES_SQL)
++    }
++
+     private ensureUsageScanParserVersion(): void {
+         const columns = this.db.prepare('PRAGMA table_info(usage_scan_state)').all() as Array<{ name: string }>
+         if (columns.length === 0) return
+diff --git a/hub/src/store/migration-v13.test.ts b/hub/src/store/migration-v13.test.ts
+index 7c9c50077..91a549a4b 100644
+--- a/hub/src/store/migration-v13.test.ts
++++ b/hub/src/store/migration-v13.test.ts
+@@ -10,7 +10,7 @@ describe('Store V12/V13→V14 schema reconciliation', () => {
+         const store = new Store(':memory:')
+         expect(tableExists(store, 'message_epochs')).toBe(true)
+         expect(tableExists(store, 'session_scratchlist')).toBe(true)
+-        expect(getUserVersion(store)).toBe(36)
++        expect(getUserVersion(store)).toBe(37)
+         store.close()
+     })
+ 
+@@ -34,7 +34,7 @@ describe('Store V12/V13→V14 schema reconciliation', () => {
+             store = new Store(dbPath)
+             expect(tableExists(store, 'message_epochs')).toBe(true)
+             expect(tableExists(store, 'session_scratchlist')).toBe(true)
+-            expect(getUserVersion(store)).toBe(36)
++            expect(getUserVersion(store)).toBe(37)
+             expect(store.messages.getMessageEpoch('session-1')).toBe(0)
+             expect(store.messages.getMessages('session-1')).toHaveLength(1)
+         } finally {
+@@ -72,7 +72,7 @@ describe('Store V12/V13→V14 schema reconciliation', () => {
+             store = new Store(dbPath)
+             expect(tableExists(store, 'message_epochs')).toBe(true)
+             expect(tableExists(store, 'session_scratchlist')).toBe(true)
+-            expect(getUserVersion(store)).toBe(36)
++            expect(getUserVersion(store)).toBe(37)
+             expect(store.messages.getMessages('session-1')).toHaveLength(1)
+         } finally {
+             store?.close()
+diff --git a/hub/src/store/migration-v15.test.ts b/hub/src/store/migration-v15.test.ts
+index 03f5bb420..ee47cc1d0 100644
+--- a/hub/src/store/migration-v15.test.ts
++++ b/hub/src/store/migration-v15.test.ts
+@@ -19,7 +19,7 @@ describe('Store V14→V15 migration: scratchlist attachments column', () => {
+         expect(cols).toContain('attachments')
+         expect(getColumns(store, 'usage_events')).toContain('last_input_tokens')
+         expect(getColumns(store, 'usage_scan_state')).toContain('last_seq')
+-        expect(getUserVersion(store)).toBe(36)
++        expect(getUserVersion(store)).toBe(37)
+         store.close()
+     })
+ 
+@@ -40,7 +40,7 @@ describe('Store V14→V15 migration: scratchlist attachments column', () => {
+             expect(cols).toContain('attachments')
+             expect(getColumns(store, 'usage_events')).toContain('last_input_tokens')
+             expect(getColumns(store, 'usage_scan_state')).toContain('last_seq')
+-            expect(getUserVersion(store)).toBe(36)
++            expect(getUserVersion(store)).toBe(37)
+         } finally {
+             store?.close()
+             rmSync(dir, { recursive: true, force: true })
+@@ -60,7 +60,7 @@ describe('Store V14→V15 migration: scratchlist attachments column', () => {
+             store2 = new Store(dbPath)
+             const cols2 = getColumns(store2, 'session_scratchlist')
+             expect(cols2).toEqual(cols1)
+-            expect(getUserVersion(store2)).toBe(36)
++            expect(getUserVersion(store2)).toBe(37)
+         } finally {
+             store2?.close()
+             store1?.close()
+diff --git a/hub/src/store/migration-v18.test.ts b/hub/src/store/migration-v18.test.ts
+index 1f177670e..88db7143e 100644
+--- a/hub/src/store/migration-v18.test.ts
++++ b/hub/src/store/migration-v18.test.ts
+@@ -38,7 +38,7 @@ describe('Store V18->V19 migration: usage scan state', () => {
+             const usageRows = internalDb.prepare('SELECT COUNT(*) AS count FROM usage_events').get() as { count: number }
+ 
+             expect(table?.name).toBe('usage_scan_state')
+-            expect(version.user_version).toBe(36)
++            expect(version.user_version).toBe(37)
+             expect(usageRows.count).toBe(0)
+         } finally {
+             store?.close()
+diff --git a/hub/src/store/migration-v19.test.ts b/hub/src/store/migration-v19.test.ts
+index 98967c802..aeecabd1e 100644
+--- a/hub/src/store/migration-v19.test.ts
++++ b/hub/src/store/migration-v19.test.ts
+@@ -37,7 +37,7 @@ describe('Store V19->current migration: usage re-index', () => {
+             const scanRows = internalDb.prepare('SELECT COUNT(*) AS count FROM usage_scan_state').get() as { count: number }
+             const usageRows = internalDb.prepare('SELECT COUNT(*) AS count FROM usage_events').get() as { count: number }
+ 
+-            expect(version.user_version).toBe(36)
++            expect(version.user_version).toBe(37)
+             expect(scanRows.count).toBe(0)
+             expect(usageRows.count).toBe(0)
+         } finally {
+diff --git a/hub/src/store/migration-v20.test.ts b/hub/src/store/migration-v20.test.ts
+index 510c049df..9fdbc9a8e 100644
+--- a/hub/src/store/migration-v20.test.ts
++++ b/hub/src/store/migration-v20.test.ts
+@@ -43,7 +43,7 @@ describe('Store V20->V21 migration: usage semantics re-index', () => {
+             store = new Store(dbPath)
+             const internalDb = (store as unknown as { db: Database }).db
+             const count = (table: string): number => (internalDb.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count
+-            expect((internalDb.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(36)
++            expect((internalDb.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(37)
+             expect(count('usage_events')).toBe(0)
+             expect(count('usage_scan_state')).toBe(0)
+             expect(store.messages.getMessages(session.id)).toHaveLength(1)
+diff --git a/hub/src/store/migration-v23.test.ts b/hub/src/store/migration-v23.test.ts
+index 79319ec55..8079da9ae 100644
+--- a/hub/src/store/migration-v23.test.ts
++++ b/hub/src/store/migration-v23.test.ts
+@@ -45,7 +45,7 @@ describe('schema migrations through v33', () => {
+             expect(links?.name).toBe('event_links')
+             const columns = internalDb.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>
+             expect(columns.map((column) => column.name)).toContain('delivery_state')
+-            expect(version.user_version).toBe(36)
++            expect(version.user_version).toBe(37)
+         } finally {
+             migrated.close()
+         }
+@@ -78,7 +78,7 @@ describe('schema migrations through v33', () => {
+             expect(migrated.messages.searchContent('backfill this', 'default')[0]?.sessionId).toBe(session.id)
+             const internalDb = (migrated as unknown as { db: Database }).db
+             const version = internalDb.prepare('PRAGMA user_version').get() as { user_version: number }
+-            expect(version.user_version).toBe(36)
++            expect(version.user_version).toBe(37)
+         } finally {
+             migrated.close()
+         }
+@@ -114,7 +114,7 @@ describe('schema migrations through v33', () => {
+             ).get() as { name: string } | null
+             const version = internalDb.prepare('PRAGMA user_version').get() as { user_version: number }
+             expect(lookup?.name).toBe('message_content_search_lookup')
+-            expect(version.user_version).toBe(36)
++            expect(version.user_version).toBe(37)
+         } finally {
+             migrated.close()
+         }
+@@ -177,7 +177,7 @@ describe('schema migrations through v33', () => {
+             expect(target?.target_message_id).toBe(message.id)
+             expect(indexed?.searchable_text.length).toBeLessThanOrEqual(MAX_INDEXED_MESSAGE_CHARACTERS)
+             expect(indexed?.searchable_text).toContain('tail-migration-needle')
+-            expect(version.user_version).toBe(36)
++            expect(version.user_version).toBe(37)
+         } finally {
+             migrated.close()
+         }
+@@ -239,7 +239,7 @@ describe('schema migrations through v33', () => {
+             expect(indexed?.searchable_text).toContain('v30-middle-needle')
+             expect(metadata?.is_truncated).toBe(1)
+             expect(metadata?.short_index_truncated).toBe(1)
+-            expect(version.user_version).toBe(36)
++            expect(version.user_version).toBe(37)
+         } finally {
+             migrated.close()
+         }
+diff --git a/hub/src/store/migration-v24.test.ts b/hub/src/store/migration-v24.test.ts
+index f954e9212..909f06a5f 100644
+--- a/hub/src/store/migration-v24.test.ts
++++ b/hub/src/store/migration-v24.test.ts
+@@ -41,7 +41,7 @@ describe('schema migrations through v33', () => {
+             expect(columns.some((col) => col.name === 'push_key')).toBe(true)
+             const messageColumns = messageColumnsStatement.all() as Array<{ name: string }>
+             expect(messageColumns.some((col) => col.name === 'delivery_state')).toBe(true)
+-            expect(version.user_version).toBe(36)
++            expect(version.user_version).toBe(37)
+ 
+             // Existing Android rows survive with a NULL push key.
+             const devices = migrated.fcm.getDevicesByNamespace('default')
+@@ -91,7 +91,7 @@ describe('schema migrations through v33', () => {
+             const version = versionStatement.get() as { user_version: number }
+             const indexes = indexesStatement.all() as Array<{ name: string }>
+             expect(columns.some((col) => col.name === 'delivery_state')).toBe(true)
+-            expect(version.user_version).toBe(36)
++            expect(version.user_version).toBe(37)
+             expect(indexes.map((index) => index.name)).toEqual(expect.arrayContaining([
+                 'idx_messages_immediate_queued',
+                 'idx_messages_future_scheduled_queued'
+diff --git a/hub/src/store/migration-v25.test.ts b/hub/src/store/migration-v25.test.ts
+index b96778d70..02e9c9087 100644
+--- a/hub/src/store/migration-v25.test.ts
++++ b/hub/src/store/migration-v25.test.ts
+@@ -41,7 +41,7 @@ describe('schema migration v25 to v26', () => {
+             ORDER BY seq ASC
+         `).all('session-id') as Array<{ detail: string }>
+ 
+-        expect(version.user_version).toBe(36)
++        expect(version.user_version).toBe(37)
+         expect(plan.some((row) => row.detail.includes('idx_messages_immediate_queued'))).toBe(true)
+         migrated.close()
+     })
+diff --git a/hub/src/store/migration-v26.test.ts b/hub/src/store/migration-v26.test.ts
+index 20f0b2c85..ed60b8bd5 100644
+--- a/hub/src/store/migration-v26.test.ts
++++ b/hub/src/store/migration-v26.test.ts
+@@ -59,7 +59,7 @@ describe('schema migration v26 to v27', () => {
+         const minPlan = minPlanStatement.all('a', 'b', 123) as Array<{ detail: string }>
+         minPlanStatement.finalize()
+ 
+-        expect(version.user_version).toBe(36)
++        expect(version.user_version).toBe(37)
+         expect(countPlan.some((row) => row.detail.includes('idx_messages_future_scheduled_queued'))).toBe(true)
+         expect(minPlan.some((row) => row.detail.includes('idx_messages_future_scheduled_queued'))).toBe(true)
+         migrated.close()
+diff --git a/hub/src/store/migration-v28.test.ts b/hub/src/store/migration-v28.test.ts
+index e792d1dca..75241c4ba 100644
+--- a/hub/src/store/migration-v28.test.ts
++++ b/hub/src/store/migration-v28.test.ts
+@@ -32,7 +32,7 @@ describe('schema migration v27 to v28', () => {
+         const migrated = new Store(dbPath)
+         const internalDb = (migrated as unknown as { db: Database }).db
+         const version = internalDb.prepare('PRAGMA user_version').get() as { user_version: number }
+-        expect(version.user_version).toBe(36)
++        expect(version.user_version).toBe(37)
+ 
+         expect(migrated.turns.open(session.id, 'default', 1_000, 'agent')).toBe(true)
+         expect(migrated.turns.open(session.id, 'default', 2_000, 'agent')).toBe(false)
+diff --git a/hub/src/store/migration-v30.test.ts b/hub/src/store/migration-v30.test.ts
+index 952442cb0..2e35d9368 100644
+--- a/hub/src/store/migration-v30.test.ts
++++ b/hub/src/store/migration-v30.test.ts
+@@ -52,7 +52,7 @@ it('creates and backfills search tables when upgrading a base v30 database', ()
+         try {
+             const internalDb = (migrated as unknown as { db: Database }).db
+             const version = internalDb.prepare('PRAGMA user_version').get() as { user_version: number }
+-            expect(version.user_version).toBe(36)
++            expect(version.user_version).toBe(37)
+             expect(migrated.messages.searchContent('searchable', 'default')[0]?.sessionId).toBe(session.id)
+         } finally { migrated.close() }
+     } finally { Bun.gc(true); rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }) }
+@@ -84,7 +84,7 @@ it('upgrades a genuine v26 schema without read-state or search table shortcuts',
+         try {
+             const internalDb = (migrated as unknown as { db: Database }).db
+             const version = internalDb.prepare('PRAGMA user_version').get() as { user_version: number }
+-            expect(version.user_version).toBe(36)
++            expect(version.user_version).toBe(37)
+             expect(migrated.sessions.getSession(session.id)?.readState).toEqual({ readRevision: 0, manualUnread: false, version: 0 })
+             migrated.messages.addMessage(session.id, {
+                 role: 'user', content: { type: 'text', text: 'genuine v26 searchable text' }
+diff --git a/hub/src/store/migration-v36.test.ts b/hub/src/store/migration-v36.test.ts
+index 2008931ec..cdafe8107 100644
+--- a/hub/src/store/migration-v36.test.ts
++++ b/hub/src/store/migration-v36.test.ts
+@@ -22,7 +22,7 @@ it('adds passkey_credentials when upgrading a v35 database', () => {
+                 ['[Store] Database schema migration complete (v35 to v36).']
+             ])
+             const internalDb = (migrated as unknown as { db: Database }).db
+-            expect((internalDb.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(36)
++            expect((internalDb.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(37)
+             migrated.passkeys.add({
+                 id: 'cred', namespace: 'default', rpId: 'localhost', publicKey: new Uint8Array([1, 2, 3]),
+                 counter: 0, transports: ['internal'], tokenFingerprint: 'fp', name: null, createdAt: 1
+diff --git a/hub/src/store/sessionFolderStore.ts b/hub/src/store/sessionFolderStore.ts
+new file mode 100644
+index 000000000..817ecd2d7
+--- /dev/null
++++ b/hub/src/store/sessionFolderStore.ts
+@@ -0,0 +1,113 @@
++import type { Database } from 'bun:sqlite'
++import { randomUUID } from 'node:crypto'
++import type { CreateSessionFolderRequest, SessionFolder, SessionFoldersResponse } from '@hapi/protocol/apiTypes'
++
++export const SESSION_FOLDERS_TABLES_SQL = `
++    CREATE TABLE IF NOT EXISTS session_folders (
++        namespace TEXT NOT NULL,
++        id TEXT NOT NULL,
++        name TEXT NOT NULL,
++        parent_id TEXT,
++        PRIMARY KEY (namespace, id),
++        FOREIGN KEY (namespace, parent_id) REFERENCES session_folders(namespace, id)
++    );
++    CREATE INDEX IF NOT EXISTS idx_session_folders_parent ON session_folders(namespace, parent_id);
++
++    CREATE TABLE IF NOT EXISTS session_folder_assignments (
++        session_id TEXT PRIMARY KEY,
++        namespace TEXT NOT NULL,
++        folder_id TEXT NOT NULL,
++        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
++        FOREIGN KEY (namespace, folder_id) REFERENCES session_folders(namespace, id) ON DELETE CASCADE
++    );
++    CREATE INDEX IF NOT EXISTS idx_session_folder_assignments_folder
++        ON session_folder_assignments(namespace, folder_id);
++`
++
++export class SessionFolderStore {
++    constructor(private readonly db: Database) {}
++
++    list(namespace: string): SessionFoldersResponse {
++        return this.db.transaction(() => {
++            const folders = this.db.query<SessionFolder, [string]>(`
++                SELECT id, name, parent_id AS parentId
++                FROM session_folders
++                WHERE namespace = ?
++                ORDER BY name COLLATE NOCASE, id
++            `).all(namespace)
++            const assignments = this.db.query<{ sessionId: string; folderId: string }, [string]>(`
++                SELECT session_id AS sessionId, folder_id AS folderId
++                FROM session_folder_assignments
++                WHERE namespace = ?
++            `).all(namespace)
++            return {
++                folders,
++                assignments: Object.fromEntries(assignments.map(({ sessionId, folderId }) => [sessionId, folderId]))
++            }
++        })()
++    }
++
++    create(namespace: string, { name, parentId }: CreateSessionFolderRequest):
++        { status: 'created'; folder: SessionFolder } | { status: 'duplicate-name' | 'parent-not-found' } {
++        return this.db.transaction(() => {
++            const duplicate = this.db.query(`
++                SELECT 1 FROM session_folders
++                WHERE namespace = $namespace AND parent_id IS $parentId AND name = $name
++            `).get({ namespace, name, parentId })
++            if (duplicate) return { status: 'duplicate-name' } as const
++
++            const id = randomUUID()
++            const result = this.db.query(`
++                INSERT INTO session_folders (namespace, id, name, parent_id)
++                SELECT $namespace, $id, $name, $parentId
++                WHERE $parentId IS NULL OR EXISTS (
++                    SELECT 1 FROM session_folders WHERE namespace = $namespace AND id = $parentId
++                )
++            `).run({ namespace, id, name, parentId })
++            return result.changes
++                ? { status: 'created', folder: { id, name, parentId } } as const
++                : { status: 'parent-not-found' } as const
++        }).immediate()
++    }
++
++    delete(namespace: string, id: string): boolean {
++        // Calculate descendants before deleting so deep trees do not use recursive FK triggers.
++        return this.db.query(`
++            WITH RECURSIVE subtree(id) AS (
++                SELECT id FROM session_folders WHERE namespace = $namespace AND id = $id
++                UNION ALL
++                SELECT folder.id FROM session_folders AS folder
++                JOIN subtree ON folder.parent_id = subtree.id
++                WHERE folder.namespace = $namespace
++            )
++            DELETE FROM session_folders WHERE namespace = $namespace AND id IN (SELECT id FROM subtree)
++        `).run({ namespace, id }).changes > 0
++    }
++
++    copyAssignmentForMerge(namespace: string, sourceId: string, targetId: string): void {
++        this.db.query(`
++            INSERT INTO session_folder_assignments (session_id, namespace, folder_id)
++            SELECT $targetId, namespace, folder_id
++            FROM session_folder_assignments
++            WHERE namespace = $namespace AND session_id = $sourceId
++              AND EXISTS (SELECT 1 FROM sessions WHERE id = $targetId AND namespace = $namespace)
++            ON CONFLICT (session_id) DO NOTHING
++        `).run({ namespace, sourceId, targetId })
++    }
++
++    setAssignment(namespace: string, sessionId: string, folderId: string | null): boolean {
++        if (folderId === null) {
++            this.db.query('DELETE FROM session_folder_assignments WHERE namespace = ? AND session_id = ?')
++                .run(namespace, sessionId)
++            return true
++        }
++
++        return this.db.query(`
++            INSERT INTO session_folder_assignments (session_id, namespace, folder_id)
++            SELECT $sessionId, $namespace, $folderId
++            WHERE EXISTS (SELECT 1 FROM sessions WHERE id = $sessionId AND namespace = $namespace)
++              AND EXISTS (SELECT 1 FROM session_folders WHERE namespace = $namespace AND id = $folderId)
++            ON CONFLICT (session_id) DO UPDATE SET folder_id = excluded.folder_id
++        `).run({ namespace, sessionId, folderId }).changes > 0
++    }
++}
+diff --git a/hub/src/sync/sessionCache.ts b/hub/src/sync/sessionCache.ts
+index af8635dbd..f36e04d56 100644
+--- a/hub/src/sync/sessionCache.ts
++++ b/hub/src/sync/sessionCache.ts
+@@ -2387,13 +2387,15 @@ export class SessionCache {
+         if (options.deleteOldSession) {
+             // Deleting the row cascades to its turns; they're the new row's history now.
+             this.store.turns.transferSession(oldSessionId, newSessionId)
+-            // Write the redirect before the row disappears so a concurrent
+-            // lookup of the old id never observes "neither row nor redirect".
+-            this.store.sessionRedirects.record(oldSessionId, newSessionId, namespace)
+-            const deleted = this.store.sessions.deleteSession(oldSessionId, namespace)
+-            if (!deleted) {
+-                throw new Error('Failed to delete old session during merge')
+-            }
++            this.store.runInTransaction(() => {
++                this.store.sessionFolders.copyAssignmentForMerge(namespace, oldSessionId, newSessionId)
++                // Write the redirect before deleting the old row so lookups always have one or the other.
++                this.store.sessionRedirects.record(oldSessionId, newSessionId, namespace)
++                if (!this.store.sessions.deleteSession(oldSessionId, namespace)) {
++                    throw new Error('Failed to delete old session during merge')
++                }
++            })
++            this.publisher.emit({ type: 'session-folders-updated', namespace })
+ 
+             const existed = this.sessions.delete(oldSessionId)
+             if (existed) {
+diff --git a/hub/src/web/routes/sessionFolders.test.ts b/hub/src/web/routes/sessionFolders.test.ts
+new file mode 100644
+index 000000000..90dff650f
+--- /dev/null
++++ b/hub/src/web/routes/sessionFolders.test.ts
+@@ -0,0 +1,138 @@
++import { expect, it } from 'bun:test'
++import type { CreateSessionFolderResponse, SessionFoldersResponse, SyncEvent } from '@hapi/protocol'
++import { Hono } from 'hono'
++import { Database } from 'bun:sqlite'
++import { mkdtempSync, rmSync } from 'node:fs'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import { RpcRegistry } from '../../socket/rpcRegistry'
++import type { SSEManager } from '../../sse/sseManager'
++import { Store } from '../../store'
++import type { EventPublisher } from '../../sync/eventPublisher'
++import { SessionCache } from '../../sync/sessionCache'
++import { SyncEngine } from '../../sync/syncEngine'
++import type { WebAppEnv } from '../middleware/auth'
++import { createSessionFoldersRoutes } from './sessionFolders'
++
++it('persists nested folders and keeps their chats when removing a folder from an upgraded hub', async () => {
++    const dir = mkdtempSync(join(tmpdir(), 'hapi-session-folders-'))
++    const path = join(dir, 'hub.db')
++    const initial = new Store(path)
++    const alice = initial.sessions.getOrCreateSession('alice-chat', { path: '/chat', host: 'host' }, null, 'alice')
++    const bob = initial.sessions.getOrCreateSession('bob-chat', { path: '/chat', host: 'host' }, null, 'bob')
++    const message = initial.messages.addMessage(alice.id, { role: 'user', content: 'existing chat' }, 'test')
++    initial.close()
++    const legacy = new Database(path)
++    legacy.exec('DROP TABLE session_folder_assignments; DROP TABLE session_folders; PRAGMA user_version = 36;')
++    legacy.close()
++    let store = new Store(path)
++    const events: SyncEvent[] = []
++    const sse = {
++        broadcast: (event: SyncEvent) => {
++            if (event.type === 'session-folders-updated') events.push(event)
++        }
++    } as unknown as SSEManager
++    let engine = new SyncEngine(store, {} as never, new RpcRegistry(), sse)
++
++    const makeApp = () => {
++        const app = new Hono<WebAppEnv>()
++        app.use('*', async (c, next) => {
++            c.set('namespace', c.req.header('test-namespace') ?? 'alice')
++            await next()
++        })
++        return app.route('/api', createSessionFoldersRoutes(store.sessionFolders, () => engine, () => sse))
++    }
++    let app = makeApp()
++    const request = (path: string, method = 'GET', body?: unknown, namespace = 'alice') =>
++        app.request(`/api${path}`, {
++            method,
++            headers: { 'content-type': 'application/json', 'test-namespace': namespace },
++            body: JSON.stringify(body)
++        })
++    const get = async (namespace = 'alice') => {
++        const response = await request('/session-folders', 'GET', undefined, namespace)
++        expect(response.status).toBe(200)
++        return await response.json() as SessionFoldersResponse
++    }
++    const create = async (name: string, parentId: string | null) => {
++        const response = await request('/session-folders', 'POST', { name, parentId })
++        expect(response.status).toBe(201)
++        return (await response.json() as CreateSessionFolderResponse).folder
++    }
++    const assign = (sessionId: string, folderId: string | null, namespace = 'alice') =>
++        request(`/sessions/${sessionId}/folder`, 'PUT', { folderId }, namespace)
++
++    try {
++        expect(await get()).toEqual({ folders: [], assignments: {} })
++        expect(store.sessions.getSession(alice.id)).not.toBeNull()
++        expect((await request('/session-folders', 'POST', { name: ' ', parentId: null })).status).toBe(400)
++        const parent = await create(' Work ', null)
++        const child = await create('Current', parent.id)
++        const other = await create('Personal', null)
++        expect(parent.name).toBe('Work')
++        expect((await request('/session-folders', 'POST', { name: 'Work', parentId: null })).status).toBe(409)
++        expect((await request('/session-folders', 'POST', { name: 'Current', parentId: parent.id })).status).toBe(409)
++        expect((await request('/session-folders', 'POST', { name: 'Foreign', parentId: parent.id }, 'bob')).status).toBe(404)
++        expect((await request(`/session-folders/${parent.id}`, 'DELETE', undefined, 'bob')).status).toBe(404)
++        expect((await assign(alice.id, parent.id, 'bob')).status).toBe(403)
++        expect((await assign(bob.id, parent.id, 'bob')).status).toBe(404)
++        expect(await get('bob')).toEqual({ folders: [], assignments: {} })
++
++        expect((await assign(alice.id, parent.id)).status).toBe(200)
++        expect((await assign(alice.id, child.id)).status).toBe(200)
++        expect((await assign(alice.id, null)).status).toBe(200)
++        expect((await get()).assignments).toEqual({})
++        expect((await assign(alice.id, child.id)).status).toBe(200)
++
++        engine.stop()
++        store.close()
++        store = new Store(path)
++        engine = new SyncEngine(store, {} as never, new RpcRegistry(), sse)
++        app = makeApp()
++        expect(await get()).toEqual({
++            folders: [child, other, parent],
++            assignments: { [alice.id]: child.id }
++        })
++        expect((await request(`/session-folders/${parent.id}`, 'DELETE')).status).toBe(200)
++        expect(await get()).toEqual({ folders: [other], assignments: {} })
++        expect(store.sessions.getSession(alice.id)).not.toBeNull()
++        expect(store.messages.getMessageById(alice.id, message.id)?.content).toEqual(message.content)
++        expect(events).toEqual(Array.from({ length: 8 }, () => ({ type: 'session-folders-updated', namespace: 'alice' })))
++        await create('Personal', other.id)
++        expect((await request('/session-folders', 'POST', { name: 'Personal', parentId: null }, 'bob')).status).toBe(201)
++    } finally {
++        engine.stop()
++        store.close()
++        Bun.gc(true)
++        rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
++    }
++})
++
++it.each([false, true])('preserves placement when merging sessions (target filed: %s)', async (targetFiled) => {
++    const store = new Store(':memory:')
++    const events: SyncEvent[] = []
++    const cache = new SessionCache(store, { emit: (event: SyncEvent) => events.push(event) } as unknown as EventPublisher)
++    try {
++        const source = cache.getOrCreateSession('source', { path: '/chat', host: 'host' }, null, 'alice')
++        const target = cache.getOrCreateSession('target', { path: '/chat', host: 'host' }, null, 'alice')
++        const sourceResult = store.sessionFolders.create('alice', { name: 'Source', parentId: null })
++        const targetResult = store.sessionFolders.create('alice', { name: 'Target', parentId: null })
++        if (sourceResult.status !== 'created' || targetResult.status !== 'created') throw new Error('Failed to create folders')
++        const sourceFolder = sourceResult.folder
++        const targetFolder = targetResult.folder
++        expect(store.sessionFolders.setAssignment('alice', source.id, sourceFolder.id)).toBe(true)
++        if (targetFiled) {
++            expect(store.sessionFolders.setAssignment('alice', target.id, targetFolder.id)).toBe(true)
++        }
++
++        await cache.mergeSessions(source.id, target.id, 'alice')
++
++        expect(store.sessions.getSession(source.id)).toBeNull()
++        expect(store.sessionFolders.list('alice').assignments).toEqual({
++            [target.id]: targetFiled ? targetFolder.id : sourceFolder.id
++        })
++        expect(events).toContainEqual({ type: 'session-folders-updated', namespace: 'alice' })
++    } finally {
++        store.close()
++    }
++})
+diff --git a/hub/src/web/routes/sessionFolders.ts b/hub/src/web/routes/sessionFolders.ts
+new file mode 100644
+index 000000000..ff84c2e8f
+--- /dev/null
++++ b/hub/src/web/routes/sessionFolders.ts
+@@ -0,0 +1,66 @@
++import {
++    CreateSessionFolderRequestSchema,
++    SetSessionFolderRequestSchema
++} from '@hapi/protocol/apiTypes'
++import { Hono } from 'hono'
++import type { SSEManager } from '../../sse/sseManager'
++import type { SessionFolderStore } from '../../store/sessionFolderStore'
++import type { SyncEngine } from '../../sync/syncEngine'
++import type { WebAppEnv } from '../middleware/auth'
++import { requireSessionFromParam, requireSyncEngine } from './guards'
++
++export function createSessionFoldersRoutes(
++    folders: SessionFolderStore,
++    getSyncEngine: () => SyncEngine | null,
++    getSseManager: () => SSEManager | null
++): Hono<WebAppEnv> {
++    const app = new Hono<WebAppEnv>()
++    const notify = (namespace: string) => getSseManager()?.broadcast({ type: 'session-folders-updated', namespace })
++
++    app.get('/session-folders', (c) => c.json(folders.list(c.get('namespace'))))
++
++    app.post('/session-folders', async (c) => {
++        const parsed = CreateSessionFolderRequestSchema.safeParse(await c.req.json().catch(() => null))
++        if (!parsed.success) return c.json({ error: 'Invalid folder name or parent' }, 400)
++
++        const namespace = c.get('namespace')
++        const result = folders.create(namespace, parsed.data)
++        if (result.status !== 'created') {
++            return result.status === 'duplicate-name'
++                ? c.json({ error: 'A folder with that name already exists here.' }, 409)
++                : c.json({ error: 'Parent folder not found' }, 404)
++        }
++
++        notify(namespace)
++        return c.json({ folder: result.folder }, 201)
++    })
++
++    app.delete('/session-folders/:id', (c) => {
++        const namespace = c.get('namespace')
++        if (!folders.delete(namespace, c.req.param('id'))) return c.json({ error: 'Folder not found' }, 404)
++
++        notify(namespace)
++        return c.json({ ok: true })
++    })
++
++    app.put('/sessions/:id/folder', async (c) => {
++        const engine = requireSyncEngine(c, getSyncEngine)
++        if (engine instanceof Response) return engine
++
++        const parsed = SetSessionFolderRequestSchema.safeParse(await c.req.json().catch(() => null))
++        if (!parsed.success) return c.json({ error: 'Invalid folder ID' }, 400)
++
++        const session = requireSessionFromParam(c, engine)
++        if (session instanceof Response) return session
++
++        const namespace = c.get('namespace')
++        if (!folders.setAssignment(namespace, session.sessionId, parsed.data.folderId)) {
++            return c.json({ error: 'Folder not found' }, 404)
++        }
++
++        notify(namespace)
++        return c.json({ ok: true })
++    })
++
++    return app
++}
+diff --git a/hub/src/web/server.ts b/hub/src/web/server.ts
+index 2d57e9bf4..3eac87585 100644
+--- a/hub/src/web/server.ts
++++ b/hub/src/web/server.ts
+@@ -25,6 +25,7 @@ import {
+ import { createEventsRoutes } from './routes/events'
+ import { createFeaturesRoutes } from './routes/features'
+ import { createSessionsRoutes } from './routes/sessions'
++import { createSessionFoldersRoutes } from './routes/sessionFolders'
+ import { createMessagesRoutes } from './routes/messages'
+ import { createPermissionsRoutes } from './routes/permissions'
+ import { createMachinesRoutes } from './routes/machines'
+@@ -397,6 +398,7 @@ export function createWebApp(options: {
+     app.route('/api', createPasskeyManagementRoutes(passkeyDeps))
+     app.route('/api', createEventsRoutes(options.getSseManager, options.getSyncEngine, options.getVisibilityTracker))
+     app.route('/api', createSessionsRoutes(options.getSyncEngine))
++    app.route('/api', createSessionFoldersRoutes(options.store.sessionFolders, options.getSyncEngine, options.getSseManager))
+     app.route('/api', createMessagesRoutes(options.getSyncEngine))
+     app.route('/api', createPermissionsRoutes(options.getSyncEngine))
+     app.route('/api', createMachinesRoutes(options.getSyncEngine, { dataDir: configuration.dataDir }))
+diff --git a/shared/src/apiTypes.ts b/shared/src/apiTypes.ts
+index bc7ed3e39..497fd6b2c 100644
+--- a/shared/src/apiTypes.ts
++++ b/shared/src/apiTypes.ts
+@@ -145,6 +145,29 @@ export type AuthResponse = {
+ }
+ 
+ export type SessionsResponse = { sessions: SessionSummary[]; serverTime?: number }
++const SessionFolderIdSchema = z.string().uuid()
++const SessionFolderSchema = z.object({
++    id: SessionFolderIdSchema,
++    name: z.string(),
++    parentId: SessionFolderIdSchema.nullable()
++})
++export type SessionFolder = z.infer<typeof SessionFolderSchema>
++export const SessionFoldersResponseSchema = z.object({
++    folders: z.array(SessionFolderSchema),
++    assignments: z.record(z.string(), SessionFolderIdSchema)
++})
++export type SessionFoldersResponse = z.infer<typeof SessionFoldersResponseSchema>
++export const CreateSessionFolderRequestSchema = z.object({
++    name: z.string().trim().min(1).max(100),
++    parentId: SessionFolderIdSchema.nullable()
++})
++export type CreateSessionFolderRequest = z.infer<typeof CreateSessionFolderRequestSchema>
++export type CreateSessionFolderResponse = { folder: SessionFolder }
++
++export const SetSessionFolderRequestSchema = z.object({
++    folderId: SessionFolderIdSchema.nullable()
++})
++export type SetSessionFolderRequest = z.infer<typeof SetSessionFolderRequestSchema>
+ export type ScratchlistSessionIdsResponse = { sessionIds: string[] }
+ export type SessionContentMatch = {
+     messageId: string
+diff --git a/shared/src/schemas.ts b/shared/src/schemas.ts
+index 28f41229b..5891c6300 100644
+--- a/shared/src/schemas.ts
++++ b/shared/src/schemas.ts
+@@ -955,6 +955,10 @@ const MachineChangedSchema = SessionEventBaseSchema.extend({
+ })
+ 
+ export const SyncEventSchema = z.discriminatedUnion('type', [
++    z.object({
++        type: z.literal('session-folders-updated'),
++        namespace: z.string()
++    }),
+     SessionChangedSchema.extend({
+         type: z.literal('session-added'),
+         data: z.unknown().optional()
+diff --git a/web/src/api/client.test.ts b/web/src/api/client.test.ts
+index 475d6c196..422f900f1 100644
+--- a/web/src/api/client.test.ts
++++ b/web/src/api/client.test.ts
+@@ -40,6 +40,11 @@ describe('ApiClient error mapping', () => {
+         expect(apiErrorMessage(undefined, 'fallback')).toBe('fallback')
+     })
+ 
++    it('rejects a generic response from a Hub without the session folders endpoint', async () => {
++        fetchMock.mockResolvedValueOnce(Response.json({ success: true }))
++        await expect(new ApiClient('test-token').getSessionFolders()).rejects.toHaveProperty('name', 'ZodError')
++    })
++
+     it('passes an optional maxBytes bound to session file reads', async () => {
+         fetchMock.mockResolvedValueOnce(
+             new Response(JSON.stringify({ success: true, content: '' }), { status: 200 })
+diff --git a/web/src/api/client.ts b/web/src/api/client.ts
+index 2a136c7b9..d6e5972cc 100644
+--- a/web/src/api/client.ts
++++ b/web/src/api/client.ts
+@@ -1,6 +1,6 @@
+ import { HubClock } from '@/lib/hubClock'
+ import type { AttachedJob } from '@hapi/protocol'
+-import type { BranchConversationRequest, BranchConversationResponse } from '@hapi/protocol/apiTypes'
++import { SessionFoldersResponseSchema, type BranchConversationRequest, type BranchConversationResponse, type CreateSessionFolderResponse, type SessionFolder, type SessionFoldersResponse } from '@hapi/protocol/apiTypes'
+ import { isAuthRejectionStatus } from '@/lib/authConnection'
+ import type {
+     AttachmentMetadata,
+@@ -439,6 +439,29 @@ export class ApiClient {
+         return response
+     }
+ 
++    async getSessionFolders(): Promise<SessionFoldersResponse> {
++        return SessionFoldersResponseSchema.parse(await this.request('/api/session-folders'))
++    }
++
++    async createSessionFolder(name: string, parentId: string | null): Promise<SessionFolder> {
++        const { folder } = await this.request<CreateSessionFolderResponse>('/api/session-folders', {
++            method: 'POST',
++            body: JSON.stringify({ name, parentId })
++        })
++        return folder
++    }
++
++    async deleteSessionFolder(folderId: string): Promise<void> {
++        await this.request(`/api/session-folders/${encodeURIComponent(folderId)}`, { method: 'DELETE' })
++    }
++
++    async moveSessionToFolder(sessionId: string, folderId: string | null): Promise<void> {
++        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/folder`, {
++            method: 'PUT',
++            body: JSON.stringify({ folderId })
++        })
++    }
++
+     async getScratchlistSessionIds(): Promise<string[]> {
+         const response = await this.request<ScratchlistSessionIdsResponse>('/api/sessions/scratchlist-status')
+         return response.sessionIds
+diff --git a/web/src/components/SessionActionMenu.tsx b/web/src/components/SessionActionMenu.tsx
+index 9c82af88d..f403e83fb 100644
+--- a/web/src/components/SessionActionMenu.tsx
++++ b/web/src/components/SessionActionMenu.tsx
+@@ -4,7 +4,7 @@ import { safeCopyToClipboard } from '@/lib/clipboard'
+ import { buildSessionReferenceText } from '@/lib/sessionReference'
+ import { usePlatform } from '@/hooks/usePlatform'
+ import { useAnchoredMenu } from '@/hooks/useAnchoredMenu'
+-import { ArchiveIcon, CheckIcon, CopyIcon, ForkIcon } from '@/components/icons'
++import { ArchiveIcon, CheckIcon, CopyIcon, FolderIcon, ForkIcon } from '@/components/icons'
+ import { buildSessionWindowPath } from '@/lib/sessionNavigation'
+ import { getSessionManualUnreadAt, sessionNeedsReadAction, markListedSessionSeen, markSessionUnread, useSessionLastSeenVersion } from '@/lib/sessionLastSeen'
+ import type { SessionSummary } from '@/types/api'
+@@ -69,6 +69,7 @@ type SessionActionMenuProps = {
+     sessionActive: boolean
+     canArchive?: boolean
+     onRename: () => void
++    onMoveToFolder?: () => void
+     onLinkPr?: () => void
+     /** When linked, shown at the top of the long-press / more menu. */
+     linkedPr?: SessionActionMenuLinkedPr | null
+@@ -273,6 +274,7 @@ export function SessionActionMenu(props: SessionActionMenuProps) {
+         sessionActive,
+         canArchive = sessionActive,
+         onRename,
++        onMoveToFolder,
+         onLinkPr,
+         linkedPr,
+         sessionPinned = false,
+@@ -424,6 +426,18 @@ export function SessionActionMenu(props: SessionActionMenuProps) {
+                     {t('session.action.rename')}
+                 </button>
+ 
++                {onMoveToFolder ? (
++                    <button
++                        type="button"
++                        role="menuitem"
++                        className={`${baseItemClassName} hover:bg-[var(--app-subtle-bg)]`}
++                        onClick={() => { onClose(); onMoveToFolder() }}
++                    >
++                        <FolderIcon className="h-[18px] w-[18px] text-[var(--app-hint)]" />
++                        {t('sessions.folders.moveTo')}
++                    </button>
++                ) : null}
++
+                 {onLinkPr ? (
+                     <button
+                         type="button"
+diff --git a/web/src/components/SessionFolders.test.tsx b/web/src/components/SessionFolders.test.tsx
+new file mode 100644
+index 000000000..89fda26e0
+--- /dev/null
++++ b/web/src/components/SessionFolders.test.tsx
+@@ -0,0 +1,26 @@
++import { render, screen } from '@testing-library/react'
++import { describe, expect, it, vi } from 'vitest'
++import { I18nProvider } from '@/lib/i18n-context'
++import { SessionFolderDialog } from './SessionFolders'
++
++describe('SessionFolderDialog', () => {
++    it('distinguishes literal folder names from nested and unfiled destinations', () => {
++        render(<I18nProvider><SessionFolderDialog
++            mode="move"
++            folderId={null}
++            folders={[
++                { id: 'work', name: 'Work', parentId: null },
++                { id: 'nested', name: 'Notes', parentId: 'work' },
++                { id: 'root', name: 'Work / Notes', parentId: null },
++                { id: 'literal', name: 'No folder', parentId: null }
++            ]}
++            onClose={vi.fn()}
++            onSubmit={vi.fn()}
++        /></I18nProvider>)
++
++        expect(screen.getByRole('option', { name: 'Work / Notes' })).toHaveValue('nested')
++        expect(screen.getByRole('option', { name: '"Work / Notes"' })).toHaveValue('root')
++        expect(screen.getByRole('option', { name: 'No folder' })).toHaveValue('')
++        expect(screen.getByRole('option', { name: '"No folder"' })).toHaveValue('literal')
++    })
++})
+diff --git a/web/src/components/SessionFolders.tsx b/web/src/components/SessionFolders.tsx
+new file mode 100644
+index 000000000..63952d920
+--- /dev/null
++++ b/web/src/components/SessionFolders.tsx
+@@ -0,0 +1,197 @@
++import { useId, useLayoutEffect, useRef, useState, type FormEvent } from 'react'
++import type { SessionFolder } from '@hapi/protocol/apiTypes'
++import { apiErrorMessage } from '@/api/client'
++import { ArrowLeftIcon, FolderIcon, PlusCircleIcon, TrashIcon } from '@/components/icons'
++import { Button } from '@/components/ui/button'
++import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
++import { useTranslation } from '@/lib/use-translation'
++
++type FolderNavigationProps = {
++    folder: SessionFolder | undefined
++    children: SessionFolder[]
++    onOpen: (folderId: string | null) => void
++    onCreate: () => void
++    onDelete: (folder: SessionFolder) => void
++}
++
++const rowButton = 'flex min-h-9 min-w-0 items-center gap-2 rounded-lg px-2 text-left text-sm hover:bg-[var(--app-subtle-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]'
++
++export function SessionFoldersNavigation({ folder, children, onOpen, onCreate, onDelete }: FolderNavigationProps) {
++    const { t } = useTranslation()
++    const focusAfterNavigation = useRef(false)
++    const backButton = useRef<HTMLButtonElement>(null)
++    const createButton = useRef<HTMLButtonElement>(null)
++    useLayoutEffect(() => {
++        if (!focusAfterNavigation.current) return
++        focusAfterNavigation.current = false
++        const target = backButton.current ?? createButton.current
++        target?.focus()
++    }, [folder?.id])
++
++    const open = (folderId: string | null) => {
++        focusAfterNavigation.current = true
++        onOpen(folderId)
++    }
++
++    return (
++        <nav className="flex flex-col gap-0.5" aria-label={t('sessions.folders.label')}>
++            <div className="flex min-w-0 items-center gap-1">
++                {folder ? (
++                    <>
++                        <button
++                            type="button"
++                            ref={backButton}
++                            aria-label={t('sessions.folders.back')}
++                            className={rowButton}
++                            onClick={() => open(folder.parentId)}
++                        >
++                            <ArrowLeftIcon />
++                        </button>
++                        <span className="min-w-0 flex-1 truncate text-sm font-medium" title={folder.name}>{folder.name}</span>
++                    </>
++                ) : null}
++                <button type="button" ref={createButton} className={rowButton} onClick={onCreate}>
++                    <PlusCircleIcon className="h-4 w-4 shrink-0 text-[var(--app-hint)]" />
++                    <span>{t(folder ? 'sessions.folders.newSubfolder' : 'sessions.folders.new')}</span>
++                </button>
++                {folder ? (
++                    <button
++                        type="button"
++                        className={rowButton}
++                        aria-label={t('sessions.folders.delete')}
++                        title={t('sessions.folders.delete')}
++                        onClick={() => onDelete(folder)}
++                    >
++                        <TrashIcon />
++                    </button>
++                ) : null}
++            </div>
++            {children.map(child => (
++                <button
++                    key={child.id}
++                    type="button"
++                    className={rowButton}
++                    title={child.name}
++                    onClick={() => open(child.id)}
++                >
++                    <FolderIcon className="h-4 w-4 shrink-0 text-[var(--app-hint)]" />
++                    <span className="min-w-0 truncate font-medium">{child.name}</span>
++                </button>
++            ))}
++        </nav>
++    )
++}
++
++type FolderDialogProps = {
++    onClose: () => void
++} & ({
++    mode: 'create'
++    isSubfolder: boolean
++    onSubmit: (name: string) => Promise<void>
++} | {
++    mode: 'move'
++    folderId: string | null
++    folders: SessionFolder[]
++    onSubmit: (folderId: string | null) => Promise<void>
++})
++
++function getFolderOptions(folders: SessionFolder[], noFolderLabel: string) {
++    const kidsByParent = new Map<string | null, SessionFolder[]>()
++    for (const folder of folders) {
++        const kids = kidsByParent.get(folder.parentId) ?? []
++        kids.push(folder)
++        kidsByParent.set(folder.parentId, kids)
++    }
++
++    const options: { id: string; path: string }[] = []
++    const append = (parentId: string | null, parentPath: string) => {
++        for (const folder of kidsByParent.get(parentId) ?? []) {
++            const name = folder.name === noFolderLabel || /[\/"]/.test(folder.name) ? JSON.stringify(folder.name) : folder.name
++            const path = parentPath ? `${parentPath} / ${name}` : name
++            options.push({ id: folder.id, path })
++            append(folder.id, path)
++        }
++    }
++    append(null, '')
++    return options
++}
++
++export function SessionFolderDialog(props: FolderDialogProps) {
++    const { t } = useTranslation()
++    const id = useId()
++    const [value, setValue] = useState(props.mode === 'move' ? props.folderId ?? '' : '')
++    const [busy, setBusy] = useState(false)
++    const [error, setError] = useState<string | null>(null)
++    const title = props.mode === 'move'
++        ? t('sessions.folders.moveTo')
++        : t(props.isSubfolder ? 'sessions.folders.newSubfolder' : 'sessions.folders.new')
++    const invalid = props.mode === 'create' ? !value.trim() : value === (props.folderId ?? '')
++    const inputClass = 'w-full rounded-md border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 text-base text-[var(--app-fg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]'
++
++    const submit = async (event: FormEvent) => {
++        event.preventDefault()
++        if (busy || invalid) return
++        setBusy(true)
++        setError(null)
++        try {
++            if (props.mode === 'create') await props.onSubmit(value.trim())
++            else await props.onSubmit(value || null)
++            props.onClose()
++        } catch (err) {
++            setError(apiErrorMessage(err, t('dialog.error.default')))
++        } finally {
++            setBusy(false)
++        }
++    }
++
++    return (
++        <Dialog open onOpenChange={open => { if (!open && !busy) props.onClose() }}>
++            <DialogContent className="max-w-sm" aria-describedby={undefined}>
++                <DialogHeader>
++                    <DialogTitle>{title}</DialogTitle>
++                </DialogHeader>
++                <form className="flex flex-col gap-3" onSubmit={submit}>
++                    {props.mode === 'create' ? (
++                        <>
++                            <label htmlFor={id} className="sr-only">{t('sessions.folders.name')}</label>
++                            <input
++                                id={id}
++                                className={inputClass}
++                                placeholder={t('sessions.folders.name')}
++                                value={value}
++                                maxLength={100}
++                                disabled={busy}
++                                onChange={event => setValue(event.target.value)}
++                            />
++                        </>
++                    ) : (
++                        <>
++                            <label htmlFor={id} className="sr-only">{t('sessions.folders.label')}</label>
++                            <select
++                                id={id}
++                                className={inputClass}
++                                value={value}
++                                disabled={busy}
++                                onChange={event => setValue(event.target.value)}
++                            >
++                                <option value="">{t('sessions.folders.none')}</option>
++                                {getFolderOptions(props.folders, t('sessions.folders.none')).map(option => (
++                                    <option key={option.id} value={option.id}>{option.path}</option>
++                                ))}
++                            </select>
++                        </>
++                    )}
++                    {error ? <p role="alert" className="text-sm text-red-600 dark:text-red-400">{error}</p> : null}
++                    <div className="flex justify-end gap-2">
++                        <Button type="button" variant="secondary" disabled={busy} onClick={props.onClose}>
++                            {t('button.cancel')}
++                        </Button>
++                        <Button type="submit" disabled={busy || invalid}>
++                            {t(props.mode === 'create' ? 'sessions.folders.create' : 'sessions.folders.move')}
++                        </Button>
++                    </div>
++                </form>
++            </DialogContent>
++        </Dialog>
++    )
++}
+diff --git a/web/src/components/SessionList.order.test.tsx b/web/src/components/SessionList.order.test.tsx
+index f8fd51b84..f32c60cea 100644
+--- a/web/src/components/SessionList.order.test.tsx
++++ b/web/src/components/SessionList.order.test.tsx
+@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+ import { afterEach, expect, it, vi } from 'vitest'
+ import { toSessionSummary, type Session } from '@hapi/protocol'
++import type { ApiClient } from '@/api/client'
+ import { I18nProvider } from '@/lib/i18n-context'
+ import { ToastProvider } from '@/lib/toast-context'
+ import { SessionList } from './SessionList'
+@@ -57,10 +58,13 @@ it('keeps rendered rows and machine filters stable by default, but promotes new
+     expect(machineOrder()).toEqual([...machinesBefore].reverse())
+ })
+ 
+-function renderSessions(rows: Array<{ id: string; path: string; active: boolean; lastUserMessageAt: number }>) {
++function renderSessions(
++    rows: Array<{ id: string; path: string; active: boolean; lastUserMessageAt: number; globalPinned?: boolean; thinking?: boolean }>,
++    api: ApiClient | null = null
++) {
+     const sessions = rows.map((row): Session => ({
+         id: row.id, namespace: 'default', seq: 1, createdAt: 1, lastUserMessageAt: row.lastUserMessageAt, updatedAt: row.lastUserMessageAt,
+-        active: row.active, activeAt: 1, thinking: false, thinkingAt: 1,
++        active: row.active, activeAt: 1, thinking: row.thinking ?? false, thinkingAt: 1, globalPinned: row.globalPinned,
+         metadata: { path: row.path, host: 'mac', name: `Row ${row.id}`, machineId: 'm1', ...(row.active ? {} : { lifecycleState: 'archived' }) },
+         metadataVersion: 1, agentState: null, agentStateVersion: 1,
+         model: null, modelReasoningEffort: null, effort: null, serviceTier: null
+@@ -72,7 +76,7 @@ function renderSessions(rows: Array<{ id: string; path: string; active: boolean;
+                     <SessionList
+                         sessions={sessions.map(s => toSessionSummary(s))}
+                         onSelect={vi.fn()} onNewSession={vi.fn()} onRefresh={vi.fn()}
+-                        isLoading={false} renderHeader={false} api={null}
++                        isLoading={false} renderHeader={false} api={api}
+                     />
+                 </I18nProvider>
+             </ToastProvider>
+@@ -109,3 +113,31 @@ it('keeps the default project order for equally relevant search results', () =>
+     fireEvent.change(screen.getByPlaceholderText('Search title/path/Agent/machine/ID…'), { target: { value: 'Row' } })
+     expect(rowOrder()).toEqual(['archivedNewer', 'liveOlder'])
+ })
++
++it('keeps filed priority rows at the root and scopes open folders to their members', async () => {
++    window.localStorage.setItem('hapi-pin-in-progress-sessions', 'all')
++    const api = {
++        getSessionFolders: async () => ({
++            folders: [
++                { id: 'work', name: 'Work folder', parentId: null },
++                { id: 'other', name: 'Other folder', parentId: null }
++            ],
++            assignments: { pinned: 'work', working: 'work', filed: 'other' }
++        })
++    } as unknown as ApiClient
++
++    const rowOrder = renderSessions([
++        { id: 'pinned', path: '/a', active: true, lastUserMessageAt: 1, globalPinned: true },
++        { id: 'working', path: '/a', active: true, lastUserMessageAt: 2, thinking: true },
++        { id: 'filed', path: '/a', active: true, lastUserMessageAt: 3 },
++        { id: 'unfiled', path: '/a', active: true, lastUserMessageAt: 4 }
++    ], api)
++
++    const workFolder = await screen.findByRole('button', { name: 'Work folder' })
++    expect(rowOrder()).toEqual(['pinned', 'working', 'unfiled'])
++    fireEvent.click(workFolder)
++    expect(rowOrder()).toEqual(['pinned', 'working'])
++    fireEvent.click(screen.getByRole('button', { name: 'Parent folder' }))
++    fireEvent.click(screen.getByRole('button', { name: 'Other folder' }))
++    expect(rowOrder()).toEqual(['filed'])
++})
+diff --git a/web/src/components/SessionList.tsx b/web/src/components/SessionList.tsx
+index 449f3c595..612450393 100644
+--- a/web/src/components/SessionList.tsx
++++ b/web/src/components/SessionList.tsx
+@@ -1,3 +1,4 @@
++import type { SessionFolder } from '@hapi/protocol/apiTypes'
+ import { isLiveLifecycleState } from '@hapi/protocol/sessionLifecycle'
+ import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
+ import * as Popover from '@radix-ui/react-popover'
+@@ -17,7 +18,9 @@ import { usePlatform } from '@/hooks/usePlatform'
+ import { SESSION_MENTION_DRAG_MIME } from '@/lib/sessionMentionDrag'
+ import { isMentionableSession } from '@/lib/sessionReference'
+ import { sessionArchiveMutationKey, sessionPinMutationKey, useSessionActions } from '@/hooks/mutations/useSessionActions'
+-import { useIsMutating } from '@tanstack/react-query'
++import { useIsMutating, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
++import { SessionFolderDialog, SessionFoldersNavigation } from '@/components/SessionFolders'
++import { queryKeys } from '@/lib/query-keys'
+ import { SessionActionMenu } from '@/components/SessionActionMenu'
+ import { SessionExportDialog } from '@/components/SessionExportDialog'
+ import { RenameSessionDialog } from '@/components/RenameSessionDialog'
+@@ -1372,6 +1375,8 @@ function CollapsiblePanel(props: { open: boolean; children: ReactNode }) {
+     )
+ }
+ 
++const MoveToFolderContext = createContext<((sessionId: string) => void) | null>(null)
++
+ type SessionItemProps = {
+     onRequestDelete: (session: SessionSummary) => void
+     session: SessionSummary
+@@ -1445,6 +1450,7 @@ const SessionItem = memo(function SessionItem(props: SessionItemProps) {
+     const rowRef = useRef<HTMLDivElement>(null)
+     const rowButtonRef = useRef<HTMLButtonElement>(null)
+     const quickUnpinFocusRef = useContext(QuickUnpinFocusContext)
++    const openMoveToFolder = useContext(MoveToFolderContext)
+     const panelOpen = useContext(CollapsiblePanelOpenContext)
+     const {
+         status: cursorChatStoreStatus,
+@@ -1806,6 +1812,7 @@ const SessionItem = memo(function SessionItem(props: SessionItemProps) {
+                 sessionGlobalPinned={Boolean(s.globalPinned)}
+                 onSetPinMode={(mode) => void handleSetPinMode(mode)}
+                 onRename={() => setRenameOpen(true)}
++                onMoveToFolder={openMoveToFolder ? () => openMoveToFolder(s.id) : undefined}
+                 onLinkPr={githubPrAwarenessEnabled ? () => setLinkPrOpen(true) : undefined}
+                 linkedPr={linkedPr}
+                 onExport={() => setExportOpen(true)}
+@@ -2007,6 +2014,47 @@ export function SessionList(props: {
+         onNewSessionInDirectory
+     } = props
+     const [deleteTarget, setDeleteTarget] = useState<SessionSummary | null>(null)
++    const queryClient = useQueryClient()
++    const folderQueryKey = [...queryKeys.sessionFolders, api?.getReadStateScope?.()] as const
++    const folderQuery = useQuery({
++        queryKey: folderQueryKey,
++        queryFn: () => api!.getSessionFolders(),
++        enabled: typeof api?.getSessionFolders === 'function',
++    })
++    const { data: folderData } = folderQuery
++    const sessionFoldersEnabledRef = useRef(false)
++    const refetchFolderDataRef = useRef(folderQuery.refetch)
++    sessionFoldersEnabledRef.current = typeof api?.getSessionFolders === 'function'
++    refetchFolderDataRef.current = folderQuery.refetch
++    const [openFolderId, setOpenFolderId] = useState<string | null>(null)
++    const [createFolderTarget, setCreateFolderTarget] = useState<{ parentId: string | null } | null>(null)
++    const [moveSessionId, setMoveSessionId] = useState<string | null>(null)
++    const [deleteFolderTarget, setDeleteFolderTarget] = useState<SessionFolder | null>(null)
++    const openFolder = folderData?.folders.find(folder => folder.id === openFolderId)
++    const folderId = openFolder?.id ?? null
++    const childFolders = folderData?.folders.filter(folder => folder.parentId === folderId) ?? []
++    const openMoveToFolder = folderData?.folders.length ? setMoveSessionId : null
++    const refreshFolders = () => queryClient.invalidateQueries({ queryKey: folderQueryKey })
++    const deleteFolder = useMutation({
++        mutationFn: (target: SessionFolder) => api!.deleteSessionFolder(target.id),
++        onSuccess: async (_, target) => {
++            await refreshFolders()
++            setOpenFolderId(target.parentId)
++        }
++    })
++    const folderAssignments = useMemo(() => new Map(Object.entries(folderData?.assignments ?? {})), [folderData])
++    const folderSelection = useRef<{ scope: string | null | undefined; sessionId: string } | null>(null)
++    const folderScope = folderQueryKey[1]
++    useEffect(() => {
++        if (!selectedSessionId) {
++            folderSelection.current = null
++            return
++        }
++        if (!folderData || (folderSelection.current?.scope === folderScope && folderSelection.current?.sessionId === selectedSessionId)) return
++        folderSelection.current = { scope: folderScope, sessionId: selectedSessionId }
++        setOpenFolderId(folderAssignments.get(selectedSessionId) ?? null)
++    }, [folderAssignments, folderData, folderScope, selectedSessionId])
++
+     const { features } = useFeatures(api)
+     const githubPrAwarenessEnabled = Boolean(features?.githubPrAwareness.enabled)
+     const hasJobs = useMemo(() => props.sessions.some(hasRunningAttachedJob), [props.sessions])
+@@ -2506,7 +2554,7 @@ export function SessionList(props: {
+         listView.unreadOnly,
+         visibleSessions
+     ])
+-    const machineFilteredSessions = useMemo(
++    const allMachineFilteredSessions = useMemo(
+         () => activeMachineFilter === null
+             ? sessionFilteredSessions
+             : sessionFilteredSessions.filter(session =>
+@@ -2515,13 +2563,24 @@ export function SessionList(props: {
+         [sessionFilteredSessions, activeMachineFilter]
+ 
+     )
++    // Search crosses folder boundaries; ordinary browsing scopes the same session rows to a folder.
++    const matchesFolder = useCallback(
++        (session: SessionSummary) => isSearchFiltering || (folderAssignments.get(session.id) ?? null) === folderId,
++        [isSearchFiltering, folderAssignments, folderId]
++    )
++    const machineFilteredSessions = useMemo(
++        () => allMachineFilteredSessions.filter(matchesFolder),
++        [allMachineFilteredSessions, matchesFolder]
++    )
++    // The root keeps priority rows visible even when their sessions are filed.
++    const prioritySessions = folderId === null ? allMachineFilteredSessions : machineFilteredSessions
+     const globalPinnedSessions = useMemo(() => {
+-        const pinned = machineFilteredSessions.filter((session) => Boolean(session.globalPinned))
++        const pinned = prioritySessions.filter((session) => Boolean(session.globalPinned))
+         if (searchScoreIndex && hasTextQuery) {
+             return sortSessionsBySearchRelevance(pinned, searchScoreIndex)
+         }
+         return [...pinned].sort(listComparator)
+-    }, [machineFilteredSessions, searchScoreIndex, hasTextQuery, listComparator])
++    }, [prioritySessions, searchScoreIndex, hasTextQuery, listComparator])
+     const runningSessions = useMemo(() => {
+         const byRelevanceOrRecent = (a: SessionSummary, b: SessionSummary) => {
+             if (searchScoreIndex && hasTextQuery) {
+@@ -2529,8 +2588,8 @@ export function SessionList(props: {
+             }
+             return listComparator(a, b)
+         }
+-        return bucketRunningSessions(machineFilteredSessions, effectivePinInProgressMode, byRelevanceOrRecent, api?.hubClock?.now())
+-    }, [api, listClockTick, machineFilteredSessions, effectivePinInProgressMode, searchScoreIndex, hasTextQuery, listComparator])
++        return bucketRunningSessions(prioritySessions, effectivePinInProgressMode, byRelevanceOrRecent, api?.hubClock?.now())
++    }, [api, listClockTick, prioritySessions, effectivePinInProgressMode, searchScoreIndex, hasTextQuery, listComparator])
+     // Stopped rows show their stop time only where the list orders them by it:
+     // Active first, and no text query (which orders rows by relevance or, for
+     // project rows in either search mode, by the legacy comparator).
+@@ -2568,11 +2627,13 @@ export function SessionList(props: {
+         ),
+         [machineFilteredSessions, listView]
+     )
+-    // Unfiltered project membership for group-wide actions (archive all).
+-    const projectSessionsByKey = useMemo(
+-        () => new Map(groupSessionsByDirectory(props.sessions).map((group) => [group.key, group.sessions])),
+-        [props.sessions]
+-    )
++    // Bulk actions are scoped to this folder, or to matching rows during cross-folder search.
++    const projectSessionsByKey = useMemo(() => {
++        const members = isSearchFiltering && folderAssignments.size > 0
++            ? allMachineFilteredSessions
++            : props.sessions.filter(matchesFolder)
++        return new Map(groupSessionsByDirectory(members).map(group => [group.key, group.sessions]))
++    }, [allMachineFilteredSessions, folderAssignments.size, isSearchFiltering, matchesFolder, props.sessions])
+     const actionOnlyGroups = useMemo(() => {
+         if (effectivePinInProgressMode === 'off') {
+             return []
+@@ -3244,6 +3305,9 @@ export function SessionList(props: {
+             isRefreshingRef.current = true
+             setIsRefreshing(true)
+             const refreshes = [Promise.resolve(onRefreshRef.current())]
++            if (sessionFoldersEnabledRef.current) {
++                refreshes.push(refetchFolderDataRef.current())
++            }
+             if (scratchlistFilterEnabledRef.current) {
+                 refreshes.push(refetchScratchlistSessionIdsRef.current())
+             }
+@@ -3305,6 +3369,42 @@ export function SessionList(props: {
+ 
+     return (
+         <div ref={sessionListRef} className="flex min-h-0 w-full flex-1 flex-col">
++            {api && folderData && createFolderTarget ? (
++                <SessionFolderDialog
++                    mode="create"
++                    isSubfolder={createFolderTarget.parentId !== null}
++                    onClose={() => setCreateFolderTarget(null)}
++                    onSubmit={async name => {
++                        await api.createSessionFolder(name, createFolderTarget.parentId)
++                        await refreshFolders()
++                    }}
++                />
++            ) : null}
++            {api && folderData && moveSessionId !== null ? (
++                <SessionFolderDialog
++                    mode="move"
++                    folderId={folderAssignments.get(moveSessionId) ?? null}
++                    folders={folderData.folders}
++                    onClose={() => setMoveSessionId(null)}
++                    onSubmit={async destination => {
++                        await api.moveSessionToFolder(moveSessionId, destination)
++                        await refreshFolders()
++                    }}
++                />
++            ) : null}
++            {deleteFolderTarget ? (
++                <ConfirmDialog
++                    isOpen
++                    title={t('sessions.folders.delete')}
++                    description={t('sessions.folders.deleteDescription', { name: deleteFolderTarget.name })}
++                    confirmLabel={t('sessions.folders.delete')}
++                    confirmingLabel={t('sessions.folders.deleting')}
++                    isPending={deleteFolder.isPending}
++                    destructive
++                    onClose={() => { if (!deleteFolder.isPending) setDeleteFolderTarget(null) }}
++                    onConfirm={() => deleteFolder.mutateAsync(deleteFolderTarget)}
++                />
++            ) : null}
+             {deleteTarget && <SidebarDeleteDialog key={deleteTarget.id} session={deleteTarget} api={api} onClose={() => setDeleteTarget(null)} />}
+             <div className="session-list-scrollbar-offset mx-auto w-full max-w-content shrink-0">
+             {showHeaderRow ? (
+@@ -3540,9 +3640,40 @@ export function SessionList(props: {
+                 </div>
+             ) : null}
+             <div ref={scrollContainerRef} className="app-scroll-y session-list-scrollbar-left scrollbar-auto-hide min-h-0 flex-1">
++            <MoveToFolderContext.Provider value={openMoveToFolder}>
+             <QuickUnpinFocusContext.Provider value={quickUnpinFocusRef}>
+             <SessionListScrollAnchor sessions={props.sessions} className="mx-auto flex w-full max-w-content flex-col gap-1 pl-1.5 pr-2 pb-2">
+-                {props.sessions.length === 0 && !props.isLoading ? (
++                {folderData && !isSearchFiltering ? (
++                    <SessionFoldersNavigation
++                        folder={openFolder}
++                        children={childFolders}
++                        onOpen={id => {
++                            setOpenFolderId(id)
++                            if (scrollContainerRef.current) scrollContainerRef.current.scrollTop = 0
++                        }}
++                        onCreate={() => setCreateFolderTarget({ parentId: folderId })}
++                        onDelete={setDeleteFolderTarget}
++                    />
++                ) : null}
++
++                {folderQuery.isError && !folderData && !isSearchFiltering ? (
++                    <div role="alert" className="flex items-center gap-2 px-2 text-sm text-[var(--app-hint)]">
++                        {t('sessions.folders.loadError')}
++                        <button
++                            type="button"
++                            className="rounded-md px-2 py-1 text-[var(--app-link)] hover:bg-[var(--app-subtle-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]"
++                            onClick={() => void folderQuery.refetch()}
++                        >
++                            {t('button.retry')}
++                        </button>
++                    </div>
++                ) : null}
++
++                {openFolder && !isFiltering && !props.isLoading && childFolders.length === 0 && machineFilteredSessions.length === 0 && activeMachineFilter === null && listView.status === 'all' ? (
++                    <p className="px-2 py-2 text-sm text-[var(--app-hint)]">{t('sessions.folders.empty')}</p>
++                ) : null}
++
++                {props.sessions.length === 0 && !props.isLoading && !openFolder ? (
+                     <SessionsEmptyState
+                         onNewSession={props.onNewSession}
+                         onBrowse={props.onBrowse}
+@@ -3681,6 +3812,7 @@ export function SessionList(props: {
+                 {actionOnlyGroups.map(renderActionOnlyGroupHeader)}
+             </SessionListScrollAnchor>
+             </QuickUnpinFocusContext.Provider>
++            </MoveToFolderContext.Provider>
+             </div>
+             </div>
+             <ConfirmDialog
+diff --git a/web/src/components/icons.tsx b/web/src/components/icons.tsx
+index a30303cd8..22e05f65d 100644
+--- a/web/src/components/icons.tsx
++++ b/web/src/components/icons.tsx
+@@ -149,6 +149,20 @@ export function PinOffIcon(props: IconProps) {
+     )
+ }
+ 
++export function FolderIcon(props: IconProps) {
++    return createIcon(
++        <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />,
++        props
++    )
++}
++
++export function TrashIcon(props: IconProps) {
++    return createIcon(
++        <path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5" />,
++        props
++    )
++}
++
+ export function ForkIcon(props: IconProps) {
+     return createIcon(
+         <>
+diff --git a/web/src/hooks/useSSE.test.ts b/web/src/hooks/useSSE.test.ts
+index 2b1240d74..5f6d598b7 100644
+--- a/web/src/hooks/useSSE.test.ts
++++ b/web/src/hooks/useSSE.test.ts
+@@ -59,6 +59,7 @@ class FakeEventSource {
+ }
+ 
+ function renderUseSSE(options?: {
++    scope?: 'global'
+     onDisconnect?: (reason: string) => void
+ }) {
+     const queryClient = new QueryClient()
+@@ -69,6 +70,7 @@ function renderUseSSE(options?: {
+         token: 'test-token',
+         baseUrl: 'http://hub.test',
+         subscription: { all: true },
++        scope: options?.scope,
+         onEvent: () => {},
+         onDisconnect: options?.onDisconnect
+     }), { wrapper })
+@@ -87,6 +89,39 @@ describe('useSSE connection liveness (mobile suspend/resume)', () => {
+         vi.useRealTimers()
+     })
+ 
++    it('refreshes chat folders after a folder update, session removal, or replay gap', () => {
++        const { unmount, queryClient } = renderUseSSE({ scope: 'global' })
++        const invalidateQueries = vi.spyOn(queryClient, 'invalidateQueries').mockResolvedValue(undefined)
++        const folderQuery = { queryKey: queryKeys.sessionFolders }
++        const folderInvalidations = () => invalidateQueries.mock.calls.filter(([options]) =>
++            options?.queryKey === queryKeys.sessionFolders
++        )
++
++        act(() => { FakeEventSource.instances[0]?.simulateMessage({ type: 'session-folders-updated', namespace: 'default' }) })
++        expect(invalidateQueries).toHaveBeenCalledWith(folderQuery)
++        expect(folderInvalidations()).toHaveLength(1)
++
++        act(() => { FakeEventSource.instances[0]?.simulateMessage({ type: 'session-removed', sessionId: 'session-1' }) })
++        expect(folderInvalidations()).toHaveLength(2)
++
++        act(() => {
++            FakeEventSource.instances[0]?.simulateMessage({
++                type: 'connection-changed',
++                data: { status: 'connected', subscriptionId: 'sub-1', resume: 'ok' }
++            })
++        })
++        expect(folderInvalidations()).toHaveLength(2)
++
++        act(() => {
++            FakeEventSource.instances[0]?.simulateMessage({
++                type: 'connection-changed',
++                data: { status: 'connected', subscriptionId: 'sub-2', resume: 'gap' }
++            })
++        })
++        expect(folderInvalidations()).toHaveLength(3)
++        unmount()
++    })
++
+     it('reconnects on visibility resume when a heartbeat interval was missed', () => {
+         const onDisconnect = vi.fn()
+         const { unmount } = renderUseSSE({ onDisconnect })
+diff --git a/web/src/hooks/useSSE.ts b/web/src/hooks/useSSE.ts
+index 122de7f0e..b74b62666 100644
+--- a/web/src/hooks/useSSE.ts
++++ b/web/src/hooks/useSSE.ts
+@@ -697,9 +697,16 @@ export function useSSE(options: {
+                 // the field, which safely reads as a full resync.
+                 const resumed = data && typeof data === 'object'
+                     && (data as { resume?: unknown }).resume === 'ok'
++                if (scope === 'global' && !resumed) {
++                    void queryClient.invalidateQueries({ queryKey: queryKeys.sessionFolders })
++                }
+                 onConnectRef.current?.({ resumed: Boolean(resumed) })
+             }
+ 
++            if (scope === 'global' && (event.type === 'session-folders-updated' || event.type === 'session-removed')) {
++                void queryClient.invalidateQueries({ queryKey: queryKeys.sessionFolders })
++            }
++
+             if (event.type === 'toast') {
+                 onToastRef.current?.(event)
+                 return
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index 87f716883..1d47b4331 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -100,6 +100,20 @@ export default {
+ 
+   // Sessions page
+   'sessions.new': 'New Session',
++  'sessions.folders.label': 'Chat folders',
++  'sessions.folders.new': 'New folder',
++  'sessions.folders.newSubfolder': 'New subfolder',
++  'sessions.folders.back': 'Parent folder',
++  'sessions.folders.name': 'Folder name',
++  'sessions.folders.create': 'Create',
++  'sessions.folders.moveTo': 'Move to folder',
++  'sessions.folders.none': 'No folder',
++  'sessions.folders.move': 'Move',
++  'sessions.folders.delete': 'Delete folder',
++  'sessions.folders.deleteDescription': 'Delete “{name}” and its subfolders? Their chats will move to No folder.',
++  'sessions.folders.deleting': 'Deleting…',
++  'sessions.folders.loadError': 'Could not load chat folders.',
++  'sessions.folders.empty': 'This folder is empty.',
+   'sessions.empty.title': 'No sessions yet',
+   'sessions.empty.hint': 'Start a coding session in any folder under your workspace, or browse the tree first.',
+   'sessions.empty.startSession': 'Start a session',
+diff --git a/web/src/lib/locales/ja.ts b/web/src/lib/locales/ja.ts
+index 8de33a39f..d2561b845 100644
+--- a/web/src/lib/locales/ja.ts
++++ b/web/src/lib/locales/ja.ts
+@@ -100,6 +100,20 @@ export default {
+ 
+   // セッションページ
+   'sessions.new': '新規セッション',
++  'sessions.folders.label': 'チャットフォルダー',
++  'sessions.folders.new': '新規フォルダー',
++  'sessions.folders.newSubfolder': '新規サブフォルダー',
++  'sessions.folders.back': '親フォルダー',
++  'sessions.folders.name': 'フォルダー名',
++  'sessions.folders.create': '作成',
++  'sessions.folders.moveTo': 'フォルダーに移動',
++  'sessions.folders.none': 'フォルダーなし',
++  'sessions.folders.move': '移動',
++  'sessions.folders.delete': 'フォルダーを削除',
++  'sessions.folders.deleteDescription': '「{name}」とそのサブフォルダーを削除しますか？チャットはフォルダーなしに移動します。',
++  'sessions.folders.deleting': '削除中…',
++  'sessions.folders.loadError': 'チャットフォルダーを読み込めませんでした。',
++  'sessions.folders.empty': 'このフォルダーは空です。',
+   'sessions.empty.title': 'セッションはまだありません',
+   'sessions.empty.hint': 'ワークスペース内の任意のフォルダでコーディングセッションを開始するか、まずツリーを参照してください。',
+   'sessions.empty.startSession': 'セッションを開始',
+diff --git a/web/src/lib/locales/ru.ts b/web/src/lib/locales/ru.ts
+index 1d7456d2a..31fcc1a8f 100644
+--- a/web/src/lib/locales/ru.ts
++++ b/web/src/lib/locales/ru.ts
+@@ -80,6 +80,20 @@ export default {
+ 
+   // Страница сессий
+   'sessions.new': 'Новая сессия',
++  'sessions.folders.label': 'Папки чатов',
++  'sessions.folders.new': 'Новая папка',
++  'sessions.folders.newSubfolder': 'Новая подпапка',
++  'sessions.folders.back': 'Родительская папка',
++  'sessions.folders.name': 'Название папки',
++  'sessions.folders.create': 'Создать',
++  'sessions.folders.moveTo': 'Переместить в папку',
++  'sessions.folders.none': 'Без папки',
++  'sessions.folders.move': 'Переместить',
++  'sessions.folders.delete': 'Удалить папку',
++  'sessions.folders.deleteDescription': 'Удалить «{name}» и вложенные папки? Их чаты переместятся в список без папки.',
++  'sessions.folders.deleting': 'Удаление…',
++  'sessions.folders.loadError': 'Не удалось загрузить папки чатов.',
++  'sessions.folders.empty': 'Эта папка пуста.',
+   'sessions.empty.title': 'Сессий пока нет',
+   'sessions.empty.hint': 'Запустите сессию в любой папке рабочего пространства или сначала просмотрите дерево.',
+   'sessions.empty.startSession': 'Запустить сессию',
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index 9d5b41cb0..0d78a5945 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -100,6 +100,20 @@ export default {
+ 
+   // Sessions page
+   'sessions.new': '新建会话',
++  'sessions.folders.label': '聊天文件夹',
++  'sessions.folders.new': '新建文件夹',
++  'sessions.folders.newSubfolder': '新建子文件夹',
++  'sessions.folders.back': '上一级文件夹',
++  'sessions.folders.name': '文件夹名称',
++  'sessions.folders.create': '创建',
++  'sessions.folders.moveTo': '移动到文件夹',
++  'sessions.folders.none': '无文件夹',
++  'sessions.folders.move': '移动',
++  'sessions.folders.delete': '删除文件夹',
++  'sessions.folders.deleteDescription': '删除“{name}”及其子文件夹？其中的聊天将移至未归类列表。',
++  'sessions.folders.deleting': '正在删除…',
++  'sessions.folders.loadError': '无法加载聊天文件夹。',
++  'sessions.folders.empty': '此文件夹为空。',
+   'sessions.empty.title': '还没有会话',
+   'sessions.empty.hint': '在 workspace 下任意目录启动一个会话，或先浏览目录树看看。',
+   'sessions.empty.startSession': '启动会话',
+diff --git a/web/src/lib/query-keys.ts b/web/src/lib/query-keys.ts
+index af1c39400..511e87cae 100644
+--- a/web/src/lib/query-keys.ts
++++ b/web/src/lib/query-keys.ts
+@@ -1,5 +1,6 @@
+ export const queryKeys = {
+     sessions: ['sessions'] as const,
++    sessionFolders: ['session-folders'] as const,
+     scratchlistSessionIds: ['scratchlist-session-ids'] as const,
+     session: (sessionId: string) => ['session', sessionId] as const,
+     messages: (sessionId: string) => ['messages', sessionId] as const,
+-- 
+2.54.0 (Apple Git-157)
+

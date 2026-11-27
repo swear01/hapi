@@ -134,6 +134,7 @@ public struct SessionMetadata: Codable, Equatable, Sendable {
     public var opencodeSessionId: String?
     public var grokSessionId: String?
     public var agySessionId: String?
+    public var cursorAcpPermissionModes: [String]?
     public var cursorSessionId: String?
     public var kimiSessionId: String?
     public var copilotSessionId: String?
@@ -141,6 +142,7 @@ public struct SessionMetadata: Codable, Equatable, Sendable {
     public var dshSessionId: String?
     /// Pi model with its provider (`session.model` holds only the id).
     public var piSelectedModel: PiModelReference?
+    public var lastModelError: SessionModelError?
     /// User-message `localId`s with a native fork/rewind point.
     public var conversationHistoryPoints: [String: Bool]?
     /// Hub-owned toggle: translate the user's prompts to English before

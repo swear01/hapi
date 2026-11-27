@@ -1,0 +1,231 @@
+From 7caba8e6238e5ffa56e905f263e6ea5cff6151ce Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 28 Nov 2026 06:00:00 +0800
+Subject: [PATCH] Carry #2622: fix(web): remove duplicate Active sessions only
+ setting
+
+Upstream head: 618b5209e8ecfbdc261e5a767b22350c02f8023e
+---
+ docs/guide/session-list.md                 |  9 +++++----
+ web/src/components/SessionList.tsx         |  9 +++------
+ web/src/hooks/useSessionListView.test.ts   | 10 ----------
+ web/src/hooks/useSessionListView.ts        |  4 ++--
+ web/src/hooks/useShowActiveSessionsOnly.ts | 17 -----------------
+ web/src/lib/locales/en.ts                  |  2 --
+ web/src/lib/locales/ja.ts                  |  2 --
+ web/src/lib/locales/ru.ts                  |  2 --
+ web/src/lib/locales/zh-CN.ts               |  2 --
+ web/src/routes/settings/display.tsx        |  3 ---
+ web/src/routes/settings/index.test.tsx     |  4 ----
+ 11 files changed, 10 insertions(+), 54 deletions(-)
+ delete mode 100644 web/src/hooks/useShowActiveSessionsOnly.ts
+
+diff --git a/docs/guide/session-list.md b/docs/guide/session-list.md
+index b0422226f..8a4eceba0 100644
+--- a/docs/guide/session-list.md
++++ b/docs/guide/session-list.md
+@@ -50,10 +50,11 @@ section shown above the project folders (global pins stay above it):
+ 
+ Connected-but-idle sessions stay in their project folders in every mode. Rows
+ move into and out of the section as their status changes, but are ordered by
+-user input rather than ongoing output. **Active sessions only** in the same
+-settings group hides inactive sessions, except the open session and sessions
+-with a running job that have not been archived. A disconnected, archived
+-conversation stays in **Archived** even if its job is still reporting. Its row
++user input rather than ongoing output. Choose **Active** under **Sort and
++filter → Show** in the sidebar to hide inactive sessions, except the open
++session and sessions with a running job that have not been archived. A
++disconnected, archived conversation stays in **Archived** even if its job is
++still reporting. Its row
+ retains the job meter. After 15 minutes without a heartbeat the job no longer floats
+ into **In progress** by itself. A job meter never spins the agent indicator. An independent process can keep reporting after archive;
+ work in the stopped session process tree can be terminated.
+diff --git a/web/src/components/SessionList.tsx b/web/src/components/SessionList.tsx
+index 8c1d1b1cf..0e51c7959 100644
+--- a/web/src/components/SessionList.tsx
++++ b/web/src/components/SessionList.tsx
+@@ -2078,9 +2078,8 @@ export function SessionList(props: {
+ 
+     // Date, scratchlist, active, and working are transient; unread uses the
+     // upstream view store. showActiveOnly is deliberately independent of
+-    // listView.status (persisted, backs the Settings "Active sessions only"
+-    // toggle) — #2002 wants a temporary scan, not another write path onto
+-    // that saved preference.
++    // the saved Show choice (listView.status) so it can be used for a
++    // temporary scan (#2002).
+     const [showScratchlistOnly, setShowScratchlistOnly] = useState(false)
+     const [showActiveOnly, setShowActiveOnly] = useState(false)
+     const [showWorkingOnly, setShowWorkingOnly] = useState(false)
+@@ -2530,9 +2529,7 @@ export function SessionList(props: {
+             ? filterUnreadSessionsOnly(visibleSessions, isSessionUnread, selectedSessionId)
+             : visibleSessions
+         // Active and Working are AND-composed with the other lenses (#2002).
+-        // Both are ephemeral, independent of the persisted listView.status
+-        // ("Active sessions only" in Settings) — a temporary scan should not
+-        // read or write that saved preference.
++        // These temporary filters leave the saved Show choice intact.
+         if (showActiveOnly) {
+             filtered = filterActiveSessionsOnly(filtered, selectedSessionId)
+         }
+diff --git a/web/src/hooks/useSessionListView.test.ts b/web/src/hooks/useSessionListView.test.ts
+index 0aae01107..fa6dd7613 100644
+--- a/web/src/hooks/useSessionListView.test.ts
++++ b/web/src/hooks/useSessionListView.test.ts
+@@ -1,7 +1,6 @@
+ import { act, renderHook } from '@testing-library/react'
+ import { afterEach, describe, expect, it } from 'vitest'
+ import { readSessionListView, useSessionListView } from './useSessionListView'
+-import { useShowActiveSessionsOnly } from './useShowActiveSessionsOnly'
+ 
+ afterEach(() => {
+     localStorage.clear()
+@@ -42,13 +41,4 @@ describe('useSessionListView', () => {
+         act(() => result.current.setView({ unreadOnly: false }))
+         expect(localStorage.length).toBe(0)
+     })
+-
+-    it('keeps the settings switch and the list menu in sync', () => {
+-        const list = renderHook(() => useSessionListView())
+-        const settings = renderHook(() => useShowActiveSessionsOnly())
+-        act(() => settings.result.current.setShowActiveSessionsOnly(true))
+-        expect(list.result.current.view.status).toBe('active')
+-        act(() => list.result.current.setView({ status: 'archived' }))
+-        expect(settings.result.current.showActiveSessionsOnly).toBe(false)
+-    })
+ })
+diff --git a/web/src/hooks/useSessionListView.ts b/web/src/hooks/useSessionListView.ts
+index d1a9b6085..bb018ed7e 100644
+--- a/web/src/hooks/useSessionListView.ts
++++ b/web/src/hooks/useSessionListView.ts
+@@ -2,8 +2,8 @@ import { useCallback, useSyncExternalStore } from 'react'
+ 
+ /**
+  * Session list view preferences: sort key, status filter and whether
+- * connected sessions sort ahead of archived ones. One store shared by every
+- * consumer (sidebar menu, settings page) and synced across tabs.
++ * connected sessions sort ahead of archived ones. The sidebar list and menu
++ * share this store, and preferences sync across tabs.
+  */
+ export type SessionListSort = 'last-message' | 'created'
+ export type SessionListStatus = 'all' | 'active' | 'archived'
+diff --git a/web/src/hooks/useShowActiveSessionsOnly.ts b/web/src/hooks/useShowActiveSessionsOnly.ts
+deleted file mode 100644
+index 47b882e1b..000000000
+--- a/web/src/hooks/useShowActiveSessionsOnly.ts
++++ /dev/null
+@@ -1,17 +0,0 @@
+-import { useCallback } from 'react'
+-import { useSessionListView } from './useSessionListView'
+-
+-/**
+- * Settings-page view of the session list status filter: "active only" is the
+- * Active status, so the switch and the list's sort/filter menu stay in sync.
+- */
+-export function useShowActiveSessionsOnly(): {
+-    showActiveSessionsOnly: boolean
+-    setShowActiveSessionsOnly: (value: boolean) => void
+-} {
+-    const { view, setView } = useSessionListView()
+-    const setShowActiveSessionsOnly = useCallback((value: boolean) => {
+-        setView({ status: value ? 'active' : 'all' })
+-    }, [setView])
+-    return { showActiveSessionsOnly: view.status === 'active', setShowActiveSessionsOnly }
+-}
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index 21f4f23c4..d9d55c04f 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -1207,8 +1207,6 @@ export default {
+   'settings.display.sessionPreviewLimit': 'Sessions Before Folding',
+   'settings.display.sessionPreviewLimit.decrease': 'Show fewer sessions before folding',
+   'settings.display.sessionPreviewLimit.increase': 'Show more sessions before folding',
+-  'settings.display.activeSessionsOnly': 'Active sessions only',
+-  'settings.display.activeSessionsOnly.desc': 'Hide inactive sessions except the session you have open and sessions with a running long-running job.',
+   'settings.display.pinInProgressSessions': 'Pin in-progress sessions',
+   'settings.display.pinInProgressSessions.desc': 'How loudly sessions float to the top In progress section above project folders. Default is long-running jobs (outliving batch work with a session job meter). Global pins remain above it. Connected-but-idle sessions (hub socket up, agent not working and not waiting on you) stay in project folders in every mode — that is not in-progress work. Off keeps everything in directory groups.',
+   'settings.display.pinInProgressMode.off': 'Off',
+diff --git a/web/src/lib/locales/ja.ts b/web/src/lib/locales/ja.ts
+index 79d0a463a..30826ae71 100644
+--- a/web/src/lib/locales/ja.ts
++++ b/web/src/lib/locales/ja.ts
+@@ -1135,8 +1135,6 @@ export default {
+   'settings.display.sessionPreviewLimit': '折りたたむまでのセッション数',
+   'settings.display.sessionPreviewLimit.decrease': '折りたたむまでのセッション表示数を減らす',
+   'settings.display.sessionPreviewLimit.increase': '折りたたむまでのセッション表示数を増やす',
+-  'settings.display.activeSessionsOnly': 'アクティブなセッションのみ',
+-  'settings.display.activeSessionsOnly.desc': '開いているセッションと、長時間ジョブが実行中のセッションを除き、非アクティブなセッションを非表示にします。',
+   'settings.display.pinInProgressSessions': '進行中のセッションをピン留め',
+   'settings.display.pinInProgressSessions.desc': 'プロジェクトフォルダの上にある「進行中」セクションの先頭に、どの範囲のセッションを浮かべるかを選びます。デフォルトは長時間ジョブ（セッションジョブメーターを持つ、バッチ処理などの長時間作業）です。グローバルのピン留めはその上に残ります。接続中だがアイドル状態のセッション（hub ソケットは接続済みで、エージェントが作業中でも入力待ちでもないもの）は、どのモードでもプロジェクトフォルダに残ります。これは進行中の作業ではありません。オフにすると、すべてディレクトリグループ内に表示されます。',
+   'settings.display.pinInProgressMode.off': 'オフ',
+diff --git a/web/src/lib/locales/ru.ts b/web/src/lib/locales/ru.ts
+index 0bf96c73b..353286e58 100644
+--- a/web/src/lib/locales/ru.ts
++++ b/web/src/lib/locales/ru.ts
+@@ -1039,8 +1039,6 @@ export default {
+   'settings.display.sessionPreviewLimit': 'Сессий до сворачивания',
+   'settings.display.sessionPreviewLimit.decrease': 'Показывать меньше сессий до сворачивания',
+   'settings.display.sessionPreviewLimit.increase': 'Показывать больше сессий до сворачивания',
+-  'settings.display.activeSessionsOnly': 'Только активные сессии',
+-  'settings.display.activeSessionsOnly.desc': 'Скрыть неактивные сессии, кроме открытой и сессий с выполняющейся долгой задачей.',
+   'settings.display.pinInProgressSessions': 'Закреплять сессии в работе',
+   'settings.display.pinInProgressSessions.desc': 'Насколько громко сессии всплывают в верхний раздел «В работе» над папками проекта. По умолчанию — долгие задачи (фоновая работа с измерителем session job). Глобальные закрепления остаются выше. Подключённые, но простаивающие сессии (сокет хаба есть, агент не работает и не ждёт вас) остаются в папках проекта в любом режиме — это не работа в процессе. Выключено — всё остаётся в группах по каталогам.',
+   'settings.display.pinInProgressMode.off': 'Выкл.',
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index 2bc23cf68..7c858cb21 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -1205,8 +1205,6 @@ export default {
+   'settings.display.sessionPreviewLimit': '会话折叠阈值',
+   'settings.display.sessionPreviewLimit.decrease': '减少折叠前显示的会话数',
+   'settings.display.sessionPreviewLimit.increase': '增加折叠前显示的会话数',
+-  'settings.display.activeSessionsOnly': '仅显示活跃会话',
+-  'settings.display.activeSessionsOnly.desc': '隐藏非活跃会话，但当前打开的会话以及带有运行中长时间任务的会话仍会保留显示。',
+   'settings.display.pinInProgressSessions': '置顶进行中会话',
+   'settings.display.pinInProgressSessions.desc': '侧边栏顶部「进行中」分区的置顶程度（位于项目目录分组之上）。默认为长时间任务（带会话 job 进度的后台批处理）。全局置顶仍在该分区之上。仅保持连接、智能体未在工作且未等待你操作的会话在任何模式下都留在项目目录中——那不是进行中的工作。关闭后全部保留在目录分组中。',
+   'settings.display.pinInProgressMode.off': '关闭',
+diff --git a/web/src/routes/settings/display.tsx b/web/src/routes/settings/display.tsx
+index d6c07f593..1889dc46d 100644
+--- a/web/src/routes/settings/display.tsx
++++ b/web/src/routes/settings/display.tsx
+@@ -5,7 +5,6 @@ import { getColorThemeOptions, getColorThemePreview, useColorTheme, type ColorTh
+ import { getFontScaleOptions, useFontScale } from '@/hooks/useFontScale'
+ import { getTerminalFontSizeOptions, useTerminalFontSize } from '@/hooks/useTerminalFontSize'
+ import { getSessionListStatusModeOptions, useSessionListStatusMode } from '@/hooks/useSessionListStatusMode'
+-import { useShowActiveSessionsOnly } from '@/hooks/useShowActiveSessionsOnly'
+ import { isIndicatorSmoothingEnabled, setIndicatorSmoothing } from '@/hooks/useLowRateAnimation'
+ import { useKeepUnreadSessionsVisible } from '@/hooks/useKeepUnreadSessionsVisible'
+ import { usePinInProgressSessions } from '@/hooks/usePinInProgressSessions'
+@@ -140,7 +139,6 @@ export default function SettingsDisplayPage() {
+     const { fontScale, setFontScale } = useFontScale()
+     const { terminalFontSize, setTerminalFontSize } = useTerminalFontSize()
+     const { sessionListStatusMode, setSessionListStatusMode } = useSessionListStatusMode()
+-    const { showActiveSessionsOnly, setShowActiveSessionsOnly } = useShowActiveSessionsOnly()
+     const { pinInProgressMode, setPinInProgressMode } = usePinInProgressSessions()
+     const { keepUnreadSessionsVisible, setKeepUnreadSessionsVisible } = useKeepUnreadSessionsVisible()
+     const { appBadgeEnabled, setAppBadgeEnabled } = useAppBadgePreference()
+@@ -181,7 +179,6 @@ export default function SettingsDisplayPage() {
+ 
+             <SettingsSection title={t('settings.display.sessions')}>
+                 <SessionPreviewLimitControl />
+-                <SettingsSwitch label={t('settings.display.activeSessionsOnly')} description={t('settings.display.activeSessionsOnly.desc')} checked={showActiveSessionsOnly} onChange={setShowActiveSessionsOnly} />
+                 <SettingsChoiceGroup
+                     label={t('settings.display.pinInProgressSessions')}
+                     description={t('settings.display.pinInProgressSessions.desc')}
+diff --git a/web/src/routes/settings/index.test.tsx b/web/src/routes/settings/index.test.tsx
+index 51c654b35..a8c752772 100644
+--- a/web/src/routes/settings/index.test.tsx
++++ b/web/src/routes/settings/index.test.tsx
+@@ -155,10 +155,6 @@ vi.mock('@/hooks/useSessionListStatusMode', () => ({
+     ],
+ }))
+ 
+-vi.mock('@/hooks/useShowActiveSessionsOnly', () => ({
+-    useShowActiveSessionsOnly: () => ({ showActiveSessionsOnly: false, setShowActiveSessionsOnly: vi.fn() }),
+-}))
+-
+ vi.mock('@/hooks/usePinInProgressSessions', () => ({
+     usePinInProgressSessions: () => ({
+         pinInProgressMode: 'off' as const,
+-- 
+2.54.0 (Apple Git-157)
+

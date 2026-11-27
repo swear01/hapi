@@ -36,6 +36,7 @@ import app.hapi.data.store.ScratchlistCreateResult
 import app.hapi.data.store.SessionDetailStore
 import app.hapi.data.store.SessionScratchlist
 import app.hapi.protocol.catalog.CatalogOption
+import app.hapi.companion.feature.chat.permissions.PermissionVerdicts.isCodexUx
 import app.hapi.protocol.catalog.Flavors
 import app.hapi.protocol.catalog.ModelCatalog
 import app.hapi.protocol.catalog.PermissionMode
@@ -60,6 +61,7 @@ import app.hapi.protocol.window.asWindowMessage
 import app.hapi.protocol.wire.AgentState
 import app.hapi.protocol.wire.ApprovePermissionRequest
 import app.hapi.protocol.wire.AttachmentMetadata
+import app.hapi.protocol.wire.CursorModelsResponse
 import app.hapi.protocol.wire.CodexModelSummary
 import app.hapi.protocol.wire.HapiJson
 import app.hapi.protocol.wire.Machine
@@ -225,12 +227,14 @@ data class SessionConfigUi(
     val model: String?,
     /** null → hide the model section (flavor without a known catalog). */
     val modelOptions: List<CatalogOption>?,
-    /** True while the codex model catalog loads (sheet shows a spinner row). */
+    /** True while the session model catalog loads (sheet shows a spinner row). */
     val modelOptionsLoading: Boolean,
     /** Claude `effort` or codex `modelReasoningEffort`, whichever applies. */
     val effort: String?,
     /** null → hide the effort section. */
     val effortOptions: List<CatalogOption>?,
+    val cursorCatalog: CursorModelsResponse? = null,
+    val pending: Boolean = false,
 )
 
 /** One-shot side effects for the screen. */
@@ -276,6 +280,7 @@ sealed interface ChatNotice {
     data class ModelsLoadFailed(val detail: String?) : ChatNotice
     data class ReadStateFailed(val detail: String?) : ChatNotice
     data class ConfigUpdateFailed(val detail: String?) : ChatNotice
+    data object ConfigReadbackUnavailable : ChatNotice
     data class TranslateInputFailed(val detail: String?) : ChatNotice
 }
 
@@ -318,7 +323,7 @@ sealed interface PermissionAction {
  * - **Permissions** ([resolvePermission]): flavor-exact approve/deny bodies,
  *   optimistic [PermissionRowOverride]s settled by the agentState patch.
  * - **Config** ([config]/[setPermissionMode]/[setModel]/[setEffort]): catalog
- *   pickers with optimistic detail updates, rolled back to server truth on
+ *   pickers with confirmed detail updates, reloaded from the server on
  *   error; codex model catalog fetched per session ([loadModelOptions]).
  *
  * B-M3f adds:
@@ -398,6 +403,7 @@ class ChatViewModel(
     // with Compose callbacks. Use queued Main (not Main.immediate), so a
     // synchronous completion cannot clear a job before its handle is assigned.
     private val uiScope = CoroutineScope(scope.coroutineContext + uiDispatcher)
+    internal val modelErrorRecovery = ModelErrorRecovery(sessionId, api, sessionStore, uiScope)
     private val workerContext = scope.coroutineContext.minusKey(Job)
     private val router = SyncEventRouter(syncTargets)
     private val subscriptionKey = SseSubscriptionKey.Session(sessionId)
@@ -540,14 +546,15 @@ class ChatViewModel(
     )
     private val codexPlanOperations = MutableStateFlow(CodexPlanOperations())
 
-    private sealed interface CodexModels {
-        data object Idle : CodexModels
-        data object Loading : CodexModels
-        data class Loaded(val models: List<CodexModelSummary>) : CodexModels
-        data object Failed : CodexModels
+    private sealed interface SessionModels {
+        data class Cursor(val catalog: CursorModelsResponse) : SessionModels
+        data object Idle : SessionModels
+        data object Loading : SessionModels
+        data class Loaded(val models: List<CodexModelSummary>) : SessionModels
+        data object Failed : SessionModels
     }
 
-    private val codexModels = MutableStateFlow<CodexModels>(CodexModels.Idle)
+    private val sessionModels = MutableStateFlow<SessionModels>(SessionModels.Idle)
 
     private sealed interface SlashFetch {
         data object Idle : SlashFetch
@@ -661,11 +668,11 @@ class ChatViewModel(
     val config: StateFlow<SessionConfigUi> = combine(
         sessionStore.sessionDetail(sessionId),
         summaryFlow(),
-        codexModels,
+        sessionModels,
         configOpPending,
-    ) { detail, summary, models, _ ->
-        buildConfigUi(detail, summary, models)
-    }.stateIn(scope, SharingStarted.Eagerly, buildConfigUi(null, null, CodexModels.Idle))
+    ) { detail, summary, models, pending ->
+        buildConfigUi(detail, summary, models).copy(pending = pending)
+    }.stateIn(scope, SharingStarted.Eagerly, buildConfigUi(null, null, SessionModels.Idle))
 
     /**
      * Slash-command dropdown rows (B-M3ce): non-empty only while the composer
@@ -1505,6 +1512,7 @@ class ChatViewModel(
         scope.launch {
             try {
                 api.abortSession(sessionId)
+                withContext(uiScope.coroutineContext.minusKey(Job)) { modelErrorRecovery.onAbort() }
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (error: Exception) {
@@ -1872,7 +1880,7 @@ class ChatViewModel(
         val flavor = currentFlavor()
         val request = currentDetail()?.agentState?.requests?.get(requestId)
         val toolName = request?.tool
-        val codexUx = isCodexPermissionUx(flavor, toolName)
+        val codexUx = isCodexUx(flavor, toolName)
         return when (action) {
             PermissionAction.Allow ->
                 if (codexUx) ApprovePermissionRequest(decision = "approved")
@@ -2005,23 +2013,28 @@ class ChatViewModel(
         detail?.agentState?.controlledByUser == true && detail?.metadata?.capabilities?.concurrentClients != true
 
     /**
-     * `POST /permission-mode` with an optimistic detail flip; server truth on
+     * `POST /permission-mode` after native confirmation; server truth on
      * error. Inactive sessions stay switchable (web parity — the send path
      * auto-resumes); only copilot sessions under local terminal control lose
      * the switcher (web withholds the callback, SessionChat.tsx:2159-2163).
      */
     fun setPermissionMode(mode: PermissionMode) {
-        if (currentFlavor() == "copilot" && terminalControlled(currentDetail())) return
+        if (currentFlavor() in setOf("copilot", "cursor") && terminalControlled(currentDetail())) return
         runConfigChange(
-            optimistic = { it.copy(permissionMode = mode.wireId) },
+            confirmed = { it.copy(permissionMode = mode.wireId) },
             call = { api.setPermissionMode(sessionId, mode.wireId) },
         )
     }
 
     /** `POST /model` — null clears back to the agent default. */
+    private fun canChangeCursorModel(detail: Session?): Boolean =
+        detail?.active == true && !terminalControlled(detail) && (detail.metadata?.cursorSessionProtocol == "acp"
+            || detail.metadata?.let { it.cursorSessionProtocol == null && it.cursorSessionId == null } == true)
+
     fun setModel(model: String?) {
+        if (currentFlavor() == "cursor" && !canChangeCursorModel(currentDetail())) return
         runConfigChange(
-            optimistic = { it.copy(model = model) },
+            confirmed = { it.copy(model = model) },
             call = { api.setModel(sessionId, model) },
         )
     }
@@ -2033,7 +2046,7 @@ class ChatViewModel(
     fun setEffort(effort: String?) {
         val usesReasoningEffort = currentFlavor() == "codex" || currentFlavor() == "opencode"
         runConfigChange(
-            optimistic = {
+            confirmed = {
                 if (usesReasoningEffort) it.copy(modelReasoningEffort = effort) else it.copy(effort = effort)
             },
             call = {
@@ -2046,41 +2059,63 @@ class ChatViewModel(
         )
     }
 
-    /** Fetch the codex model catalog for the picker (no-op for other flavors). */
+    /** Fetch the codex model catalog for the selected flavor. */
     fun loadModelOptions() {
-        if (currentFlavor() != "codex") return
-        if (codexModels.value is CodexModels.Loading || codexModels.value is CodexModels.Loaded) return
-        codexModels.value = CodexModels.Loading
+        val flavor = currentFlavor()
+        if (flavor !in setOf("cursor", "codex")) return
+        if (flavor == "cursor" && !canChangeCursorModel(currentDetail())) return
+        if (sessionModels.value is SessionModels.Loading || (flavor == "codex" && sessionModels.value is SessionModels.Loaded)) return
+        sessionModels.value = SessionModels.Loading
         scope.launch {
-            codexModels.value = try {
-                val response = api.getSessionCodexModels(sessionId)
-                val models = response.models
-                if (response.success && models != null) {
-                    CodexModels.Loaded(models)
+            sessionModels.value = try {
+                if (flavor == "cursor") {
+                    val response = api.getSessionCursorModels(sessionId)
+                    if (response.success) SessionModels.Cursor(response) else {
+                        _events.tryEmit(ChatEvent.Notice(ChatNotice.ModelsLoadFailed(response.error)))
+                        SessionModels.Failed
+                    }
                 } else {
-                    _events.tryEmit(ChatEvent.Notice(ChatNotice.ModelsLoadFailed(response.error)))
-                    CodexModels.Failed
+                    val response = api.getSessionCodexModels(sessionId)
+                    val models = response.models
+                    if (response.success && models != null) {
+                        SessionModels.Loaded(models)
+                    } else {
+                        _events.tryEmit(ChatEvent.Notice(ChatNotice.ModelsLoadFailed(response.error)))
+                        SessionModels.Failed
+                    }
                 }
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (error: Exception) {
                 _events.tryEmit(ChatEvent.Notice(ChatNotice.ModelsLoadFailed(error.message)))
-                CodexModels.Failed
+                SessionModels.Failed
             }
         }
     }
 
-    private fun runConfigChange(optimistic: (Session) -> Session, call: suspend () -> Unit) {
+    private fun runConfigChange(confirmed: (Session) -> Session, call: suspend () -> Unit) {
         if (!configOpPending.compareAndSet(expect = false, update = true)) return
-        sessionStore.updateDetailLocal(sessionId, optimistic)
+        val isCursor = currentFlavor() == "cursor"
         scope.launch {
             try {
                 call()
+                if (isCursor) {
+                    // Cursor can canonicalize a model wire or apply only part of a change.
+                    // A failed readback leaves the last confirmed selection visible.
+                    try {
+                        sessionStore.loadSessionDetail(sessionId)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        _events.tryEmit(ChatEvent.Notice(ChatNotice.ConfigReadbackUnavailable))
+                    }
+                } else {
+                    sessionStore.updateDetailLocal(sessionId, confirmed)
+                }
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (error: Exception) {
-                // Roll back by rolling forward to server truth (an SSE patch
-                // may have moved other fields since the optimistic write).
+                // Even a rejected Cursor change may have applied part of the configuration.
                 runCatching { sessionStore.loadSessionDetail(sessionId) }
                 _events.tryEmit(ChatEvent.Notice(ChatNotice.ConfigUpdateFailed(error.message)))
             } finally {
@@ -2089,7 +2124,7 @@ class ChatViewModel(
         }
     }
 
-    private fun buildConfigUi(detail: Session?, summary: SessionSummary?, models: CodexModels): SessionConfigUi {
+    private fun buildConfigUi(detail: Session?, summary: SessionSummary?, models: SessionModels): SessionConfigUi {
         val flavor = detail?.metadata?.flavor ?: summary?.metadata?.flavor
         val model = detail?.model
         val modelOptions: List<CatalogOption>?
@@ -2105,7 +2140,7 @@ class ChatViewModel(
             }
             "codex" -> {
                 when (models) {
-                    is CodexModels.Loaded -> {
+                    is SessionModels.Loaded -> {
                         modelOptions = models.models.map { summaryRow ->
                             CatalogOption(
                                 value = summaryRow.id,
@@ -2122,12 +2157,16 @@ class ChatViewModel(
                             }
                         }
                     }
-                    is CodexModels.Loading -> {
+                    is SessionModels.Loading -> {
                         modelOptions = emptyList()
                         modelOptionsLoading = true
                     }
                     else -> modelOptions = emptyList()
                 }
+            }
+            "cursor" -> {
+                modelOptionsLoading = canChangeCursorModel(detail) && models is SessionModels.Loading
+                modelOptions = if (!canChangeCursorModel(detail) || models is SessionModels.Cursor) null else emptyList()
             }
             else -> modelOptions = null // Generic fallback: hide the picker.
         }
@@ -2137,10 +2176,14 @@ class ChatViewModel(
             active = detail?.active ?: summary?.active ?: false,
             controlledByUser = terminalControlled(detail),
             permissionMode = detail?.permissionMode,
-            permissionModes = PermissionModes.forFlavor(flavor),
+            permissionModes = PermissionModes.forFlavor(flavor).filterNot {
+                flavor == "cursor" && detail?.active == true && !terminalControlled(detail) &&
+                    detail.metadata?.cursorAcpPermissionModes?.contains(it.wireId) == false
+            },
             model = model,
             modelOptions = modelOptions,
             modelOptionsLoading = modelOptionsLoading,
+            cursorCatalog = (models as? SessionModels.Cursor)?.catalog?.takeIf { canChangeCursorModel(detail) },
             effort = effort,
             effortOptions = effortOptions,
         )
@@ -2395,18 +2438,5 @@ class ChatViewModel(
 
         fun Exception.isSessionInactive(): Boolean =
             this is ApiError && status == 409 && code == "session_inactive"
-
-        /**
-         * Codex-style approval UX (`PermissionFooter.isCodexSession`): codex
-         * family or cursor flavor, or a codex-dialect tool name.
-         */
-        fun isCodexPermissionUx(flavor: String?, toolName: String?): Boolean =
-            Flavors.isCodexFamily(flavor) ||
-                flavor == "cursor" ||
-                toolName?.let { name ->
-                    name.startsWith("Codex") || name.startsWith("Gemini") ||
-                        name.startsWith("OpenCode") || name.startsWith("Copilot") ||
-                        name.startsWith("Cursor")
-                } == true
     }
 }

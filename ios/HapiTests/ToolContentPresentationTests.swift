@@ -25,9 +25,26 @@ final class ToolContentPresentationTests: XCTestCase {
         XCTAssertNil(toolSourceInput(.object(["unknown": .bool(true)]), keys: ["patch"]))
     }
 
+    func testCodexPatchKeepsHunksWithTheirFileAndPreservesPathFallback() throws {
+        let diff = "@@ -1 +1 @@\n-2\n+3\n"
+        let inputs = [
+            #"{"changes":{"left/example.txt":{"type":"update","unified_diff":"@@ -1 +1 @@\n-2\n+3\n"},"right/example.txt":{"type":"update"}}}"#,
+            #"{"changes":[{"path":"left/example.txt","kind":{"type":"update"},"diff":"@@ -1 +1 @@\n-2\n+3\n"},{"path":"right/example.txt","kind":{"type":"add"},"diff":"@@ -1 +1 @@\n-2\n+3\n"}]}"#,
+        ]
+        for input in inputs {
+            let files = codexPatchFiles(try json(input))
+            XCTAssertEqual(files.map(\.path), ["left/example.txt", "right/example.txt"])
+            XCTAssertEqual(files.map(\.diff), [diff, nil])
+            let file = try XCTUnwrap(codexPatchDiff(diff, path: files[0].path))
+            XCTAssertEqual(file.displayPath, "left/example.txt")
+            XCTAssertEqual(file.hunks.first?.lines.map(\.text), ["2", "3"])
+            XCTAssertEqual(file.hunks.first?.lines.map(\.kind), [.deletion, .addition])
+        }
+    }
+
     func testPlanProposalsReadInputAndPreserveTheCompleteDocument() throws {
         let plan = "\n# 计划 👩🏽‍💻\n\n" + String(repeating: "- Inspect **input.plan**  \n", count: 1_000) + "last  \n"
-        for name in ["ExitPlanMode", "exit_plan_mode"] {
+        for name in ["ExitPlanMode", "exit_plan_mode", "CursorCreatePlan"] {
             let input: JSONValue = .object(["plan": .string(plan), "extra": .bool(true)])
             let call = tool(name, input: input, result: .null)
             XCTAssertTrue(isPlanProposalTool(name))
@@ -49,6 +66,27 @@ final class ToolContentPresentationTests: XCTestCase {
         XCTAssertNil(planProposalMarkdown(tool("update_plan", input: .object(["plan": .string(plan)]))))
         XCTAssertNil(planProposalMarkdown(tool("mcp__server__ExitPlanMode", input: .object(["plan": .string(plan)]))))
         XCTAssertEqual(checklistItems(try json(#"{"plan":[{"step":"Inspect","status":"completed"}]}"#)).first?.glyph, "☑")
+    }
+
+    func testCursorPhaseHierarchyPreservesCancelledTodosAndSuppressesFlatDuplicates() throws {
+        let input = try json(#"{"todos":[{"content":"duplicate"}],"phases":[{"name":"Design","todos":[{"content":"Retired","status":"cancelled"}]}]}"#)
+        let phases = planProposalSections(tool("CursorCreatePlan", input: input))
+        XCTAssertEqual(phases.count, 1)
+        XCTAssertEqual(phases.first?[chatKey: "name"]?.chatString, "Design")
+        XCTAssertEqual(checklistItems(phases.first).first?.glyph, "⊘")
+        XCTAssertTrue(planProposalSections(tool("ExitPlanMode", input: input)).isEmpty)
+    }
+
+    func testCursorPlanOverviewCanStandAloneAndOmitsDuplicates() throws {
+        let both: JSONValue = .object(["overview": .string(" Review the changes. "), "plan": .string("## Steps")])
+        XCTAssertEqual(planProposalOverview(tool("CursorCreatePlan", input: both)), "Review the changes.")
+        XCTAssertEqual(planProposalMarkdown(tool("CursorCreatePlan", input: both)), "## Steps")
+        XCTAssertNil(planProposalOverview(tool("ExitPlanMode", input: both)))
+        let onlyOverview = try json(#"{"overview":"Review only."}"#)
+        XCTAssertEqual(planProposalOverview(tool("CursorCreatePlan", input: onlyOverview)), "Review only.")
+        for input in [#"{"overview":" \n "}"#, #"{"overview":42}"#, #"{"overview":"Summary","plan":"\nSummary\n"}"#] {
+            XCTAssertNil(planProposalOverview(tool("CursorCreatePlan", input: try json(input))))
+        }
     }
 
     func testResultEnvelopesAndWhitespace() throws {

@@ -1,0 +1,592 @@
+From 4024d06800f2e06b336f15fca1cca1335b2342a0 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 28 Nov 2026 05:59:20 +0800
+Subject: [PATCH] Integrate reviewed Codex per-file patch rendering
+
+---
+ .../feature/chat/ToolCardPresentation.kt      |  4 +-
+ .../feature/chat/blocks/CodexPatchFiles.kt    | 22 +++++++
+ .../feature/chat/blocks/ToolBodies.kt         | 23 ++++++-
+ .../blocks/ToolContentPresentationTest.kt     | 17 ++++++
+ .../utils/appServerEventConverter.test.ts     | 17 ++++++
+ .../codex/utils/appServerEventConverter.ts    | 25 +-------
+ .../Features/Chat/Blocks/ToolBodies.swift     | 33 ++++++++--
+ .../Chat/Blocks/ToolCardPresentation.swift    |  2 +-
+ .../Chat/Blocks/ToolContentPresentation.swift | 29 +++++++++
+ .../ToolContentPresentationTests.swift        | 17 ++++++
+ .../components/ToolCard/codexPatch.test.tsx   | 61 +++++++++++++++++++
+ web/src/components/ToolCard/codexPatch.ts     | 22 +++++++
+ web/src/components/ToolCard/knownTools.tsx    | 20 +++---
+ .../ToolCard/views/CodexPatchView.tsx         | 38 ++++++++----
+ web/src/components/ToolCard/views/_all.tsx    |  1 +
+ 15 files changed, 277 insertions(+), 54 deletions(-)
+ create mode 100644 android/app/src/main/kotlin/app/hapi/companion/feature/chat/blocks/CodexPatchFiles.kt
+ create mode 100644 web/src/components/ToolCard/codexPatch.test.tsx
+ create mode 100644 web/src/components/ToolCard/codexPatch.ts
+
+diff --git a/android/app/src/main/kotlin/app/hapi/companion/feature/chat/ToolCardPresentation.kt b/android/app/src/main/kotlin/app/hapi/companion/feature/chat/ToolCardPresentation.kt
+index 969c841db..e91a45c93 100644
+--- a/android/app/src/main/kotlin/app/hapi/companion/feature/chat/ToolCardPresentation.kt
++++ b/android/app/src/main/kotlin/app/hapi/companion/feature/chat/ToolCardPresentation.kt
+@@ -3,6 +3,7 @@ package app.hapi.companion.feature.chat
+ import android.content.res.Resources
+ import androidx.annotation.DrawableRes
+ import app.hapi.companion.R
++import app.hapi.companion.feature.chat.blocks.codexPatchFiles
+ import app.hapi.companion.feature.chat.blocks.toolPresentationName
+ import app.hapi.protocol.chat.ChatToolCall
+ import app.hapi.protocol.chat.getInputStringAny
+@@ -383,8 +384,7 @@ fun toolCardPresentation(
+         }
+ 
+         "CodexPatch" -> {
+-            val changes = input.asObjectOrNull()?.get("changes").asObjectOrNull()
+-            val files = changes?.keys?.toList().orEmpty()
++            val files = codexPatchFiles(input).map { it.path }
+             val subtitle = files.firstOrNull()?.let { first ->
+                 val display = basename(displayPath(first, basePath))
+                 if (files.size > 1) "$display (+${files.size - 1})" else display
+diff --git a/android/app/src/main/kotlin/app/hapi/companion/feature/chat/blocks/CodexPatchFiles.kt b/android/app/src/main/kotlin/app/hapi/companion/feature/chat/blocks/CodexPatchFiles.kt
+new file mode 100644
+index 000000000..2b4626ed8
+--- /dev/null
++++ b/android/app/src/main/kotlin/app/hapi/companion/feature/chat/blocks/CodexPatchFiles.kt
+@@ -0,0 +1,22 @@
++package app.hapi.companion.feature.chat.blocks
++
++import app.hapi.protocol.chat.getInputString
++import app.hapi.protocol.chat.getInputStringAny
++import kotlinx.serialization.json.JsonArray
++import kotlinx.serialization.json.JsonElement
++import kotlinx.serialization.json.JsonObject
++
++internal data class CodexPatchFile(val path: String, val diff: String?)
++
++internal fun codexPatchFiles(input: JsonElement?): List<CodexPatchFile> {
++    fun file(path: String, change: JsonElement): CodexPatchFile {
++        val kind = getInputString((change as? JsonObject)?.get("kind"), "type") ?: getInputString(change, "type")
++        val diff = if (kind == "update") getInputStringAny(change, listOf("unified_diff", "diff")) else null
++        return CodexPatchFile(path, diff?.takeUnless { it.isBlank() })
++    }
++    return when (val changes = (input as? JsonObject)?.get("changes")) {
++        is JsonObject -> changes.map { (path, change) -> file(path, change) }
++        is JsonArray -> changes.mapNotNull { change -> getInputStringAny(change, listOf("path"))?.let { file(it, change) } }
++        else -> emptyList()
++    }
++}
+diff --git a/android/app/src/main/kotlin/app/hapi/companion/feature/chat/blocks/ToolBodies.kt b/android/app/src/main/kotlin/app/hapi/companion/feature/chat/blocks/ToolBodies.kt
+index badcbf312..b3740c377 100644
+--- a/android/app/src/main/kotlin/app/hapi/companion/feature/chat/blocks/ToolBodies.kt
++++ b/android/app/src/main/kotlin/app/hapi/companion/feature/chat/blocks/ToolBodies.kt
+@@ -23,6 +23,7 @@ import androidx.compose.ui.res.stringResource
+ import androidx.compose.ui.text.font.FontWeight
+ import androidx.compose.ui.unit.dp
+ import app.hapi.companion.R
++import app.hapi.companion.feature.chat.displayPath
+ import app.hapi.companion.feature.chat.terminalCommand
+ import app.hapi.companion.ui.components.DiffView
+ import app.hapi.companion.ui.markdown.Markdown
+@@ -80,7 +81,7 @@ internal fun ToolCallBody(tool: ChatToolCall, basePath: String?, modifier: Modif
+             if (planProposalShowsResult(tool)) ToolResultSection(tool)
+         } else {
+             SectionLabel(stringResource(R.string.settings_usage_input))
+-            ToolInputSection(tool)
++            ToolInputSection(tool, basePath)
+             ToolResultSection(tool)
+         }
+         var sourceExpanded by rememberSaveable(tool.id) { mutableStateOf(false) }
+@@ -136,7 +137,7 @@ private fun QuestionToolBody(tool: ChatToolCall) {
+ // ------------------------------------------------------------------ input --
+ 
+ @Composable
+-private fun ToolInputSection(tool: ChatToolCall) {
++private fun ToolInputSection(tool: ChatToolCall, basePath: String?) {
+     val input = tool.input
+     val name = toolPresentationName(tool.name)
+     when {
+@@ -152,7 +153,20 @@ private fun ToolInputSection(tool: ChatToolCall) {
+ 
+         name == "CodexPatch" -> {
+             val patch = toolSourceInput(input, listOf("patch", "input", "command"))
+-            if (patch != null) ToolTextContent(code = patch, language = "diff") else GenericJsonInput(input)
++            val changes = remember(input) { codexPatchFiles(input) }
++            when {
++                patch != null -> ToolTextContent(code = patch, language = "diff")
++                changes.isEmpty() -> GenericJsonInput(input)
++                else -> changes.forEach { change ->
++                    val path = displayPath(change.path, basePath)
++                    val diff = change.diff
++                    val file = remember(path, diff) { diff?.takeIf { fitsToolPage(it) }?.let { codexPatchDiff(it, path) } }
++                    if (file != null) DiffView(file = file) else {
++                        Text(text = path)
++                        if (!diff.isNullOrEmpty()) ToolTextContent(code = diff, language = "diff")
++                    }
++                }
++            }
+         }
+ 
+         name == "Edit" -> {
+@@ -373,6 +387,9 @@ internal fun resultRendering(tool: ChatToolCall): ResultRendering? {
+ 
+ // ---------------------------------------------------------------- helpers --
+ 
++internal fun codexPatchDiff(text: String, path: String): DiffFile? = UnifiedDiffParser.parse(text)
++    .singleOrNull()?.takeIf { it.hunks.isNotEmpty() }?.copy(oldPath = path, newPath = path)
++
+ private val DIFF_MARKER = Regex("(^|\n)@@ -\\d")
+ private val DIFF_HEADER = Regex("(^|\n)(diff --git |--- )")
+ 
+diff --git a/android/app/src/test/kotlin/app/hapi/companion/feature/chat/blocks/ToolContentPresentationTest.kt b/android/app/src/test/kotlin/app/hapi/companion/feature/chat/blocks/ToolContentPresentationTest.kt
+index e6837a344..aafb4e5de 100644
+--- a/android/app/src/test/kotlin/app/hapi/companion/feature/chat/blocks/ToolContentPresentationTest.kt
++++ b/android/app/src/test/kotlin/app/hapi/companion/feature/chat/blocks/ToolContentPresentationTest.kt
+@@ -2,6 +2,7 @@ package app.hapi.companion.feature.chat.blocks
+ 
+ import app.hapi.companion.feature.chat.terminalCommand
+ import app.hapi.protocol.chat.ChatToolCall
++import app.hapi.protocol.git.DiffLineKind
+ import app.hapi.protocol.wire.HapiJson
+ import kotlinx.serialization.json.JsonElement
+ import kotlinx.serialization.json.JsonNull
+@@ -32,6 +33,22 @@ class ToolContentPresentationTest {
+         assertNull(toolSourceInput(json("""{"unknown":true}"""), listOf("patch")))
+     }
+ 
++    @Test fun codexPatchKeepsHunksWithTheirFileAndPreservesPathFallback() {
++        val diff = "@@ -1 +1 @@\n-2\n+3\n"
++        for (input in listOf(
++            """{"changes":{"left/example.txt":{"type":"update","unified_diff":"@@ -1 +1 @@\n-2\n+3\n"},"right/example.txt":{"type":"update"}}}""",
++            """{"changes":[{"path":"left/example.txt","kind":{"type":"update"},"diff":"@@ -1 +1 @@\n-2\n+3\n"},{"path":"right/example.txt","kind":{"type":"add"},"diff":"@@ -1 +1 @@\n-2\n+3\n"}]}""",
++        )) {
++            val files = codexPatchFiles(json(input))
++            assertEquals(listOf("left/example.txt", "right/example.txt"), files.map { it.path })
++            assertEquals(listOf(diff, null), files.map { it.diff })
++            val file = requireNotNull(codexPatchDiff(diff, files.first().path))
++            assertEquals("left/example.txt", file.displayPath)
++            assertEquals(listOf("2", "3"), file.hunks.single().lines.map { it.text })
++            assertEquals(listOf(DiffLineKind.REMOVE, DiffLineKind.ADD), file.hunks.single().lines.map { it.kind })
++        }
++    }
++
+     @Test fun planProposalsReadInputAndPreserveTheCompleteDocument() {
+         val plan = "\n# 计划 👩🏽‍💻\n\n" + "- Inspect **input.plan**  \n".repeat(1_000) + "last  \n"
+         for (name in listOf("ExitPlanMode", "exit_plan_mode", "CursorCreatePlan")) {
+diff --git a/cli/src/codex/utils/appServerEventConverter.test.ts b/cli/src/codex/utils/appServerEventConverter.test.ts
+index 657588333..32dc61c03 100644
+--- a/cli/src/codex/utils/appServerEventConverter.test.ts
++++ b/cli/src/codex/utils/appServerEventConverter.test.ts
+@@ -745,6 +745,23 @@ describe('AppServerEventConverter', () => {
+         }]);
+     });
+ 
++    it('preserves per-file patch data for ordered entries and legacy path maps', () => {
++        const converter = new AppServerEventConverter();
++        const path = '__proto__';
++        const diff = '@@ -1 +1 @@\n-const retries = 2;\n+const retries = 3;\n';
++        const entries = [
++            { path, kind: { type: 'update', move_path: null }, diff },
++            { path, kind: { type: 'delete' }, diff: 'const retries = 3;\n' }
++        ];
++        const byPath = { [path]: { type: 'update', unified_diff: diff, move_path: null } };
++        for (const changes of [entries, byPath]) {
++            const events = converter.handleNotification('item/started', {
++                item: { type: 'fileChange', id: 'patch-1', changes }
++            });
++            expect(events).toEqual([{ type: 'patch_apply_begin', call_id: 'patch-1', changes }]);
++        }
++    });
++
+     it('maps diff updates', () => {
+         const converter = new AppServerEventConverter();
+ 
+diff --git a/cli/src/codex/utils/appServerEventConverter.ts b/cli/src/codex/utils/appServerEventConverter.ts
+index 78b113f46..bae50cd1f 100644
+--- a/cli/src/codex/utils/appServerEventConverter.ts
++++ b/cli/src/codex/utils/appServerEventConverter.ts
+@@ -93,26 +93,6 @@ function extractViewedImagePath(value: unknown): string | null {
+     }
+ }
+ 
+-function extractChanges(value: unknown): Record<string, unknown> | null {
+-    const record = asRecord(value);
+-    if (record) return record;
+-
+-    if (Array.isArray(value)) {
+-        const changes: Record<string, unknown> = {};
+-        for (const entry of value) {
+-            const entryRecord = asRecord(entry);
+-            if (!entryRecord) continue;
+-            const path = asString(entryRecord.path ?? entryRecord.file ?? entryRecord.filePath ?? entryRecord.file_path);
+-            if (path) {
+-                changes[path] = entryRecord;
+-            }
+-        }
+-        return Object.keys(changes).length > 0 ? changes : null;
+-    }
+-
+-    return null;
+-}
+-
+ function extractTextFromContent(value: unknown): string | null {
+     if (typeof value === 'string' && value.length > 0) {
+         return value;
+@@ -1221,10 +1201,11 @@ export class AppServerEventConverter {
+                 const startedAtMs = asNumber(item.startedAtMs ?? item.started_at_ms);
+                 const completedAtMs = asNumber(item.completedAtMs ?? item.completed_at_ms);
+                 if (method === 'item/started') {
+-                    const changes = extractChanges(item.changes ?? item.change ?? item.diff);
++                    const changes = item.changes ?? item.change ?? item.diff;
+                     const autoApproved = asBoolean(item.autoApproved ?? item.auto_approved);
+                     const meta: Record<string, unknown> = {};
+-                    if (changes) meta.changes = changes;
++                    // Preserve ordered V2 entries (including repeated paths) and legacy path maps.
++                    if (changes && typeof changes === 'object') meta.changes = changes;
+                     if (autoApproved !== null) meta.auto_approved = autoApproved;
+                     if (startedAtMs !== null) meta.started_at_ms = startedAtMs;
+                     this.fileChangeMeta.set(itemId, meta);
+diff --git a/ios/Hapi/Features/Chat/Blocks/ToolBodies.swift b/ios/Hapi/Features/Chat/Blocks/ToolBodies.swift
+index 2d2ee6de6..fd8814fa3 100644
+--- a/ios/Hapi/Features/Chat/Blocks/ToolBodies.swift
++++ b/ios/Hapi/Features/Chat/Blocks/ToolBodies.swift
+@@ -140,6 +140,17 @@ private struct ToolInputSection: View {
+             ToolTextContent(language: "javascript", code: source)
+         } else if name == "CodexPatch", let patch = toolSourceInput(input, keys: ["patch", "input", "command"]) {
+             ToolTextContent(language: "diff", code: patch)
++        } else if name == "CodexPatch" {
++            let files = codexPatchFiles(input)
++            if files.isEmpty { GenericJSONInput(input: input) }
++            ForEach(Array(files.enumerated()), id: \.offset) { _, file in
++                let path = chatDisplayPath(file.path, basePath: basePath)
++                if let diff = file.diff, !diff.isEmpty {
++                    ToolDiffContent(text: diff, patchPath: path).id(path)
++                } else {
++                    Text(verbatim: path)
++                }
++            }
+         } else if name == "Edit" {
+             if let old = chatInputString(input, ["old_string"]),
+                let new = chatInputString(input, ["new_string"]) {
+@@ -378,16 +389,22 @@ func resultRendering(_ tool: ChatToolCall) -> ResultRendering? {
+ 
+ private struct ToolDiffContent: View {
+     let text: String
++    var patchPath: String? = nil
+     @State private var files: [DiffFile]?
+     var body: some View {
+         Group {
+             if let files { DiffTextView(files: files) }
+-            else { ToolTextContent(language: "diff", code: text) }
++            else {
++                if let patchPath { Text(verbatim: patchPath) }
++                ToolTextContent(language: "diff", code: text)
++            }
+         }
+         .task(id: text) {
+-            let text = text
+-            let parsed = await Task.detached(priority: .userInitiated) {
+-                text.count <= toolTextPageSize ? tryParseDiff(text) : nil
++            let text = text, patchPath = patchPath
++            let parsed = await Task.detached(priority: .userInitiated) { () -> [DiffFile]? in
++                guard text.count <= toolTextPageSize else { return nil }
++                if let patchPath { return codexPatchDiff(text, path: patchPath).map { [$0] } }
++                return tryParseDiff(text)
+             }.value
+             guard !Task.isCancelled else { return }
+             files = parsed
+@@ -395,6 +412,14 @@ private struct ToolDiffContent: View {
+     }
+ }
+ 
++func codexPatchDiff(_ text: String, path: String) -> DiffFile? {
++    let files = UnifiedDiffParser.parse(text)
++    guard files.count == 1, var file = files.first, !file.hunks.isEmpty else { return nil }
++    file.oldPath = path
++    file.newPath = path
++    return file
++}
++
+ // MARK: - Shared helpers
+ 
+ /// Parse `text` as a unified diff when it plausibly is one (the same marker
+diff --git a/ios/Hapi/Features/Chat/Blocks/ToolCardPresentation.swift b/ios/Hapi/Features/Chat/Blocks/ToolCardPresentation.swift
+index 9cdfe30b4..3e401f256 100644
+--- a/ios/Hapi/Features/Chat/Blocks/ToolCardPresentation.swift
++++ b/ios/Hapi/Features/Chat/Blocks/ToolCardPresentation.swift
+@@ -462,7 +462,7 @@ func toolCardPresentation(_ tool: ChatToolCall, basePath: String?) -> ToolCardPr
+         )
+ 
+     case "CodexPatch":
+-        let files = input?[chatKey: "changes"]?.chatObject.map { Array($0.keys).sorted() } ?? []
++        let files = codexPatchFiles(input).map(\.path)
+         let subtitle = files.first.map { first -> String in
+             let display = chatBasename(chatDisplayPath(first, basePath: basePath))
+             return files.count > 1 ? "\(display) (+\(files.count - 1))" : display
+diff --git a/ios/Hapi/Features/Chat/Blocks/ToolContentPresentation.swift b/ios/Hapi/Features/Chat/Blocks/ToolContentPresentation.swift
+index 53194bd03..c9508e810 100644
+--- a/ios/Hapi/Features/Chat/Blocks/ToolContentPresentation.swift
++++ b/ios/Hapi/Features/Chat/Blocks/ToolContentPresentation.swift
+@@ -19,6 +19,35 @@ func toolSourceInput(_ input: JSONValue?, keys: [String]) -> String? {
+     input?.chatString ?? chatInputString(input, keys)
+ }
+ 
++struct CodexPatchFile {
++    let path: String
++    let diff: String?
++
++    init(path: String, change: JSONValue) {
++        self.path = path
++        let kind = change[chatKey: "kind"]?[chatKey: "type"]?.chatString ?? change[chatKey: "type"]?.chatString
++        if kind == "update", let text = chatInputString(change, ["unified_diff", "diff"]),
++           text.contains(where: { !$0.isWhitespace }) {
++            diff = text
++        } else {
++            diff = nil
++        }
++    }
++}
++
++func codexPatchFiles(_ input: JSONValue?) -> [CodexPatchFile] {
++    switch input?[chatKey: "changes"] {
++    case .object(let changes):
++        return changes.sorted { $0.key < $1.key }.map { CodexPatchFile(path: $0.key, change: $0.value) }
++    case .array(let changes):
++        return changes.compactMap { change in
++            guard let path = change[chatKey: "path"]?.chatString, !path.isEmpty else { return nil }
++            return CodexPatchFile(path: path, change: change)
++        }
++    default: return []
++    }
++}
++
+ func isPlanProposalTool(_ name: String) -> Bool {
+     name == "ExitPlanMode" || name == "exit_plan_mode" || name == "CursorCreatePlan"
+ }
+diff --git a/ios/HapiTests/ToolContentPresentationTests.swift b/ios/HapiTests/ToolContentPresentationTests.swift
+index 3537638c5..9bf5ab648 100644
+--- a/ios/HapiTests/ToolContentPresentationTests.swift
++++ b/ios/HapiTests/ToolContentPresentationTests.swift
+@@ -25,6 +25,23 @@ final class ToolContentPresentationTests: XCTestCase {
+         XCTAssertNil(toolSourceInput(.object(["unknown": .bool(true)]), keys: ["patch"]))
+     }
+ 
++    func testCodexPatchKeepsHunksWithTheirFileAndPreservesPathFallback() throws {
++        let diff = "@@ -1 +1 @@\n-2\n+3\n"
++        let inputs = [
++            #"{"changes":{"left/example.txt":{"type":"update","unified_diff":"@@ -1 +1 @@\n-2\n+3\n"},"right/example.txt":{"type":"update"}}}"#,
++            #"{"changes":[{"path":"left/example.txt","kind":{"type":"update"},"diff":"@@ -1 +1 @@\n-2\n+3\n"},{"path":"right/example.txt","kind":{"type":"add"},"diff":"@@ -1 +1 @@\n-2\n+3\n"}]}"#,
++        ]
++        for input in inputs {
++            let files = codexPatchFiles(try json(input))
++            XCTAssertEqual(files.map(\.path), ["left/example.txt", "right/example.txt"])
++            XCTAssertEqual(files.map(\.diff), [diff, nil])
++            let file = try XCTUnwrap(codexPatchDiff(diff, path: files[0].path))
++            XCTAssertEqual(file.displayPath, "left/example.txt")
++            XCTAssertEqual(file.hunks.first?.lines.map(\.text), ["2", "3"])
++            XCTAssertEqual(file.hunks.first?.lines.map(\.kind), [.deletion, .addition])
++        }
++    }
++
+     func testPlanProposalsReadInputAndPreserveTheCompleteDocument() throws {
+         let plan = "\n# 计划 👩🏽‍💻\n\n" + String(repeating: "- Inspect **input.plan**  \n", count: 1_000) + "last  \n"
+         for name in ["ExitPlanMode", "exit_plan_mode", "CursorCreatePlan"] {
+diff --git a/web/src/components/ToolCard/codexPatch.test.tsx b/web/src/components/ToolCard/codexPatch.test.tsx
+new file mode 100644
+index 000000000..44bcd27d7
+--- /dev/null
++++ b/web/src/components/ToolCard/codexPatch.test.tsx
+@@ -0,0 +1,61 @@
++import { fireEvent, render, screen, within } from '@testing-library/react'
++import { describe, expect, it } from 'vitest'
++import type { ApiClient } from '@/api/client'
++import type { ToolCallBlock } from '@/chat/types'
++import { ToolCard } from '@/components/ToolCard/ToolCard'
++import { I18nProvider } from '@/lib/i18n-context'
++
++const diff = '@@ -1 +1 @@\n-const retries = 2;\n+const retries = 3;\n'
++const path = '/workspace/client/retry.ts'
++
++function renderPatch(changes: unknown) {
++    const block: ToolCallBlock = {
++        kind: 'tool-call', id: 'patch', localId: null, createdAt: 1, children: [],
++        tool: {
++            name: 'CodexPatch', id: 'patch', input: { changes }, state: 'completed',
++            createdAt: 1, startedAt: 1, completedAt: 2, execStartedAt: null, execCompletedAt: null, description: null,
++        },
++    }
++    return render(
++        <I18nProvider><ToolCard api={{} as ApiClient} sessionId="session" metadata={null}
++            terminalToolDisplayMode="detailed" disabled={false} onDone={() => {}} block={block} /></I18nProvider>
++    )
++}
++
++describe('CodexPatch', () => {
++    it.each([
++        { [path]: { type: 'update', unified_diff: diff } },
++        [{ path, kind: { type: 'update', move_path: null }, diff }],
++    ])('shows one attributed hunk inline and in details', (changes) => {
++        renderPatch(changes)
++        const check = (view: Pick<typeof screen, 'getByText'>) => {
++            const file = within(view.getByText(path).parentElement!)
++            expect(file.getByText('-const retries = 2;').className).toContain('--app-diff-removed-bg')
++            expect(file.getByText('+const retries = 3;').className).toContain('--app-diff-added-bg')
++        }
++        check(screen)
++        fireEvent.click(screen.getByRole('button', { name: /Apply changes/ }))
++        check(within(screen.getByRole('dialog')))
++    })
++
++    it('keeps files with the same basename separate and leaves opaque changes as paths', () => {
++        renderPatch({
++            'a/index.ts': { type: 'update', unified_diff: diff },
++            'b/index.ts': { type: 'update', unified_diff: '@@ -7 +7 @@\n--- marker\n+++ marker' },
++            'c/index.ts': { kind: { type: 'add' }, diff: 'literal content' },
++        })
++        const other = within(screen.getByText('b/index.ts').parentElement!)
++        expect(other.queryByText('-const retries = 2;')).toBeNull()
++        expect(other.getByText('--- marker').className).toContain('--app-diff-removed-bg')
++        expect(other.getByText('+++ marker').className).toContain('--app-diff-added-bg')
++        expect(screen.getByText('c/index.ts').parentElement!.textContent).toBe('c/index.ts')
++    })
++
++    it('opens path-only details when no diff was supplied', () => {
++        renderPatch({ [path]: { type: 'update' } })
++        fireEvent.click(screen.getByRole('button', { name: /Apply changes/ }))
++        const dialog = screen.getByRole('dialog')
++        expect(within(dialog).getByText(path)).toBeInTheDocument()
++        expect(dialog.querySelector('pre')).toBeNull()
++    })
++})
+diff --git a/web/src/components/ToolCard/codexPatch.ts b/web/src/components/ToolCard/codexPatch.ts
+new file mode 100644
+index 000000000..d9dd6bc1a
+--- /dev/null
++++ b/web/src/components/ToolCard/codexPatch.ts
+@@ -0,0 +1,22 @@
++import { isObject } from '@hapi/protocol'
++
++function patchDiff(change: unknown): string | null {
++    if (!isObject(change)) return null
++    // Legacy patch events carry unified_diff. App-server "diff" is a hunk
++    // for updates, but the literal file contents for additions and deletions.
++    const kind = isObject(change.kind) ? change.kind.type : change.type
++    if (kind !== 'update') return null
++    const diff = change.unified_diff ?? change.diff
++    return typeof diff === 'string' && diff.trim() ? diff : null
++}
++
++export function codexPatchFiles(input: unknown): { path: string; diff: string | null }[] {
++    if (!isObject(input) || !isObject(input.changes)) return []
++    if (Array.isArray(input.changes)) {
++        return input.changes.flatMap(change =>
++            isObject(change) && typeof change.path === 'string' && change.path
++                ? [{ path: change.path, diff: patchDiff(change) }]
++                : [])
++    }
++    return Object.entries(input.changes).map(([path, change]) => ({ path, diff: patchDiff(change) }))
++}
+diff --git a/web/src/components/ToolCard/knownTools.tsx b/web/src/components/ToolCard/knownTools.tsx
+index 0986a496e..dc6a64191 100644
+--- a/web/src/components/ToolCard/knownTools.tsx
++++ b/web/src/components/ToolCard/knownTools.tsx
+@@ -6,6 +6,7 @@ import type { ChecklistItem } from '@/components/ToolCard/checklist'
+ import { extractTodoChecklist, extractUpdatePlanChecklist } from '@/components/ToolCard/checklist'
+ import { basename, resolveDisplayPath } from '@/utils/path'
+ import { getInputStringAny, truncate } from '@/lib/toolInputUtils'
++import { codexPatchFiles } from '@/components/ToolCard/codexPatch'
+ import { getGoalToolName } from '@/components/ToolCard/goalTools'
+ import { parseCursorAskQuestionInput } from '@/components/ToolCard/cursorAskQuestion'
+ import { resolveToolNameAlias } from '@/components/ToolCard/toolNameAliases'
+@@ -629,17 +630,16 @@ export const knownTools: Record<string, {
+         icon: () => <FileDiffIcon className={DEFAULT_ICON_CLASS} />,
+         title: () => 'Apply changes',
+         subtitle: (opts) => {
+-            if (isObject(opts.input) && isObject(opts.input.changes)) {
+-                const files = Object.keys(opts.input.changes)
+-                if (files.length === 0) return null
+-                const first = files[0]
+-                const display = resolveDisplayPath(first, opts.metadata)
+-                const name = basename(display)
+-                return files.length > 1 ? `${name} (+${files.length - 1})` : name
+-            }
+-            return null
++            const files = codexPatchFiles(opts.input)
++            if (files.length === 0) return null
++            const name = basename(resolveDisplayPath(files[0].path, opts.metadata))
++            return files.length > 1 ? `${name} (+${files.length - 1})` : name
+         },
+-        minimal: true
++        minimal: (opts) => {
++            const files = codexPatchFiles(opts.input)
++            const diff = files.map(file => file.diff ?? '').join('\n')
++            return !diff.trim() || diff.length >= 2000 || countLines(diff) >= 50
++        }
+     },
+     CodexDiff: {
+         icon: () => <FileDiffIcon className={DEFAULT_ICON_CLASS} />,
+diff --git a/web/src/components/ToolCard/views/CodexPatchView.tsx b/web/src/components/ToolCard/views/CodexPatchView.tsx
+index e330d6a72..90008d0c1 100644
+--- a/web/src/components/ToolCard/views/CodexPatchView.tsx
++++ b/web/src/components/ToolCard/views/CodexPatchView.tsx
+@@ -1,21 +1,35 @@
+ import type { ToolViewProps } from '@/components/ToolCard/views/_all'
+-import { isObject } from '@hapi/protocol'
++import { codexPatchFiles } from '@/components/ToolCard/codexPatch'
+ import { basename, resolveDisplayPath } from '@/utils/path'
+ 
+-export function CodexPatchView(props: ToolViewProps) {
+-    const input = props.block.tool.input
+-    if (!isObject(input) || !isObject(input.changes)) return null
+-
+-    const files = Object.keys(input.changes)
+-    if (files.length === 0) return null
++function PatchLines({ diff }: { diff: string }) {
++    // Keep hunk boundaries, context, and original line prefixes intact.
++    const lines = diff.replace(/\r?\n$/, '').split(/\r?\n/)
++    const firstHunk = lines.findIndex(line => line.startsWith('@@'))
++    return (
++        <pre className="overflow-x-auto rounded-md bg-[var(--app-code-bg)] text-xs">
++            {lines.map((line, index) => {
++                const body = firstHunk < 0 || index > firstHunk
++                const color = body && line.startsWith('+') ? 'bg-[var(--app-diff-added-bg)] text-[var(--app-diff-added-text)]'
++                    : body && line.startsWith('-') ? 'bg-[var(--app-diff-removed-bg)] text-[var(--app-diff-removed-text)]'
++                    : 'text-[var(--app-hint)]'
++                return <span key={index} className={`block min-w-max px-2 ${color}`}>{line || ' '}</span>
++            })}
++        </pre>
++    )
++}
+ 
++export function CodexPatchView(props: ToolViewProps) {
++    const files = codexPatchFiles(props.block.tool.input)
+     return (
+-        <div className="flex flex-col gap-1">
+-            {files.map((file) => {
+-                const display = resolveDisplayPath(file, props.metadata)
++        <div className="flex min-w-0 flex-col gap-1">
++            {files.map(({ path, diff }, index) => {
++                const display = resolveDisplayPath(path, props.metadata)
++                const pathInCardHeader = props.surface === 'inline' && files.length === 1 && display === basename(display)
+                 return (
+-                    <div key={file} className="text-sm text-[var(--app-fg)] font-mono break-all">
+-                        {basename(display)}
++                    <div key={index} className="min-w-0">
++                        {!pathInCardHeader && <div className="break-all font-mono text-sm">{display}</div>}
++                        {diff && <PatchLines diff={diff} />}
+                     </div>
+                 )
+             })}
+diff --git a/web/src/components/ToolCard/views/_all.tsx b/web/src/components/ToolCard/views/_all.tsx
+index 282fb7a20..e33313185 100644
+--- a/web/src/components/ToolCard/views/_all.tsx
++++ b/web/src/components/ToolCard/views/_all.tsx
+@@ -83,6 +83,7 @@ export const toolViewRegistry: Record<string, ToolViewComponent> = {
+     TodoWrite: TodoWriteView,
+     update_plan: UpdatePlanView,
+     CodexDiff: CodexDiffCompactView,
++    CodexPatch: CodexPatchView,
+     CodexAgent: CodexAgentView,
+     spawn_agent: CodexAgentView,
+     send_input: CodexAgentView,
+-- 
+2.54.0 (Apple Git-157)
+

@@ -1,0 +1,686 @@
+From 02cc4d6ce1074806e27c42b1172c9ac3211a4725 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 28 Nov 2026 06:00:00 +0800
+Subject: [PATCH] Carry #2643: fix(web): highlight the open session on its
+ sidebar row
+
+Upstream head: c9c906946d051376f88c119660444859f8dcc29f
+---
+ .../SessionList.directory-action.test.tsx     |  33 ++-
+ .../components/SessionList.open-tick.test.tsx | 215 ------------------
+ web/src/components/SessionList.test.ts        |  84 -------
+ web/src/components/SessionList.tsx            | 158 +------------
+ web/src/index.css                             |  30 +--
+ web/src/lib/locales/en.ts                     |   1 -
+ web/src/lib/locales/ru.ts                     |   1 -
+ web/src/lib/locales/zh-CN.ts                  |   1 -
+ 8 files changed, 40 insertions(+), 483 deletions(-)
+ delete mode 100644 web/src/components/SessionList.open-tick.test.tsx
+
+diff --git a/web/src/components/SessionList.directory-action.test.tsx b/web/src/components/SessionList.directory-action.test.tsx
+index efb805be1..b40c04e47 100644
+--- a/web/src/components/SessionList.directory-action.test.tsx
++++ b/web/src/components/SessionList.directory-action.test.tsx
+@@ -1,7 +1,7 @@
+ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+-import type { ReactNode } from 'react'
++import { useState, type ReactNode } from 'react'
+ import { ApiError, type ApiClient } from '@/api/client'
+ import type { SessionSummary } from '@/types/api'
+ import { I18nProvider } from '@/lib/i18n-context'
+@@ -771,6 +771,37 @@ describe('SessionList fork session action', () => {
+ })
+ 
+ describe('SessionList selection', () => {
++    it('moves the current page marker to the session the user opens', () => {
++        const sessions = ['First', 'Second'].map((name) => makeSession({
++            id: name,
++            active: true,
++            metadata: { path: '/work/selection', name: `${name} session` },
++        }))
++
++        function SelectableList() {
++            const [selectedSessionId, setSelectedSessionId] = useState(sessions[0].id)
++            return (
++                <SessionList
++                    sessions={sessions}
++                    selectedSessionId={selectedSessionId}
++                    onSelect={setSelectedSessionId}
++                    onNewSession={vi.fn()}
++                    onRefresh={vi.fn()}
++                    isLoading={false}
++                    renderHeader={false}
++                    api={null}
++                />
++            )
++        }
++
++        renderWithProviders(<SelectableList />)
++        expect(screen.getByRole('button', { current: 'page' })).toHaveAccessibleName(/First session/)
++
++        fireEvent.click(screen.getByRole('button', { name: /Second session/ }))
++
++        expect(screen.getByRole('button', { current: 'page' })).toHaveAccessibleName(/Second session/)
++    })
++
+     it('does not select the row that moves under the pointer during a live reorder', () => {
+         const onSelect = vi.fn()
+         const first = makeSession({
+diff --git a/web/src/components/SessionList.open-tick.test.tsx b/web/src/components/SessionList.open-tick.test.tsx
+deleted file mode 100644
+index c193cd46b..000000000
+--- a/web/src/components/SessionList.open-tick.test.tsx
++++ /dev/null
+@@ -1,215 +0,0 @@
+-import { act, cleanup, render } from '@testing-library/react'
+-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+-import type { SessionSummary } from '@/types/api'
+-import { I18nProvider } from '@/lib/i18n-context'
+-import { ToastProvider } from '@/lib/toast-context'
+-import { SessionList } from './SessionList'
+-
+-const PROJECT_PATH = '/work/proj'
+-const OPEN_SESSION_ID = 's-open'
+-const TICK_SELECTOR = '.session-list-open-tick'
+-
+-const originalResizeObserver = Object.getOwnPropertyDescriptor(globalThis, 'ResizeObserver')
+-let observers: TestResizeObserver[] = []
+-
+-/** Records what each observer watches so a resize can be delivered per element. */
+-class TestResizeObserver {
+-    readonly targets = new Set<Element>()
+-    constructor(private readonly callback: ResizeObserverCallback) {
+-        observers.push(this)
+-    }
+-    observe(target: Element) { this.targets.add(target) }
+-    unobserve(target: Element) { this.targets.delete(target) }
+-    disconnect() { this.targets.clear() }
+-    fire() { this.callback([], this as unknown as ResizeObserver) }
+-}
+-
+-/** Resize one element — observers that never watched it stay silent, as in a browser. */
+-function resize(target: Element) {
+-    act(() => {
+-        for (const observer of observers) {
+-            if (observer.targets.has(target)) observer.fire()
+-        }
+-    })
+-}
+-
+-beforeEach(() => {
+-    observers = []
+-    Object.defineProperty(globalThis, 'ResizeObserver', {
+-        configurable: true,
+-        value: TestResizeObserver,
+-    })
+-})
+-
+-afterEach(() => {
+-    cleanup()
+-    if (originalResizeObserver) {
+-        Object.defineProperty(globalThis, 'ResizeObserver', originalResizeObserver)
+-    } else {
+-        Reflect.deleteProperty(globalThis, 'ResizeObserver')
+-    }
+-})
+-
+-function makeSession(overrides: Partial<SessionSummary> & { id: string }): SessionSummary {
+-    return {
+-        active: false,
+-        thinking: false,
+-        activeAt: 0,
+-        updatedAt: 0,
+-        metadata: null,
+-        metadataVersion: 0,
+-        agentStateVersion: 0,
+-        todosUpdatedAt: 0,
+-        todoProgress: null,
+-        pendingRequestsCount: 0,
+-        pendingRequestKinds: [],
+-        pendingRequests: [],
+-        backgroundTaskCount: 0,
+-        futureScheduledMessageCount: 0,
+-        nextScheduledAt: null,
+-        attachedJob: null,
+-        attachedJobUpdatedAt: 0,
+-        model: null,
+-        effort: null,
+-        ...overrides,
+-    }
+-}
+-
+-function sessions(): SessionSummary[] {
+-    return Array.from({ length: 6 }, (_, index) => makeSession({
+-        id: index === 0 ? OPEN_SESSION_ID : `s-${index}`,
+-        updatedAt: 1000 - index,
+-        metadata: { path: PROJECT_PATH, name: `Session ${index}`, flavor: 'codex' },
+-    }))
+-}
+-
+-function renderList() {
+-    return render(
+-        <QueryClientProvider
+-            client={new QueryClient({
+-                defaultOptions: {
+-                    queries: { retry: false },
+-                    mutations: { retry: false },
+-                },
+-            })}
+-        >
+-            <ToastProvider>
+-                <I18nProvider>
+-                    <SessionList
+-                        sessions={sessions()}
+-                        selectedSessionId={OPEN_SESSION_ID}
+-                        onSelect={vi.fn()}
+-                        onNewSession={vi.fn()}
+-                        onRefresh={vi.fn()}
+-                        isLoading={false}
+-                        renderHeader={false}
+-                        api={null}
+-                    />
+-                </I18nProvider>
+-            </ToastProvider>
+-        </QueryClientProvider>
+-    )
+-}
+-
+-/** jsdom has no layout engine: fake the scroll extent and the open row's box. */
+-type Layout = { scrollHeight: number; rowTop: number }
+-
+-function stubLayout(container: HTMLElement, row: HTMLElement, layout: Layout) {
+-    Object.defineProperty(container, 'scrollHeight', {
+-        configurable: true,
+-        get: () => layout.scrollHeight,
+-    })
+-    Object.defineProperty(container, 'clientHeight', { configurable: true, get: () => 400 })
+-    container.getBoundingClientRect = () => ({ top: 0, height: 400 }) as DOMRect
+-    row.getBoundingClientRect = () => ({ top: layout.rowTop, height: 40 }) as DOMRect
+-}
+-
+-function expectedTop(layout: Layout): string {
+-    return `${((layout.rowTop + 20) / layout.scrollHeight) * 100}%`
+-}
+-
+-/** Longer than TICK_RECOMPUTE_THROTTLE_MS so a throttled recompute has landed. */
+-async function flushTick() {
+-    await act(async () => {
+-        await new Promise(resolve => setTimeout(resolve, 180))
+-    })
+-}
+-
+-function tickTop(): string | null {
+-    return document.querySelector<HTMLElement>(TICK_SELECTOR)?.style.top ?? null
+-}
+-
+-function listParts() {
+-    const container = document.querySelector<HTMLElement>('.session-list-scrollbar-left')
+-    expect(container).toBeTruthy()
+-    const content = container!.firstElementChild as HTMLElement
+-    expect(content).toBeTruthy()
+-    const marked = container!.querySelector<HTMLElement>('[aria-current="page"]')
+-    const row = marked?.closest<HTMLElement>('.session-list-item') ?? marked
+-    expect(row).toBeTruthy()
+-    return { container: container!, content, row: row! }
+-}
+-
+-describe('SessionList open-session scroll tick', () => {
+-    it('follows the open row when an animated collapse resizes only the content (#1733 review)', async () => {
+-        renderList()
+-        const { container, content, row } = listParts()
+-
+-        const layout: Layout = { scrollHeight: 1000, rowTop: 300 }
+-        stubLayout(container, row, layout)
+-        resize(container)
+-        await flushTick()
+-        expect(tickTop()).toBe(expectedTop(layout))
+-
+-        // A section above the open row collapses. `.collapsible-panel` animates
+-        // `grid-template-rows` for 250ms, so the scroll container's own box never
+-        // changes — only the scrolled content shrinks. Watching the container
+-        // alone leaves the mark at the pre-collapse position.
+-        layout.scrollHeight = 700
+-        layout.rowTop = 100
+-        resize(content)
+-        await flushTick()
+-        expect(tickTop()).toBe(expectedTop(layout))
+-    })
+-
+-    it('recomputes once the collapse transition finishes', async () => {
+-        renderList()
+-        const { container, content, row } = listParts()
+-
+-        const layout: Layout = { scrollHeight: 1000, rowTop: 300 }
+-        stubLayout(container, row, layout)
+-        resize(container)
+-        await flushTick()
+-        expect(tickTop()).toBe(expectedTop(layout))
+-
+-        // Last animation frame lands without a further resize notification.
+-        layout.scrollHeight = 850
+-        layout.rowTop = 180
+-        act(() => {
+-            const event = new Event('transitionend', { bubbles: true })
+-            Object.defineProperty(event, 'propertyName', { value: 'grid-template-rows' })
+-            content.dispatchEvent(event)
+-        })
+-        await flushTick()
+-        expect(tickTop()).toBe(expectedTop(layout))
+-    })
+-
+-    it('hides the tick when the open row sits in a collapsed group', async () => {
+-        renderList()
+-        const { container, row } = listParts()
+-
+-        stubLayout(container, row, { scrollHeight: 1000, rowTop: 300 })
+-        resize(container)
+-        await flushTick()
+-        expect(document.querySelector(TICK_SELECTOR)).toBeTruthy()
+-
+-        const panel = row.closest('.collapsible-panel') as HTMLElement
+-        expect(panel).toBeTruthy()
+-        act(() => {
+-            panel.removeAttribute('data-open')
+-        })
+-        await flushTick()
+-        expect(document.querySelector(TICK_SELECTOR)).toBeNull()
+-    })
+-})
+diff --git a/web/src/components/SessionList.test.ts b/web/src/components/SessionList.test.ts
+index ca01ad569..20f382908 100644
+--- a/web/src/components/SessionList.test.ts
++++ b/web/src/components/SessionList.test.ts
+@@ -3,7 +3,6 @@ import { toSessionSummary, type Session } from '@hapi/protocol'
+ import type { SessionSummary } from '@/types/api'
+ import { sessionIsUnread } from '@/lib/sessionAttention'
+ import {
+-    computeOpenSessionTickRatio,
+     deduplicateSessionsByAgentId,
+     expandSelectedSessionCollapseOverrides,
+     groupSessionsByDirectory,
+@@ -26,7 +25,6 @@ import {
+     prepareSidebarSessions,
+     sessionMatchesQuery,
+     sessionMatchesSearchMode,
+-    shouldShowOpenSessionTick,
+     shouldShowPinnedDivider,
+     shouldShowSessionInSidebar
+ } from './SessionList'
+@@ -1075,85 +1073,3 @@ describe('filterSessionsForListStatus', () => {
+         expect(ids).toEqual(['archived'])
+     })
+ })
+-
+-describe('computeOpenSessionTickRatio', () => {
+-    it('maps the row midpoint into the scroll extent as a 0..1 rail ratio', () => {
+-        expect(computeOpenSessionTickRatio({
+-            scrollHeight: 1000,
+-            clientHeight: 400,
+-            contentOffsetTop: 200,
+-            targetHeight: 40,
+-        })).toBeCloseTo(0.22)
+-    })
+-
+-    it('clamps to the rail ends', () => {
+-        expect(computeOpenSessionTickRatio({
+-            scrollHeight: 1000,
+-            clientHeight: 400,
+-            contentOffsetTop: -10,
+-            targetHeight: 20,
+-        })).toBe(0)
+-        expect(computeOpenSessionTickRatio({
+-            scrollHeight: 1000,
+-            clientHeight: 400,
+-            contentOffsetTop: 990,
+-            targetHeight: 40,
+-        })).toBe(1)
+-    })
+-
+-    it('hides when the list does not overflow (no scrollbar)', () => {
+-        expect(computeOpenSessionTickRatio({
+-            scrollHeight: 300,
+-            clientHeight: 400,
+-            contentOffsetTop: 40,
+-            targetHeight: 40,
+-        })).toBeNull()
+-    })
+-
+-    it('hides when the row has no laid-out height', () => {
+-        expect(computeOpenSessionTickRatio({
+-            scrollHeight: 1000,
+-            clientHeight: 400,
+-            contentOffsetTop: 200,
+-            targetHeight: 0,
+-        })).toBeNull()
+-    })
+-})
+-
+-describe('shouldShowOpenSessionTick', () => {
+-    it('shows only when the open session row is present and not collapsed away', () => {
+-        expect(shouldShowOpenSessionTick({
+-            selectedSessionId: 's-1',
+-            rowFound: true,
+-            insideCollapsedPanel: false,
+-            tickRatio: 0.4,
+-        })).toBe(true)
+-    })
+-
+-    it('hides when nothing is open, the row is missing, collapsed, or the ratio is null', () => {
+-        expect(shouldShowOpenSessionTick({
+-            selectedSessionId: null,
+-            rowFound: true,
+-            insideCollapsedPanel: false,
+-            tickRatio: 0.4,
+-        })).toBe(false)
+-        expect(shouldShowOpenSessionTick({
+-            selectedSessionId: 's-1',
+-            rowFound: false,
+-            insideCollapsedPanel: false,
+-            tickRatio: 0.4,
+-        })).toBe(false)
+-        expect(shouldShowOpenSessionTick({
+-            selectedSessionId: 's-1',
+-            rowFound: true,
+-            insideCollapsedPanel: true,
+-            tickRatio: 0.4,
+-        })).toBe(false)
+-        expect(shouldShowOpenSessionTick({
+-            selectedSessionId: 's-1',
+-            rowFound: true,
+-            insideCollapsedPanel: false,
+-            tickRatio: null,
+-        })).toBe(false)
+-    })
+-})
+diff --git a/web/src/components/SessionList.tsx b/web/src/components/SessionList.tsx
+index 0e51c7959..449f3c595 100644
+--- a/web/src/components/SessionList.tsx
++++ b/web/src/components/SessionList.tsx
+@@ -938,59 +938,6 @@ export function shouldShowPinnedDivider(sessions: SessionSummary[], index: numbe
+     return Boolean(sessions[index - 1]?.pinned) && !sessions[index]?.pinned
+ }
+ 
+-/** Upper bound on how often the open-session tick re-measures during list churn. */
+-const TICK_RECOMPUTE_THROTTLE_MS = 100
+-
+-/**
+- * Map the open session's row midpoint in the scroll content onto a 0..1 position
+- * on the session-list scroll rail. Returns null when a mark would lie: nothing
+- * overflows (no scrollbar), or the row has no laid-out height yet.
+- */
+-export function computeOpenSessionTickRatio(input: {
+-    scrollHeight: number
+-    clientHeight: number
+-    contentOffsetTop: number
+-    targetHeight: number
+-}): number | null {
+-    const { scrollHeight, clientHeight, contentOffsetTop, targetHeight } = input
+-    if (!(scrollHeight > 0) || !(clientHeight > 0)) return null
+-    if (scrollHeight <= clientHeight) return null
+-    if (!(targetHeight > 0)) return null
+-    const ratio = (contentOffsetTop + targetHeight / 2) / scrollHeight
+-    if (!Number.isFinite(ratio)) return null
+-    return Math.min(1, Math.max(0, ratio))
+-}
+-
+-export function shouldShowOpenSessionTick(input: {
+-    selectedSessionId: string | null | undefined
+-    rowFound: boolean
+-    insideCollapsedPanel: boolean
+-    tickRatio: number | null
+-}): boolean {
+-    if (!input.selectedSessionId) return false
+-    if (!input.rowFound) return false
+-    if (input.insideCollapsedPanel) return false
+-    return input.tickRatio != null
+-}
+-
+-/** True when the row sits inside a closed `.collapsible-panel` (group collapsed). */
+-export function isSessionRowInsideCollapsedPanel(row: Element): boolean {
+-    const panel = row.closest('.collapsible-panel')
+-    return panel ? !panel.hasAttribute('data-open') : false
+-}
+-
+-export function measureOpenSessionTickContentOffset(
+-    container: HTMLElement,
+-    row: HTMLElement
+-): { contentOffsetTop: number; targetHeight: number } {
+-    const containerRect = container.getBoundingClientRect()
+-    const rowRect = row.getBoundingClientRect()
+-    return {
+-        contentOffsetTop: rowRect.top - containerRect.top + container.scrollTop,
+-        targetHeight: rowRect.height,
+-    }
+-}
+-
+ export function SessionListSearch(props: {
+     searchRef?: (node: HTMLDivElement | null) => void
+     value: string
+@@ -1740,7 +1687,7 @@ const SessionItem = memo(function SessionItem(props: SessionItemProps) {
+         <>
+             <div
+                 ref={rowRef}
+-                className="session-list-row relative flex w-full items-start"
++                className="session-list-row relative flex w-full items-start rounded-lg transition-colors"
+                 data-session-row-id={s.id}
+                 data-quick-action-count={quickActionCount > 0 ? quickActionCount : undefined}
+                 data-quick-action-pending={quickArchivePending || quickUnpinPending ? '' : undefined}
+@@ -1771,7 +1718,7 @@ const SessionItem = memo(function SessionItem(props: SessionItemProps) {
+                             title: sessionName || s.id.slice(0, 8),
+                         }))
+                     }}
+-                    className={`session-list-item group/session-row flex min-w-0 flex-1 flex-col gap-1 py-2 pl-2.5 pr-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)] select-none rounded-lg ${selected ? 'bg-[var(--app-secondary-bg)]' : ''}`}
++                    className="session-list-item group/session-row flex min-w-0 flex-1 flex-col gap-1 py-2 pl-2.5 pr-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)] select-none rounded-lg"
+                     style={{ WebkitTouchCallout: 'none' }}
+                     aria-current={selected ? 'page' : undefined}
+                     aria-describedby={describedBy}
+@@ -3276,99 +3223,6 @@ export function SessionList(props: {
+         refetchScratchlistSessionIdsRef.current = refetchScratchlistSessionIds
+     }, [props.onRefresh, refetchScratchlistSessionIds, showScratchlistOnly])
+ 
+-    // Visual-only tick on the session-list scroll rail showing where the open
+-    // session sits in the whole list. The mark is not a button — you drag the
+-    // native scrollbar to it. Hidden when the row is filtered out or collapsed
+-    // away so it never points somewhere wrong.
+-    const [openSessionTickRatio, setOpenSessionTickRatio] = useState<number | null>(null)
+-    useEffect(() => {
+-        const container = scrollContainerRef.current
+-        if (!container || !selectedSessionId) {
+-            setOpenSessionTickRatio(null)
+-            return
+-        }
+-
+-        let frame = 0
+-        let throttle: ReturnType<typeof setTimeout> | undefined
+-        let measuredAt = 0
+-
+-        const measureTick = () => {
+-            cancelAnimationFrame(frame)
+-            frame = requestAnimationFrame(() => {
+-                measuredAt = Date.now()
+-                // `aria-current="page"` marks the open row; measure the whole
+-                // list item it belongs to, not just whichever node carries it.
+-                const marked = container.querySelector<HTMLElement>('[aria-current="page"]')
+-                const row = marked?.closest<HTMLElement>('.session-list-item') ?? marked
+-                const insideCollapsedPanel = row ? isSessionRowInsideCollapsedPanel(row) : false
+-                const tickRatio = row && !insideCollapsedPanel
+-                    ? computeOpenSessionTickRatio({
+-                        scrollHeight: container.scrollHeight,
+-                        clientHeight: container.clientHeight,
+-                        ...measureOpenSessionTickContentOffset(container, row),
+-                    })
+-                    : null
+-                const visible = shouldShowOpenSessionTick({
+-                    selectedSessionId,
+-                    rowFound: Boolean(row),
+-                    insideCollapsedPanel,
+-                    tickRatio,
+-                })
+-                setOpenSessionTickRatio(visible ? tickRatio : null)
+-            })
+-        }
+-
+-        // Sidebar churn is chatty — rows reorder as sessions update, badges and
+-        // spinners mount — and each measurement reads layout. The mark only has
+-        // to look right, not be frame-exact, so coalesce bursts to ~10/s. The
+-        // first measurement and the transition handler still run promptly.
+-        const updateTick = () => {
+-            if (throttle !== undefined) return
+-            throttle = setTimeout(() => {
+-                throttle = undefined
+-                measureTick()
+-            }, Math.max(0, TICK_RECOMPUTE_THROTTLE_MS - (Date.now() - measuredAt)))
+-        }
+-
+-        measureTick()
+-
+-        // Sections animate `grid-template-rows` for 250ms (see `.collapsible-panel`),
+-        // so the scroll container's own box never changes while a group above the
+-        // open row collapses — only the scrolled content grows or shrinks. Observe
+-        // the content element as well, and recompute once the transition lands, so
+-        // the tick settles on the final layout instead of an intermediate frame.
+-        // Observing the container also covers viewport resizes: the sidebar is
+-        // flex-sized, so a window resize changes its box (or rewraps the content).
+-        const content = container.firstElementChild
+-        const resizeObserver = typeof ResizeObserver !== 'undefined'
+-            ? new ResizeObserver(updateTick)
+-            : null
+-        resizeObserver?.observe(container)
+-        if (content instanceof HTMLElement) {
+-            resizeObserver?.observe(content)
+-        }
+-        const mutationObserver = typeof MutationObserver !== 'undefined'
+-            ? new MutationObserver(updateTick)
+-            : null
+-        mutationObserver?.observe(container, {
+-            childList: true,
+-            subtree: true,
+-            attributes: true,
+-            attributeFilter: ['data-open'],
+-        })
+-        const handleTransitionEnd = (event: TransitionEvent) => {
+-            if (event.propertyName === 'grid-template-rows') measureTick()
+-        }
+-        container.addEventListener('transitionend', handleTransitionEnd)
+-        return () => {
+-            cancelAnimationFrame(frame)
+-            clearTimeout(throttle)
+-            resizeObserver?.disconnect()
+-            mutationObserver?.disconnect()
+-            container.removeEventListener('transitionend', handleTransitionEnd)
+-        }
+-    }, [selectedSessionId])
+-
+     useEffect(() => {
+         const container = scrollContainerRef.current
+         if (!container) return
+@@ -3828,14 +3682,6 @@ export function SessionList(props: {
+             </SessionListScrollAnchor>
+             </QuickUnpinFocusContext.Provider>
+             </div>
+-            {openSessionTickRatio != null ? (
+-                <span
+-                    className="session-list-open-tick"
+-                    style={{ top: `${openSessionTickRatio * 100}%` }}
+-                    title={t('sessions.openTick.tooltip')}
+-                    aria-hidden="true"
+-                />
+-            ) : null}
+             </div>
+             <ConfirmDialog
+                 isOpen={markAllReadOpen}
+diff --git a/web/src/index.css b/web/src/index.css
+index ccda2f0fd..4325bbfe7 100644
+--- a/web/src/index.css
++++ b/web/src/index.css
+@@ -468,13 +468,17 @@ html:has(.chat-scroll-y) #root {
+ }
+ 
+ @media (hover: hover) and (pointer: fine) {
+-    .session-list-item:hover,
+-    .session-list-row:hover > .session-list-item,
++    .session-list-row:hover,
+     .session-list-new-button:hover {
+         background-color: var(--app-subtle-bg);
+     }
+ }
+ 
++.session-list-row:has(> .session-list-item[aria-current="page"]) {
++    background-color: color-mix(in srgb, var(--app-fg) 16%, var(--app-bg));
++    --app-hint: color-mix(in srgb, var(--app-fg) 75%, var(--app-bg));
++}
++
+ /* Row quick actions (unpin, archive): replace the time/progress cluster on
+    hover, and on keyboard focus (not a click or tap) so they stay reachable
+    without a mouse. Touch devices keep the long-press menu instead.
+@@ -570,28 +574,6 @@ html:has(.chat-scroll-y) #root {
+     padding-left: 8px;
+ }
+ 
+-/*
+- * Open-session position mark on the left scrollbar gutter.
+- * Visual-only: a tiny hover target for the native title tooltip, not a jump
+- * button — the scrollbar beside it stays the seek surface. Sits in the
+- * outer 3px of the 10px rail so it never hides under the thumb (left 3px, 4px
+- * wide). Sibling of the scroll container inside the relative session-list
+- * shell, so `top` maps onto the visible rail.
+- */
+-.session-list-open-tick {
+-    position: absolute;
+-    left: 0;
+-    z-index: 10;
+-    width: 3px;
+-    height: 6px;
+-    margin-top: -3px;
+-    pointer-events: auto;
+-    border-radius: 1px;
+-    background: var(--app-link);
+-    opacity: 0.9;
+-    box-shadow: 0 0 0 1px var(--app-bg);
+-}
+-
+ /* Desktop sidebar: use custom width from CSS variable.
+    Kept in sync with the Tailwind `split` breakpoint (see tailwind.config.ts)
+    so the sidebar width/resize applies as soon as the split view appears on
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index cc9136c4f..87f716883 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -155,7 +155,6 @@ export default {
+   'sessions.view.fueTitle': 'New: sort & filter',
+   'sessions.view.fueBody': 'Change the sort order, filter by status, or show active/unread sessions first. Your choices are remembered.',
+   'sessions.toolbar.more': 'More session list actions',
+-  'sessions.openTick.tooltip': 'Open session position — drag the scrollbar to this mark to reach it',
+   'sessions.markAllRead.button': 'Mark all as read ({count})',
+   'sessions.markAllRead.title': 'Mark all as read?',
+   'sessions.markAllRead.description': 'This will mark {count} unread sessions as read across your devices.',
+diff --git a/web/src/lib/locales/ru.ts b/web/src/lib/locales/ru.ts
+index fe1c7443a..1d7456d2a 100644
+--- a/web/src/lib/locales/ru.ts
++++ b/web/src/lib/locales/ru.ts
+@@ -102,7 +102,6 @@ export default {
+   'sessions.view.fueTitle': 'Новое: сортировка и фильтр',
+   'sessions.view.fueBody': 'Здесь можно изменить порядок сортировки, отфильтровать по статусу или показывать активные/непрочитанные сессии в начале списка. Выбор сохраняется.',
+   'sessions.toolbar.more': 'Другие действия списка сессий',
+-  'sessions.openTick.tooltip': 'Положение открытой сессии — перетащите полосу прокрутки к этой метке',
+   'sessions.filter.scratchlist': 'Только с черновиками',
+   'sessions.filter.date': 'Дата обновления',
+   'sessions.timeFilter.label': 'Фильтр сессий по дате обновления',
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index 5cf1e59a1..9d5b41cb0 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -155,7 +155,6 @@ export default {
+   'sessions.view.fueTitle': '新功能：排序与筛选',
+   'sessions.view.fueBody': '在这里调整排序方式、按状态筛选，或让活跃/未读会话优先显示。你的选择会被记住。',
+   'sessions.toolbar.more': '更多会话列表操作',
+-  'sessions.openTick.tooltip': '当前打开会话的位置 — 将滚动条拖到此标记处即可到达',
+   'sessions.markAllRead.button': '全部标为已读（{count}）',
+   'sessions.markAllRead.title': '全部标为已读？',
+   'sessions.markAllRead.description': '将 {count} 个未读会话在各设备上标为已读。',
+-- 
+2.54.0 (Apple Git-157)
+

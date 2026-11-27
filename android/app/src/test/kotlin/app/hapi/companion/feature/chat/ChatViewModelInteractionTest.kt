@@ -238,6 +238,9 @@ private class RecordingChatApi : ChatSessionApi {
         configCalls.value = configCalls.value + "abort:$sessionId"
     }
 
+    override suspend fun bridgeModelError(sessionId: String, eventId: String): app.hapi.protocol.wire.ModelErrorActionResponse =
+        error("Unexpected bridge")
+    override suspend fun acknowledgeModelError(sessionId: String, eventId: String): Unit = error("Unexpected acknowledge")
     override suspend fun clearConversation(sessionId: String): ResumeSessionResponse = error("Unexpected clear")
 
     var featuresResult: FeaturesResponse = FeaturesResponse()
@@ -295,6 +298,9 @@ private class RecordingChatApi : ChatSessionApi {
         configCalls.value = configCalls.value + "modelReasoningEffort:$modelReasoningEffort"
         configFailure?.let { throw it }
     }
+
+    var cursorModelsResult = app.hapi.protocol.wire.CursorModelsResponse(false)
+    override suspend fun getSessionCursorModels(sessionId: String) = cursorModelsResult
 
     override suspend fun getSessionCodexModels(sessionId: String): CodexModelsResponse = codexModelsResult
 
@@ -1431,6 +1437,16 @@ class ChatViewModelInteractionTest {
         harness.api.approveCalls.value.map { (_, body) -> HapiJson.encodeToString(body) }
 
     @Test
+    fun `Cursor plan approval uses the one-shot body`() = runTest {
+        val requests = mapOf("plan" to AgentStateRequest(tool = "CursorCreatePlan"))
+        val harness = InteractionHarness(this, detail(flavor = "cursor", agentState = AgentState(requests = requests)))
+        harness.viewModel.start()
+        harness.viewModel.resolvePermission("plan", PermissionAction.Allow)
+        harness.api.approveCalls.first { it.isNotEmpty() }
+        assertEquals(listOf("{}"), approvedBodies(harness))
+    }
+
+    @Test
     fun `claude approve bodies match the web PermissionFooter exactly`() = runTest {
         val requests = mapOf(
             "r-allow" to bashRequest(),
@@ -1549,7 +1565,7 @@ class ChatViewModelInteractionTest {
     // -------------------------------------------------------------- config --
 
     @Test
-    fun `permission mode switch applies optimistically and rolls back to server truth on error`() = runTest {
+    fun `permission mode switch retains the previous selection on rejection and failed readback`() = runTest {
         val harness = InteractionHarness(this, detail(permissionMode = "default"))
         harness.api.configFailure = ApiError(409, code = "apply_failed")
         harness.viewModel.start()
@@ -1560,13 +1576,13 @@ class ChatViewModelInteractionTest {
             notice = harness.viewModel.events.filterIsInstance<ChatEvent.Notice>().first().notice
         }
 
+        harness.sessionStore.detailToLoad = null
         harness.viewModel.setPermissionMode(PermissionMode.AcceptEdits)
-        // Optimistic flip is visible synchronously in the detail cache.
-        assertEquals("acceptEdits", harness.sessionStore.currentDetail(IX_SESSION)?.permissionMode)
+        assertEquals("default", harness.sessionStore.currentDetail(IX_SESSION)?.permissionMode)
 
         collector.join()
         assertIs<ChatNotice.ConfigUpdateFailed>(notice)
-        // Rollback = reload server truth (scripted detail carries "default").
+        // No unconfirmed value survives even when reloading the session also fails.
         assertEquals("default", harness.sessionStore.currentDetail(IX_SESSION)?.permissionMode)
         assertTrue(harness.sessionStore.calls.value.count { it == "loadDetail:$IX_SESSION" } >= 2)
         assertEquals(listOf("mode:acceptEdits"), harness.api.configCalls.value)
@@ -1657,6 +1673,48 @@ class ChatViewModelInteractionTest {
 
         harness.viewModel.setEffort("medium")
         harness.api.configCalls.first { "modelReasoningEffort:medium" in it }
+    }
+
+    @Test
+    fun acceptedCursorChangeWithFailedReadbackKeepsConfirmedValueAndReportsOnlyRefreshFailure() = runTest {
+        val current = "grok[fast=false]"
+        val harness = InteractionHarness(this, detail(flavor = "cursor", model = current))
+        harness.viewModel.start()
+        harness.sessionStore.calls.first { "loadDetail:$IX_SESSION" in it }
+        val reads = harness.sessionStore.calls.value.count { it == "loadDetail:$IX_SESSION" }
+        harness.sessionStore.detailToLoad = null
+        val notice = async(start = CoroutineStart.UNDISPATCHED) {
+            harness.viewModel.events.filterIsInstance<ChatEvent.Notice>().first()
+        }
+
+        harness.viewModel.setModel("auto")
+        assertEquals(ChatNotice.ConfigReadbackUnavailable, notice.await().notice)
+        assertEquals(listOf("model:auto"), harness.api.configCalls.value)
+        assertEquals(reads + 1, harness.sessionStore.calls.value.count { it == "loadDetail:$IX_SESSION" })
+        assertEquals(current, harness.sessionStore.currentDetail(IX_SESSION)?.model)
+    }
+
+    @Test
+    fun cursorModelChangeUsesServerReadbackAndSurvivesRejectionWithoutReload() = runTest {
+        val model = "grok[fast=false]"
+        val harness = InteractionHarness(this, detail(flavor = "cursor", model = model))
+        harness.api.cursorModelsResult = app.hapi.protocol.wire.CursorModelsResponse(
+            success = true,
+            availableModels = listOf(app.hapi.protocol.wire.CursorModelSummary(model)),
+        )
+        harness.viewModel.start()
+        harness.sessionStore.calls.first { "loadDetail:$IX_SESSION" in it }
+        harness.viewModel.loadModelOptions()
+        assertEquals(model, harness.viewModel.config.first { it.cursorCatalog != null }
+            .cursorCatalog?.availableModels?.single()?.modelId)
+        harness.sessionStore.detailToLoad = null
+        harness.api.configFailure = ApiError(409, code = "apply_failed")
+        val error = async(start = CoroutineStart.UNDISPATCHED) {
+            harness.viewModel.events.filterIsInstance<ChatEvent.Notice>().first()
+        }
+        harness.viewModel.setModel("auto")
+        assertIs<ChatNotice.ConfigUpdateFailed>(error.await().notice)
+        assertEquals(model, harness.sessionStore.currentDetail(IX_SESSION)?.model)
     }
 
     @Test

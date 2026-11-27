@@ -1,3 +1,4 @@
+import type { SessionFolder } from '@hapi/protocol/apiTypes'
 import { isLiveLifecycleState } from '@hapi/protocol/sessionLifecycle'
 import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
 import * as Popover from '@radix-ui/react-popover'
@@ -17,7 +18,9 @@ import { usePlatform } from '@/hooks/usePlatform'
 import { SESSION_MENTION_DRAG_MIME } from '@/lib/sessionMentionDrag'
 import { isMentionableSession } from '@/lib/sessionReference'
 import { sessionArchiveMutationKey, sessionPinMutationKey, useSessionActions } from '@/hooks/mutations/useSessionActions'
-import { useIsMutating } from '@tanstack/react-query'
+import { useIsMutating, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { SessionFolderDialog, SessionFoldersNavigation } from '@/components/SessionFolders'
+import { queryKeys } from '@/lib/query-keys'
 import { SessionActionMenu } from '@/components/SessionActionMenu'
 import { SessionExportDialog } from '@/components/SessionExportDialog'
 import { RenameSessionDialog } from '@/components/RenameSessionDialog'
@@ -938,59 +941,6 @@ export function shouldShowPinnedDivider(sessions: SessionSummary[], index: numbe
     return Boolean(sessions[index - 1]?.pinned) && !sessions[index]?.pinned
 }
 
-/** Upper bound on how often the open-session tick re-measures during list churn. */
-const TICK_RECOMPUTE_THROTTLE_MS = 100
-
-/**
- * Map the open session's row midpoint in the scroll content onto a 0..1 position
- * on the session-list scroll rail. Returns null when a mark would lie: nothing
- * overflows (no scrollbar), or the row has no laid-out height yet.
- */
-export function computeOpenSessionTickRatio(input: {
-    scrollHeight: number
-    clientHeight: number
-    contentOffsetTop: number
-    targetHeight: number
-}): number | null {
-    const { scrollHeight, clientHeight, contentOffsetTop, targetHeight } = input
-    if (!(scrollHeight > 0) || !(clientHeight > 0)) return null
-    if (scrollHeight <= clientHeight) return null
-    if (!(targetHeight > 0)) return null
-    const ratio = (contentOffsetTop + targetHeight / 2) / scrollHeight
-    if (!Number.isFinite(ratio)) return null
-    return Math.min(1, Math.max(0, ratio))
-}
-
-export function shouldShowOpenSessionTick(input: {
-    selectedSessionId: string | null | undefined
-    rowFound: boolean
-    insideCollapsedPanel: boolean
-    tickRatio: number | null
-}): boolean {
-    if (!input.selectedSessionId) return false
-    if (!input.rowFound) return false
-    if (input.insideCollapsedPanel) return false
-    return input.tickRatio != null
-}
-
-/** True when the row sits inside a closed `.collapsible-panel` (group collapsed). */
-export function isSessionRowInsideCollapsedPanel(row: Element): boolean {
-    const panel = row.closest('.collapsible-panel')
-    return panel ? !panel.hasAttribute('data-open') : false
-}
-
-export function measureOpenSessionTickContentOffset(
-    container: HTMLElement,
-    row: HTMLElement
-): { contentOffsetTop: number; targetHeight: number } {
-    const containerRect = container.getBoundingClientRect()
-    const rowRect = row.getBoundingClientRect()
-    return {
-        contentOffsetTop: rowRect.top - containerRect.top + container.scrollTop,
-        targetHeight: rowRect.height,
-    }
-}
-
 export function SessionListSearch(props: {
     searchRef?: (node: HTMLDivElement | null) => void
     value: string
@@ -1425,6 +1375,8 @@ function CollapsiblePanel(props: { open: boolean; children: ReactNode }) {
     )
 }
 
+const MoveToFolderContext = createContext<((sessionId: string) => void) | null>(null)
+
 type SessionItemProps = {
     onRequestDelete: (session: SessionSummary) => void
     session: SessionSummary
@@ -1498,6 +1450,7 @@ const SessionItem = memo(function SessionItem(props: SessionItemProps) {
     const rowRef = useRef<HTMLDivElement>(null)
     const rowButtonRef = useRef<HTMLButtonElement>(null)
     const quickUnpinFocusRef = useContext(QuickUnpinFocusContext)
+    const openMoveToFolder = useContext(MoveToFolderContext)
     const panelOpen = useContext(CollapsiblePanelOpenContext)
     const {
         status: cursorChatStoreStatus,
@@ -1740,7 +1693,7 @@ const SessionItem = memo(function SessionItem(props: SessionItemProps) {
         <>
             <div
                 ref={rowRef}
-                className="session-list-row relative flex w-full items-start"
+                className="session-list-row relative flex w-full items-start rounded-lg transition-colors"
                 data-session-row-id={s.id}
                 data-quick-action-count={quickActionCount > 0 ? quickActionCount : undefined}
                 data-quick-action-pending={quickArchivePending || quickUnpinPending ? '' : undefined}
@@ -1771,7 +1724,7 @@ const SessionItem = memo(function SessionItem(props: SessionItemProps) {
                             title: sessionName || s.id.slice(0, 8),
                         }))
                     }}
-                    className={`session-list-item group/session-row flex min-w-0 flex-1 flex-col gap-1 py-2 pl-2.5 pr-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)] select-none rounded-lg ${selected ? 'bg-[var(--app-secondary-bg)]' : ''}`}
+                    className="session-list-item group/session-row flex min-w-0 flex-1 flex-col gap-1 py-2 pl-2.5 pr-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)] select-none rounded-lg"
                     style={{ WebkitTouchCallout: 'none' }}
                     aria-current={selected ? 'page' : undefined}
                     aria-describedby={describedBy}
@@ -1859,6 +1812,7 @@ const SessionItem = memo(function SessionItem(props: SessionItemProps) {
                 sessionGlobalPinned={Boolean(s.globalPinned)}
                 onSetPinMode={(mode) => void handleSetPinMode(mode)}
                 onRename={() => setRenameOpen(true)}
+                onMoveToFolder={openMoveToFolder ? () => openMoveToFolder(s.id) : undefined}
                 onLinkPr={githubPrAwarenessEnabled ? () => setLinkPrOpen(true) : undefined}
                 linkedPr={linkedPr}
                 onExport={() => setExportOpen(true)}
@@ -2060,6 +2014,47 @@ export function SessionList(props: {
         onNewSessionInDirectory
     } = props
     const [deleteTarget, setDeleteTarget] = useState<SessionSummary | null>(null)
+    const queryClient = useQueryClient()
+    const folderQueryKey = [...queryKeys.sessionFolders, api?.getReadStateScope?.()] as const
+    const folderQuery = useQuery({
+        queryKey: folderQueryKey,
+        queryFn: () => api!.getSessionFolders(),
+        enabled: typeof api?.getSessionFolders === 'function',
+    })
+    const { data: folderData } = folderQuery
+    const sessionFoldersEnabledRef = useRef(false)
+    const refetchFolderDataRef = useRef(folderQuery.refetch)
+    sessionFoldersEnabledRef.current = typeof api?.getSessionFolders === 'function'
+    refetchFolderDataRef.current = folderQuery.refetch
+    const [openFolderId, setOpenFolderId] = useState<string | null>(null)
+    const [createFolderTarget, setCreateFolderTarget] = useState<{ parentId: string | null } | null>(null)
+    const [moveSessionId, setMoveSessionId] = useState<string | null>(null)
+    const [deleteFolderTarget, setDeleteFolderTarget] = useState<SessionFolder | null>(null)
+    const openFolder = folderData?.folders.find(folder => folder.id === openFolderId)
+    const folderId = openFolder?.id ?? null
+    const childFolders = folderData?.folders.filter(folder => folder.parentId === folderId) ?? []
+    const openMoveToFolder = folderData?.folders.length ? setMoveSessionId : null
+    const refreshFolders = () => queryClient.invalidateQueries({ queryKey: folderQueryKey })
+    const deleteFolder = useMutation({
+        mutationFn: (target: SessionFolder) => api!.deleteSessionFolder(target.id),
+        onSuccess: async (_, target) => {
+            await refreshFolders()
+            setOpenFolderId(target.parentId)
+        }
+    })
+    const folderAssignments = useMemo(() => new Map(Object.entries(folderData?.assignments ?? {})), [folderData])
+    const folderSelection = useRef<{ scope: string | null | undefined; sessionId: string } | null>(null)
+    const folderScope = folderQueryKey[1]
+    useEffect(() => {
+        if (!selectedSessionId) {
+            folderSelection.current = null
+            return
+        }
+        if (!folderData || (folderSelection.current?.scope === folderScope && folderSelection.current?.sessionId === selectedSessionId)) return
+        folderSelection.current = { scope: folderScope, sessionId: selectedSessionId }
+        setOpenFolderId(folderAssignments.get(selectedSessionId) ?? null)
+    }, [folderAssignments, folderData, folderScope, selectedSessionId])
+
     const { features } = useFeatures(api)
     const githubPrAwarenessEnabled = Boolean(features?.githubPrAwareness.enabled)
     const hasJobs = useMemo(() => props.sessions.some(hasRunningAttachedJob), [props.sessions])
@@ -2078,9 +2073,8 @@ export function SessionList(props: {
 
     // Date, scratchlist, active, and working are transient; unread uses the
     // upstream view store. showActiveOnly is deliberately independent of
-    // listView.status (persisted, backs the Settings "Active sessions only"
-    // toggle) — #2002 wants a temporary scan, not another write path onto
-    // that saved preference.
+    // the saved Show choice (listView.status) so it can be used for a
+    // temporary scan (#2002).
     const [showScratchlistOnly, setShowScratchlistOnly] = useState(false)
     const [showActiveOnly, setShowActiveOnly] = useState(false)
     const [showWorkingOnly, setShowWorkingOnly] = useState(false)
@@ -2530,9 +2524,7 @@ export function SessionList(props: {
             ? filterUnreadSessionsOnly(visibleSessions, isSessionUnread, selectedSessionId)
             : visibleSessions
         // Active and Working are AND-composed with the other lenses (#2002).
-        // Both are ephemeral, independent of the persisted listView.status
-        // ("Active sessions only" in Settings) — a temporary scan should not
-        // read or write that saved preference.
+        // These temporary filters leave the saved Show choice intact.
         if (showActiveOnly) {
             filtered = filterActiveSessionsOnly(filtered, selectedSessionId)
         }
@@ -2562,7 +2554,7 @@ export function SessionList(props: {
         listView.unreadOnly,
         visibleSessions
     ])
-    const machineFilteredSessions = useMemo(
+    const allMachineFilteredSessions = useMemo(
         () => activeMachineFilter === null
             ? sessionFilteredSessions
             : sessionFilteredSessions.filter(session =>
@@ -2571,13 +2563,24 @@ export function SessionList(props: {
         [sessionFilteredSessions, activeMachineFilter]
 
     )
+    // Search crosses folder boundaries; ordinary browsing scopes the same session rows to a folder.
+    const matchesFolder = useCallback(
+        (session: SessionSummary) => isSearchFiltering || (folderAssignments.get(session.id) ?? null) === folderId,
+        [isSearchFiltering, folderAssignments, folderId]
+    )
+    const machineFilteredSessions = useMemo(
+        () => allMachineFilteredSessions.filter(matchesFolder),
+        [allMachineFilteredSessions, matchesFolder]
+    )
+    // The root keeps priority rows visible even when their sessions are filed.
+    const prioritySessions = folderId === null ? allMachineFilteredSessions : machineFilteredSessions
     const globalPinnedSessions = useMemo(() => {
-        const pinned = machineFilteredSessions.filter((session) => Boolean(session.globalPinned))
+        const pinned = prioritySessions.filter((session) => Boolean(session.globalPinned))
         if (searchScoreIndex && hasTextQuery) {
             return sortSessionsBySearchRelevance(pinned, searchScoreIndex)
         }
         return [...pinned].sort(listComparator)
-    }, [machineFilteredSessions, searchScoreIndex, hasTextQuery, listComparator])
+    }, [prioritySessions, searchScoreIndex, hasTextQuery, listComparator])
     const runningSessions = useMemo(() => {
         const byRelevanceOrRecent = (a: SessionSummary, b: SessionSummary) => {
             if (searchScoreIndex && hasTextQuery) {
@@ -2585,8 +2588,8 @@ export function SessionList(props: {
             }
             return listComparator(a, b)
         }
-        return bucketRunningSessions(machineFilteredSessions, effectivePinInProgressMode, byRelevanceOrRecent, api?.hubClock?.now())
-    }, [api, listClockTick, machineFilteredSessions, effectivePinInProgressMode, searchScoreIndex, hasTextQuery, listComparator])
+        return bucketRunningSessions(prioritySessions, effectivePinInProgressMode, byRelevanceOrRecent, api?.hubClock?.now())
+    }, [api, listClockTick, prioritySessions, effectivePinInProgressMode, searchScoreIndex, hasTextQuery, listComparator])
     // Stopped rows show their stop time only where the list orders them by it:
     // Active first, and no text query (which orders rows by relevance or, for
     // project rows in either search mode, by the legacy comparator).
@@ -2624,11 +2627,13 @@ export function SessionList(props: {
         ),
         [machineFilteredSessions, listView]
     )
-    // Unfiltered project membership for group-wide actions (archive all).
-    const projectSessionsByKey = useMemo(
-        () => new Map(groupSessionsByDirectory(props.sessions).map((group) => [group.key, group.sessions])),
-        [props.sessions]
-    )
+    // Bulk actions are scoped to this folder, or to matching rows during cross-folder search.
+    const projectSessionsByKey = useMemo(() => {
+        const members = isSearchFiltering && folderAssignments.size > 0
+            ? allMachineFilteredSessions
+            : props.sessions.filter(matchesFolder)
+        return new Map(groupSessionsByDirectory(members).map(group => [group.key, group.sessions]))
+    }, [allMachineFilteredSessions, folderAssignments.size, isSearchFiltering, matchesFolder, props.sessions])
     const actionOnlyGroups = useMemo(() => {
         if (effectivePinInProgressMode === 'off') {
             return []
@@ -3279,99 +3284,6 @@ export function SessionList(props: {
         refetchScratchlistSessionIdsRef.current = refetchScratchlistSessionIds
     }, [props.onRefresh, refetchScratchlistSessionIds, showScratchlistOnly])
 
-    // Visual-only tick on the session-list scroll rail showing where the open
-    // session sits in the whole list. The mark is not a button — you drag the
-    // native scrollbar to it. Hidden when the row is filtered out or collapsed
-    // away so it never points somewhere wrong.
-    const [openSessionTickRatio, setOpenSessionTickRatio] = useState<number | null>(null)
-    useEffect(() => {
-        const container = scrollContainerRef.current
-        if (!container || !selectedSessionId) {
-            setOpenSessionTickRatio(null)
-            return
-        }
-
-        let frame = 0
-        let throttle: ReturnType<typeof setTimeout> | undefined
-        let measuredAt = 0
-
-        const measureTick = () => {
-            cancelAnimationFrame(frame)
-            frame = requestAnimationFrame(() => {
-                measuredAt = Date.now()
-                // `aria-current="page"` marks the open row; measure the whole
-                // list item it belongs to, not just whichever node carries it.
-                const marked = container.querySelector<HTMLElement>('[aria-current="page"]')
-                const row = marked?.closest<HTMLElement>('.session-list-item') ?? marked
-                const insideCollapsedPanel = row ? isSessionRowInsideCollapsedPanel(row) : false
-                const tickRatio = row && !insideCollapsedPanel
-                    ? computeOpenSessionTickRatio({
-                        scrollHeight: container.scrollHeight,
-                        clientHeight: container.clientHeight,
-                        ...measureOpenSessionTickContentOffset(container, row),
-                    })
-                    : null
-                const visible = shouldShowOpenSessionTick({
-                    selectedSessionId,
-                    rowFound: Boolean(row),
-                    insideCollapsedPanel,
-                    tickRatio,
-                })
-                setOpenSessionTickRatio(visible ? tickRatio : null)
-            })
-        }
-
-        // Sidebar churn is chatty — rows reorder as sessions update, badges and
-        // spinners mount — and each measurement reads layout. The mark only has
-        // to look right, not be frame-exact, so coalesce bursts to ~10/s. The
-        // first measurement and the transition handler still run promptly.
-        const updateTick = () => {
-            if (throttle !== undefined) return
-            throttle = setTimeout(() => {
-                throttle = undefined
-                measureTick()
-            }, Math.max(0, TICK_RECOMPUTE_THROTTLE_MS - (Date.now() - measuredAt)))
-        }
-
-        measureTick()
-
-        // Sections animate `grid-template-rows` for 250ms (see `.collapsible-panel`),
-        // so the scroll container's own box never changes while a group above the
-        // open row collapses — only the scrolled content grows or shrinks. Observe
-        // the content element as well, and recompute once the transition lands, so
-        // the tick settles on the final layout instead of an intermediate frame.
-        // Observing the container also covers viewport resizes: the sidebar is
-        // flex-sized, so a window resize changes its box (or rewraps the content).
-        const content = container.firstElementChild
-        const resizeObserver = typeof ResizeObserver !== 'undefined'
-            ? new ResizeObserver(updateTick)
-            : null
-        resizeObserver?.observe(container)
-        if (content instanceof HTMLElement) {
-            resizeObserver?.observe(content)
-        }
-        const mutationObserver = typeof MutationObserver !== 'undefined'
-            ? new MutationObserver(updateTick)
-            : null
-        mutationObserver?.observe(container, {
-            childList: true,
-            subtree: true,
-            attributes: true,
-            attributeFilter: ['data-open'],
-        })
-        const handleTransitionEnd = (event: TransitionEvent) => {
-            if (event.propertyName === 'grid-template-rows') measureTick()
-        }
-        container.addEventListener('transitionend', handleTransitionEnd)
-        return () => {
-            cancelAnimationFrame(frame)
-            clearTimeout(throttle)
-            resizeObserver?.disconnect()
-            mutationObserver?.disconnect()
-            container.removeEventListener('transitionend', handleTransitionEnd)
-        }
-    }, [selectedSessionId])
-
     useEffect(() => {
         const container = scrollContainerRef.current
         if (!container) return
@@ -3393,6 +3305,9 @@ export function SessionList(props: {
             isRefreshingRef.current = true
             setIsRefreshing(true)
             const refreshes = [Promise.resolve(onRefreshRef.current())]
+            if (sessionFoldersEnabledRef.current) {
+                refreshes.push(refetchFolderDataRef.current())
+            }
             if (scratchlistFilterEnabledRef.current) {
                 refreshes.push(refetchScratchlistSessionIdsRef.current())
             }
@@ -3454,6 +3369,42 @@ export function SessionList(props: {
 
     return (
         <div ref={sessionListRef} className="flex min-h-0 w-full flex-1 flex-col">
+            {api && folderData && createFolderTarget ? (
+                <SessionFolderDialog
+                    mode="create"
+                    isSubfolder={createFolderTarget.parentId !== null}
+                    onClose={() => setCreateFolderTarget(null)}
+                    onSubmit={async name => {
+                        await api.createSessionFolder(name, createFolderTarget.parentId)
+                        await refreshFolders()
+                    }}
+                />
+            ) : null}
+            {api && folderData && moveSessionId !== null ? (
+                <SessionFolderDialog
+                    mode="move"
+                    folderId={folderAssignments.get(moveSessionId) ?? null}
+                    folders={folderData.folders}
+                    onClose={() => setMoveSessionId(null)}
+                    onSubmit={async destination => {
+                        await api.moveSessionToFolder(moveSessionId, destination)
+                        await refreshFolders()
+                    }}
+                />
+            ) : null}
+            {deleteFolderTarget ? (
+                <ConfirmDialog
+                    isOpen
+                    title={t('sessions.folders.delete')}
+                    description={t('sessions.folders.deleteDescription', { name: deleteFolderTarget.name })}
+                    confirmLabel={t('sessions.folders.delete')}
+                    confirmingLabel={t('sessions.folders.deleting')}
+                    isPending={deleteFolder.isPending}
+                    destructive
+                    onClose={() => { if (!deleteFolder.isPending) setDeleteFolderTarget(null) }}
+                    onConfirm={() => deleteFolder.mutateAsync(deleteFolderTarget)}
+                />
+            ) : null}
             {deleteTarget && <SidebarDeleteDialog key={deleteTarget.id} session={deleteTarget} api={api} onClose={() => setDeleteTarget(null)} />}
             <div className="session-list-scrollbar-offset mx-auto w-full max-w-content shrink-0">
             {showHeaderRow ? (
@@ -3689,9 +3640,40 @@ export function SessionList(props: {
                 </div>
             ) : null}
             <div ref={scrollContainerRef} className="app-scroll-y session-list-scrollbar-left scrollbar-auto-hide min-h-0 flex-1">
+            <MoveToFolderContext.Provider value={openMoveToFolder}>
             <QuickUnpinFocusContext.Provider value={quickUnpinFocusRef}>
             <SessionListScrollAnchor sessions={props.sessions} className="mx-auto flex w-full max-w-content flex-col gap-1 pl-1.5 pr-2 pb-2">
-                {props.sessions.length === 0 && !props.isLoading ? (
+                {folderData && !isSearchFiltering ? (
+                    <SessionFoldersNavigation
+                        folder={openFolder}
+                        children={childFolders}
+                        onOpen={id => {
+                            setOpenFolderId(id)
+                            if (scrollContainerRef.current) scrollContainerRef.current.scrollTop = 0
+                        }}
+                        onCreate={() => setCreateFolderTarget({ parentId: folderId })}
+                        onDelete={setDeleteFolderTarget}
+                    />
+                ) : null}
+
+                {folderQuery.isError && !folderData && !isSearchFiltering ? (
+                    <div role="alert" className="flex items-center gap-2 px-2 text-sm text-[var(--app-hint)]">
+                        {t('sessions.folders.loadError')}
+                        <button
+                            type="button"
+                            className="rounded-md px-2 py-1 text-[var(--app-link)] hover:bg-[var(--app-subtle-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]"
+                            onClick={() => void folderQuery.refetch()}
+                        >
+                            {t('button.retry')}
+                        </button>
+                    </div>
+                ) : null}
+
+                {openFolder && !isFiltering && !props.isLoading && childFolders.length === 0 && machineFilteredSessions.length === 0 && activeMachineFilter === null && listView.status === 'all' ? (
+                    <p className="px-2 py-2 text-sm text-[var(--app-hint)]">{t('sessions.folders.empty')}</p>
+                ) : null}
+
+                {props.sessions.length === 0 && !props.isLoading && !openFolder ? (
                     <SessionsEmptyState
                         onNewSession={props.onNewSession}
                         onBrowse={props.onBrowse}
@@ -3830,15 +3812,8 @@ export function SessionList(props: {
                 {actionOnlyGroups.map(renderActionOnlyGroupHeader)}
             </SessionListScrollAnchor>
             </QuickUnpinFocusContext.Provider>
+            </MoveToFolderContext.Provider>
             </div>
-            {openSessionTickRatio != null ? (
-                <span
-                    className="session-list-open-tick"
-                    style={{ top: `${openSessionTickRatio * 100}%` }}
-                    title={t('sessions.openTick.tooltip')}
-                    aria-hidden="true"
-                />
-            ) : null}
             </div>
             <ConfirmDialog
                 isOpen={markAllReadOpen}

@@ -2,6 +2,7 @@ package app.hapi.companion.feature.chat.blocks
 
 import app.hapi.companion.feature.chat.terminalCommand
 import app.hapi.protocol.chat.ChatToolCall
+import app.hapi.protocol.git.DiffLineKind
 import app.hapi.protocol.wire.HapiJson
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -32,9 +33,25 @@ class ToolContentPresentationTest {
         assertNull(toolSourceInput(json("""{"unknown":true}"""), listOf("patch")))
     }
 
+    @Test fun codexPatchKeepsHunksWithTheirFileAndPreservesPathFallback() {
+        val diff = "@@ -1 +1 @@\n-2\n+3\n"
+        for (input in listOf(
+            """{"changes":{"left/example.txt":{"type":"update","unified_diff":"@@ -1 +1 @@\n-2\n+3\n"},"right/example.txt":{"type":"update"}}}""",
+            """{"changes":[{"path":"left/example.txt","kind":{"type":"update"},"diff":"@@ -1 +1 @@\n-2\n+3\n"},{"path":"right/example.txt","kind":{"type":"add"},"diff":"@@ -1 +1 @@\n-2\n+3\n"}]}""",
+        )) {
+            val files = codexPatchFiles(json(input))
+            assertEquals(listOf("left/example.txt", "right/example.txt"), files.map { it.path })
+            assertEquals(listOf(diff, null), files.map { it.diff })
+            val file = requireNotNull(codexPatchDiff(diff, files.first().path))
+            assertEquals("left/example.txt", file.displayPath)
+            assertEquals(listOf("2", "3"), file.hunks.single().lines.map { it.text })
+            assertEquals(listOf(DiffLineKind.REMOVE, DiffLineKind.ADD), file.hunks.single().lines.map { it.kind })
+        }
+    }
+
     @Test fun planProposalsReadInputAndPreserveTheCompleteDocument() {
         val plan = "\n# 计划 👩🏽‍💻\n\n" + "- Inspect **input.plan**  \n".repeat(1_000) + "last  \n"
-        for (name in listOf("ExitPlanMode", "exit_plan_mode")) {
+        for (name in listOf("ExitPlanMode", "exit_plan_mode", "CursorCreatePlan")) {
             val input = JsonObject(mapOf("plan" to JsonPrimitive(plan), "extra" to JsonPrimitive(true)))
             val call = tool(name, input, JsonNull)
             assertTrue(isPlanProposalTool(name))
@@ -57,6 +74,26 @@ class ToolContentPresentationTest {
         assertNull(planProposalMarkdown(tool("update_plan", input)))
         assertNull(planProposalMarkdown(tool("mcp__server__ExitPlanMode", input)))
         assertNull(planProposalMarkdown(tool("update_plan", json("""{"plan":[{"step":"Inspect","status":"completed"}]}"""))))
+    }
+
+    @Test fun cursorPhaseHierarchyPreservesCancelledTodosWithoutFlatDuplicates() {
+        val input = json("""{"todos":[{"content":"duplicate"}],"phases":[{"name":"Design","todos":[{"content":"Retired","status":"cancelled"}]}]}""")
+        val phase = planProposalSections(tool("CursorCreatePlan", input)).single()
+        assertEquals("Design", (phase["name"] as JsonPrimitive).content)
+        assertEquals(listOf("⊘" to "Retired"), checklistItems(phase))
+        assertTrue(planProposalSections(tool("ExitPlanMode", input)).isEmpty())
+    }
+
+    @Test fun cursorPlanOverviewCanStandAloneAndOmitsDuplicates() {
+        val both = json("""{"overview":" Review the changes. ","plan":"## Steps"}""")
+        assertEquals("Review the changes.", planProposalOverview(tool("CursorCreatePlan", both)))
+        assertEquals("## Steps", planProposalMarkdown(tool("CursorCreatePlan", both)))
+        assertNull(planProposalOverview(tool("ExitPlanMode", both)))
+        val onlyOverview = json("""{"overview":"Review only."}""")
+        assertEquals("Review only.", planProposalOverview(tool("CursorCreatePlan", onlyOverview)))
+        for (input in listOf("""{"overview":" \n "}""", """{"overview":42}""", """{"overview":"Summary","plan":"\nSummary\n"}""")) {
+            assertNull(planProposalOverview(tool("CursorCreatePlan", json(input))))
+        }
     }
 
     @Test fun resultEnvelopesAndWhitespace() {

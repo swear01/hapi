@@ -1,0 +1,33 @@
+From 1c1599f5a5aa2dc51575b7abb34eacf0345e1f9b Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 28 Nov 2026 06:04:10 +0800
+Subject: [PATCH] Describe changes and database rollback for HAPI v0.36.7.2
+
+---
+ .github/release-notes/v0.36.7.2.md | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+ create mode 100644 .github/release-notes/v0.36.7.2.md
+
+diff --git a/.github/release-notes/v0.36.7.2.md b/.github/release-notes/v0.36.7.2.md
+new file mode 100644
+index 000000000..6853619eb
+--- /dev/null
++++ b/.github/release-notes/v0.36.7.2.md
+@@ -0,0 +1,14 @@
++# HAPI v0.36.7.2
++
++## Compared with the previous maintained release
++
++- Integrates the Cursor improvements for slash commands, permissions, model selection, account usage, portable conversation branches, and native history. Verified cross-host Cursor stores can resume through ACP. Native fork and conversation rewind require a compatible store and a verified history boundary.
++- Shows Codex edits as per-file diffs on Web, iOS and Android. The Web composer can attach long pastes as text, and the session list highlights the open session and supports nested chat folders.
++- Restores hosted transcript updates on iOS, preserves streamed Kimi ACP text, and fixes Windows OpenCode compaction and retry reporting.
++- The Hub logs the start and completion of database migrations. Nested chat folders add two tables in schema 37. The schema-36 backup is required to roll back to 0.36.7.1.
++
++## Compared with the official release
++
++- Builds on upstream main `6f7420aa`, two commits past official v0.36.7, and preserves the previous maintained release's reviewed patches.
++- Adds the Cursor integration from fork PR #36, the Codex patch display from fork PR #38, and the iOS transcript observation repair from fork PR #37. The release audit records the exact upstream heads and integration repairs.
++- Ships the standalone CLI, Hub and embedded Web app in five platform archives with SHA-256 checksums. The macOS archives keep the `xyz.hapi.cli` signature identity.
+-- 
+2.54.0 (Apple Git-157)
+

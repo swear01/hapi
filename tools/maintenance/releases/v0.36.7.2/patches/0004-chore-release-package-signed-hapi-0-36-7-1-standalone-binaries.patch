@@ -1,0 +1,357 @@
+From b47f2d7c27f9168b0ef521da10817a6fe055cb28 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Fri, 27 Nov 2026 18:04:15 +0800
+Subject: [PATCH] chore(release): package signed HAPI 0.36.7.1 standalone
+ binaries
+
+(cherry picked from commit 80794a31cdce86b837742dee4f7c4a9005ced84d)
+---
+ .github/workflows/fixtures.yml     |   7 ++
+ .github/workflows/release.yml      | 174 +++++++++++++++++++++++------
+ .github/workflows/webapp.yml       |   2 +
+ android/app/build.gradle.kts       |   2 +-
+ cli/package.json                   |   2 +-
+ ios/Hapi.xcodeproj/project.pbxproj |   8 +-
+ shared/src/buildInfo.ts            |   2 +-
+ 7 files changed, 153 insertions(+), 44 deletions(-)
+
+diff --git a/.github/workflows/fixtures.yml b/.github/workflows/fixtures.yml
+index eea08b0bc..02ab73b50 100644
+--- a/.github/workflows/fixtures.yml
++++ b/.github/workflows/fixtures.yml
+@@ -12,6 +12,8 @@ on:
+             - 'shared/src/**'
+             - 'web/scripts/**'
+             - 'shared/fixtures/**'
++            - 'package.json'
++            - 'bun.lock'
+             - '.github/workflows/fixtures.yml'
+     pull_request:
+         paths:
+@@ -22,7 +24,10 @@ on:
+             - 'shared/src/**'
+             - 'web/scripts/**'
+             - 'shared/fixtures/**'
++            - 'package.json'
++            - 'bun.lock'
+             - '.github/workflows/fixtures.yml'
++    workflow_dispatch:
+ 
+ permissions:
+     contents: read
+@@ -37,6 +42,8 @@ jobs:
+         steps:
+             - uses: actions/checkout@v4
+             - uses: oven-sh/setup-bun@v2
++              with:
++                  bun-version: 1.4.4
+             - run: bun install --frozen-lockfile
+             - name: Regenerate fixtures from the web pipeline
+               run: bun run gen:fixtures
+diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+index 123511ea5..ac3e43097 100644
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -3,48 +3,54 @@ name: Release
+ on:
+     push:
+         tags:
+-            - 'v*'
++            - 'v*.*.*.*'
+ 
+ permissions:
+-    contents: write
+-    # npm Trusted Publishing (OIDC); no npm token is stored in the repo.
+-    id-token: write
+-
+-concurrency:
+-    group: release-${{ github.ref }}
++    contents: read
+ 
+ jobs:
+-    release:
++    cli:
++        if: github.repository == 'swear01/hapi'
+         runs-on: ubuntu-latest
+         steps:
+             - uses: actions/checkout@v4
+-            - uses: oven-sh/setup-bun@v2
+-            - uses: actions/setup-node@v4
+               with:
+-                  node-version: 24
+-            # Trusted Publishing needs npm >= 11.5.1.
+-            - run: npm install -g npm@11
+-            - name: Check tag matches CLI version
++                  fetch-depth: 0
++            - name: Validate maintenance release tag
++              run: |
++                  TAG_VERSION="${GITHUB_REF_NAME#v}"
++                  CLI_VERSION="$(node -p "require('./cli/package.json').version")"
++                  APP_VERSION="$(sed -nE "s/^export const APP_VERSION = '([^']+)'$/\\1/p" shared/src/buildInfo.ts)"
++                  test "$TAG_VERSION" = "$CLI_VERSION"
++                  test "$TAG_VERSION" = "$APP_VERSION"
++
++            - name: Verify release commit is current main
+               run: |
+-                  VERSION="$(node -p "require('./cli/package.json').version")"
+-                  if [[ "v$VERSION" != "$GITHUB_REF_NAME" ]]; then
+-                      echo "::error::Tag $GITHUB_REF_NAME does not match cli/package.json version $VERSION"
+-                      exit 1
+-                  fi
++                  git fetch origin main:refs/remotes/origin/main
++                  test "$(git rev-parse refs/remotes/origin/main)" = "$GITHUB_SHA"
++            - name: Verify maintained release notes
++              run: |
++                  tag="${GITHUB_REF#refs/tags/}"
++                  notes_file=".github/release-notes/${tag}.md"
++                  test -s "$notes_file"
++                  grep -F 'Compared with the previous maintained release' "$notes_file"
++                  grep -F 'Compared with the official release' "$notes_file"
++            - uses: oven-sh/setup-bun@v2
++              with:
++                  bun-version: 1.4.4
+             - run: bun install --frozen-lockfile
+             - run: bun run build:single-exe:all
+-            - name: Publish to npm
+-              env:
+-                  NPM_PUBLISH_WAIT_TIMEOUT_SECONDS: ${{ vars.NPM_PUBLISH_WAIT_TIMEOUT_SECONDS }}
+-              run: bun run --cwd cli publish-npm
+-            - name: Package release artifacts
++            - name: Package CLI release artifacts
+               run: |
+                   cd cli/dist-exe
+                   mkdir -p ../release-artifacts
+ 
+                   for dir in bun-*/; do
+                       target="${dir%/}"
+-                      # bun-darwin-arm64 -> hapi-darwin-arm64
++                      if [[ "$target" == bun-darwin-* ]]; then
++                          continue
++                      fi
++
+                       name="hapi-${target#bun-}"
+                       name="${name/windows/win32}"
+ 
+@@ -54,21 +60,115 @@ jobs:
+                           tar -czvf "../release-artifacts/${name}.tar.gz" -C "$target" hapi
+                       fi
+                   done
++            - name: Upload CLI release artifacts
++              uses: actions/upload-artifact@v4
++              with:
++                  name: cli-release-artifacts
++                  path: cli/release-artifacts/*
++                  if-no-files-found: error
++            - uses: actions/upload-artifact@v4
++              with:
++                  name: unsigned-binaries
++                  path: cli/dist-exe/bun-*/hapi*
++                  if-no-files-found: error
+ 
+-                  cd ../release-artifacts
+-                  sha256sum * > checksums.txt
++    sign-macos:
++        if: github.repository == 'swear01/hapi'
++        runs-on: macos-26
++        needs: cli
++        steps:
++            - uses: actions/download-artifact@v4
++              with:
++                  name: unsigned-binaries
++                  path: cli/dist-exe
++            - name: Import local release signing certificate
++              env:
++                  SIGNING_P12: ${{ secrets.MACOS_SIGNING_P12 }}
++                  SIGNING_P12_PASSWORD: ${{ secrets.MACOS_SIGNING_P12_PASSWORD }}
++              run: |
++                  test -n "$SIGNING_P12"
++                  test -n "$SIGNING_P12_PASSWORD"
++
++                  KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
++                  KEYCHAIN_PATH="$RUNNER_TEMP/hapi-signing.keychain-db"
++                  printf '%s' "$SIGNING_P12" | openssl base64 -d -A > "$RUNNER_TEMP/hapi-signing.p12"
++
++                  security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
++                  security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
++                  security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
++                  security import "$RUNNER_TEMP/hapi-signing.p12" \
++                      -k "$KEYCHAIN_PATH" \
++                      -P "$SIGNING_P12_PASSWORD" \
++                      -T /usr/bin/codesign
++                  security set-key-partition-list \
++                      -S apple-tool:,apple: \
++                      -s \
++                      -k "$KEYCHAIN_PASSWORD" \
++                      "$KEYCHAIN_PATH"
++                  security list-keychains -d user -s "$KEYCHAIN_PATH"
++                  security find-identity -v -p codesigning "$KEYCHAIN_PATH"
++            - name: Sign and package macOS release artifacts
++              run: |
++                  mkdir -p cli/release-artifacts
++
++                  for target in bun-darwin-arm64 bun-darwin-x64; do
++                      binary="cli/dist-exe/$target/hapi"
++                      chmod 0755 "$binary"
++                      codesign \
++                          --force \
++                          --options runtime \
++                          --identifier xyz.hapi.cli \
++                          --keychain "$RUNNER_TEMP/hapi-signing.keychain-db" \
++                          --sign "HAPI Local Release Signing" \
++                          "$binary"
++                      codesign --verify --strict --verbose=2 "$binary"
++                      codesign --display --requirements - "$binary" 2>&1 \
++                          | grep -F 'identifier "xyz.hapi.cli"'
++                      tar -czvf "cli/release-artifacts/hapi-${target#bun-}.tar.gz" \
++                          -C "cli/dist-exe/$target" hapi
++                  done
++            - uses: actions/upload-artifact@v4
++              with:
++                  name: signed-macos-release-artifacts
++                  path: cli/release-artifacts/*
++                  if-no-files-found: error
++
++    release:
++        if: github.repository == 'swear01/hapi'
++        permissions:
++            contents: write
++        runs-on: ubuntu-latest
++        needs: [cli, sign-macos]
++        steps:
++            - uses: actions/checkout@v4
++              with:
++                  fetch-depth: 0
++            - uses: actions/download-artifact@v4
++              with:
++                  pattern: '*-release-artifacts'
++                  path: cli/release-artifacts
++                  merge-multiple: true
++            - name: Create checksums
++              run: |
++                  cd cli/release-artifacts
++                  sha256sum \
++                      hapi-darwin-arm64.tar.gz \
++                      hapi-darwin-x64.tar.gz \
++                      hapi-linux-arm64.tar.gz \
++                      hapi-linux-x64-baseline.tar.gz \
++                      hapi-win32-x64.zip > checksums.txt
++                  test "$(find . -maxdepth 1 -type f | wc -l)" -eq 6
+             - name: Create Release
+               env:
+                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+               run: |
+-                  gh release create "${GITHUB_REF#refs/tags/}" \
+-                      --title "Release ${GITHUB_REF#refs/tags/}" \
+-                      --generate-notes \
++                  git fetch origin main:refs/remotes/origin/main
++                  test "$(git rev-parse refs/remotes/origin/main)" = "$GITHUB_SHA"
++                  tag="${GITHUB_REF#refs/tags/}"
++                  notes_file=".github/release-notes/${tag}.md"
++                  test -s "$notes_file"
++                  gh release create "$tag" \
++                      --repo "$GITHUB_REPOSITORY" \
++                      --title "Release $tag" \
++                      --notes-file "$notes_file" \
+                       cli/release-artifacts/*
+-            - name: Update Homebrew formula
+-              continue-on-error: true
+-              env:
+-                  GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+-              run: |
+-                  VERSION="${GITHUB_REF#refs/tags/v}"
+-                  cd cli && bun run update-homebrew-formula --version "$VERSION" --push
+diff --git a/.github/workflows/webapp.yml b/.github/workflows/webapp.yml
+index 2bf153f10..3fcb28b4c 100644
+--- a/.github/workflows/webapp.yml
++++ b/.github/workflows/webapp.yml
+@@ -20,6 +20,7 @@ concurrency:
+ 
+ jobs:
+     build:
++        if: github.repository == 'tiann/hapi'
+         runs-on: ubuntu-latest
+         steps:
+             - uses: actions/checkout@v4
+@@ -39,6 +40,7 @@ jobs:
+                   path: web/dist
+ 
+     deploy:
++        if: github.repository == 'tiann/hapi'
+         needs: build
+         runs-on: ubuntu-latest
+         environment:
+diff --git a/android/app/build.gradle.kts b/android/app/build.gradle.kts
+index 37ca4ef5e..741c79333 100644
+--- a/android/app/build.gradle.kts
++++ b/android/app/build.gradle.kts
+@@ -101,7 +101,7 @@ android {
+         targetSdk = 36
+         versionCode = gitCommitCount ?: 1
+         // Tracks the hapi CLI/hub release train.
+-        versionName = providers.gradleProperty("hapiVersionName").orElse("0.36.7").get()
++        versionName = providers.gradleProperty("hapiVersionName").orElse("0.36.7.1").get()
+         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+     }
+ 
+diff --git a/cli/package.json b/cli/package.json
+index 2ab8328b6..1cb58371e 100644
+--- a/cli/package.json
++++ b/cli/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "@twsxtd/hapi",
+-  "version": "0.36.7",
++  "version": "0.36.7.1",
+   "description": "App for agentic coding - access coding agent anywhere",
+   "author": "Kirill Dubovitskiy & weishu",
+   "license": "AGPL-3.0-only",
+diff --git a/ios/Hapi.xcodeproj/project.pbxproj b/ios/Hapi.xcodeproj/project.pbxproj
+index 61fe4965b..748e00a8b 100644
+--- a/ios/Hapi.xcodeproj/project.pbxproj
++++ b/ios/Hapi.xcodeproj/project.pbxproj
+@@ -412,7 +412,7 @@
+ 					"$(inherited)",
+ 					"@executable_path/Frameworks",
+ 				);
+-				MARKETING_VERSION = 0.36.7;
++				MARKETING_VERSION = 0.36.7.1;
+ 				PRODUCT_BUNDLE_IDENTIFIER = run.hapi.app;
+ 				PRODUCT_NAME = "$(TARGET_NAME)";
+ 				SUPPORTS_MACCATALYST = YES;
+@@ -447,7 +447,7 @@
+ 					"$(inherited)",
+ 					"@executable_path/Frameworks",
+ 				);
+-				MARKETING_VERSION = 0.36.7;
++				MARKETING_VERSION = 0.36.7.1;
+ 				PRODUCT_BUNDLE_IDENTIFIER = run.hapi.app;
+ 				PRODUCT_NAME = "$(TARGET_NAME)";
+ 				SUPPORTS_MACCATALYST = YES;
+@@ -475,7 +475,7 @@
+ 					"@executable_path/Frameworks",
+ 					"@executable_path/../../Frameworks",
+ 				);
+-				MARKETING_VERSION = 0.36.7;
++				MARKETING_VERSION = 0.36.7.1;
+ 				PRODUCT_BUNDLE_IDENTIFIER = run.hapi.app.HapiNotificationService;
+ 				PRODUCT_NAME = "$(TARGET_NAME)";
+ 				SKIP_INSTALL = YES;
+@@ -504,7 +504,7 @@
+ 					"@executable_path/Frameworks",
+ 					"@executable_path/../../Frameworks",
+ 				);
+-				MARKETING_VERSION = 0.36.7;
++				MARKETING_VERSION = 0.36.7.1;
+ 				PRODUCT_BUNDLE_IDENTIFIER = run.hapi.app.HapiNotificationService;
+ 				PRODUCT_NAME = "$(TARGET_NAME)";
+ 				SKIP_INSTALL = YES;
+diff --git a/shared/src/buildInfo.ts b/shared/src/buildInfo.ts
+index e4f69545f..138023eb0 100644
+--- a/shared/src/buildInfo.ts
++++ b/shared/src/buildInfo.ts
+@@ -1 +1 @@
+-export const APP_VERSION = '0.36.7'
++export const APP_VERSION = '0.36.7.1'
+-- 
+2.54.0 (Apple Git-157)
+

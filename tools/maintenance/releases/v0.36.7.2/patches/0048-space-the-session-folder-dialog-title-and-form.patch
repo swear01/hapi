@@ -1,0 +1,25 @@
+From 91f012bdfb014062c28046c39fc9cd74acd7a875 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 28 Nov 2026 06:06:32 +0800
+Subject: [PATCH] Space the session folder dialog title and form
+
+---
+ web/src/components/SessionFolders.tsx | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/web/src/components/SessionFolders.tsx b/web/src/components/SessionFolders.tsx
+index 63952d920..2bb1c36ed 100644
+--- a/web/src/components/SessionFolders.tsx
++++ b/web/src/components/SessionFolders.tsx
+@@ -150,7 +150,7 @@ export function SessionFolderDialog(props: FolderDialogProps) {
+                 <DialogHeader>
+                     <DialogTitle>{title}</DialogTitle>
+                 </DialogHeader>
+-                <form className="flex flex-col gap-3" onSubmit={submit}>
++                <form className="mt-3 flex flex-col gap-3" onSubmit={submit}>
+                     {props.mode === 'create' ? (
+                         <>
+                             <label htmlFor={id} className="sr-only">{t('sessions.folders.name')}</label>
+-- 
+2.54.0 (Apple Git-157)
+

@@ -1,0 +1,49 @@
+From 9a718c18e0f43ace0242205cc1a22848ecc1877e Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Fri, 27 Nov 2026 18:06:33 +0800
+Subject: [PATCH] test(cli): preserve macOS path and Linux parser fixture
+ isolation
+
+---
+ cli/src/cursor/utils/cursorNotifyRuleOverlay.test.ts | 5 +++--
+ cli/src/opencode/utils/opencodeBackend.test.ts       | 1 +
+ 2 files changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/cli/src/cursor/utils/cursorNotifyRuleOverlay.test.ts b/cli/src/cursor/utils/cursorNotifyRuleOverlay.test.ts
+index 639ead180..bfcd391fb 100644
+--- a/cli/src/cursor/utils/cursorNotifyRuleOverlay.test.ts
++++ b/cli/src/cursor/utils/cursorNotifyRuleOverlay.test.ts
+@@ -7,6 +7,7 @@ import {
+     mkdtempSync,
+     readFileSync,
+     readdirSync,
++    realpathSync,
+     rmSync,
+     statSync,
+     symlinkSync,
+@@ -70,8 +71,8 @@ describe('installCursorNotifyRuleOverlay', () => {
+     let previousHapiHome: string | undefined;
+ 
+     beforeEach(() => {
+-        cwd = mkdtempSync(join(tmpdir(), 'hapi-notify-rule-'));
+-        hapiHome = mkdtempSync(join(tmpdir(), 'hapi-home-'));
++        cwd = realpathSync(mkdtempSync(join(tmpdir(), 'hapi-notify-rule-')));
++        hapiHome = realpathSync(mkdtempSync(join(tmpdir(), 'hapi-home-')));
+         previousHapiHome = process.env.HAPI_HOME;
+         process.env.HAPI_HOME = hapiHome;
+     });
+diff --git a/cli/src/opencode/utils/opencodeBackend.test.ts b/cli/src/opencode/utils/opencodeBackend.test.ts
+index eb035c942..20e97ddad 100644
+--- a/cli/src/opencode/utils/opencodeBackend.test.ts
++++ b/cli/src/opencode/utils/opencodeBackend.test.ts
+@@ -237,6 +237,7 @@ describe('parseLsofListeners', () => {
+ describe('listLoopbackListeners', () => {
+     it('parses ss output on linux', async () => {
+         const listeners = await listLoopbackListeners({
++            platform: 'linux',
+             execImpl: async (command, args) => {
+                 expect(command).toBe('ss');
+                 expect(args).toEqual(['-tln']);
+-- 
+2.54.0 (Apple Git-157)
+

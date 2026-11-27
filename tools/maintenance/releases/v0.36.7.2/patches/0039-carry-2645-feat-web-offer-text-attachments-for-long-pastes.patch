@@ -1,0 +1,605 @@
+From 0e845fdf57264d009ea7a585330d323d8a29f97b Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 28 Nov 2026 06:00:00 +0800
+Subject: [PATCH] Carry #2645: feat(web): offer text attachments for long
+ pastes
+
+Upstream head: e5704c1920072ff817b0c82ee95d081b0fa0072e
+---
+ .../AssistantChat/HappyComposer.tsx           | 146 ++++++++++++++++--
+ .../AssistantChat/RichComposerInput.test.tsx  |  53 ++++++-
+ .../AssistantChat/RichComposerInput.tsx       |  24 ++-
+ .../messages/UserMessage.test.tsx             |  50 ++++++
+ .../AssistantChat/messages/UserMessage.tsx    |  26 +++-
+ web/src/lib/locales/en.ts                     |   5 +
+ web/src/lib/locales/ja.ts                     |   5 +
+ web/src/lib/locales/ru.ts                     |   5 +
+ web/src/lib/locales/zh-CN.ts                  |   5 +
+ web/src/lib/longMessage.test.ts               |  13 ++
+ web/src/lib/longMessage.ts                    |  12 ++
+ 11 files changed, 326 insertions(+), 18 deletions(-)
+ create mode 100644 web/src/lib/longMessage.test.ts
+ create mode 100644 web/src/lib/longMessage.ts
+
+diff --git a/web/src/components/AssistantChat/HappyComposer.tsx b/web/src/components/AssistantChat/HappyComposer.tsx
+index 5ad3b1ed9..c0f05b78b 100644
+--- a/web/src/components/AssistantChat/HappyComposer.tsx
++++ b/web/src/components/AssistantChat/HappyComposer.tsx
+@@ -62,6 +62,9 @@ import { SortableComposerAttachments } from '@/components/AssistantChat/Sortable
+ import { ComposerParkingContext } from '@/components/AssistantChat/composerParkingContext'
+ import type { ScratchlistParkResult } from '@/lib/scratchlistAttachmentFlow'
+ import { useTranslation } from '@/lib/use-translation'
++import { isLongMessage } from '@/lib/longMessage'
++import { Button } from '@/components/ui/button'
++import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+ import { getModelOptionsForFlavor, getNextModelForFlavor } from './modelOptions'
+ import { getClaudeComposerEffortOptions } from './claudeEffortOptions'
+ import { getCodexComposerReasoningEffortOptions } from './codexReasoningEffortOptions'
+@@ -544,6 +547,18 @@ export function HappyComposer(props: {
+     const setPendingSchedule = isControlled ? onScheduleProp : setPendingScheduleLocal
+ 
+     const textareaRef = useRef<HTMLTextAreaElement>(null)
++    const textareaPasteHistory = useRef<{
++        before: TextInputState
++        after: TextInputState
++        applied: boolean
++    } | null>(null)
++
++    useEffect(() => {
++        const history = textareaPasteHistory.current
++        if (history && composerText !== (history.applied ? history.after.text : history.before.text)) {
++            textareaPasteHistory.current = null
++        }
++    }, [composerText])
+     const richInputRef = useRef<RichComposerInputHandle>(null)
+     const richComposerFueAnchorRef = useRef<HTMLDivElement>(null)
+     const settingsButtonRef = useRef<HTMLButtonElement>(null)
+@@ -1268,6 +1283,17 @@ export function HappyComposer(props: {
+         trigger?.focus({ preventScroll: true })
+     }, [dismissSettings, settingsSection])
+ 
++    const applyTextareaEdit = useCallback((input: HTMLTextAreaElement, next: TextInputState) => {
++        api.composer().setText(next.text)
++        setInputState(next)
++        handleUserEdit()
++        requestAnimationFrame(() => {
++            if (textareaRef.current === input && input.value === next.text) {
++                input.setSelectionRange(next.selection.start, next.selection.end)
++            }
++        })
++    }, [api, handleUserEdit])
++
+     const handleKeyDown = useCallback((e: ReactKeyboardEvent<HTMLTextAreaElement | HTMLDivElement>) => {
+         const key = e.key
+ 
+@@ -1276,6 +1302,21 @@ export function HappyComposer(props: {
+             return
+         }
+ 
++        const history = textareaPasteHistory.current
++        const input = e.currentTarget
++        if (history && input instanceof HTMLTextAreaElement && (e.ctrlKey || e.metaKey) && !e.altKey) {
++            const shortcut = key.toLowerCase()
++            const undo = shortcut === 'z' && !e.shiftKey
++            const redo = (shortcut === 'z' && e.shiftKey) || (shortcut === 'y' && !e.shiftKey)
++            const from = history.applied ? history.after : history.before
++            if ((history.applied ? undo : redo) && input.value === from.text) {
++                e.preventDefault()
++                history.applied = redo
++                applyTextareaEdit(input, redo ? history.after : history.before)
++                return
++            }
++        }
++
+         // Alt+S is an explicit send shortcut, independent of the Enter setting.
+         // Match the logical key so keyboard layouts can map Alt+S to another physical key.
+         const isAltSShortcut =
+@@ -1381,6 +1422,7 @@ export function HappyComposer(props: {
+             haptic('light')
+         }
+     }, [
++        applyTextareaEdit,
+         suggestions,
+         selectedIndex,
+         moveUp,
+@@ -1432,6 +1474,7 @@ export function HappyComposer(props: {
+     }, [model, onModelChange, haptic, agentFlavor, availableModelOptions, modelOptions, selectedModelBase, modelEffortControlsDisabled])
+ 
+     const handleChange = useCallback((e: ReactChangeEvent<HTMLTextAreaElement>) => {
++        textareaPasteHistory.current = null
+         const selection = {
+             start: e.target.selectionStart,
+             end: e.target.selectionEnd
+@@ -1448,10 +1491,56 @@ export function HappyComposer(props: {
+         }))
+     }, [])
+ 
+-    const handlePaste = useCallback(async (e: ReactClipboardEvent<HTMLTextAreaElement | HTMLDivElement>) => {
++    const [longPaste, setLongPaste] = useState<{ text: string; insert: () => void } | null>(null)
++    const pasteOnCloseRef = useRef<(() => void) | null>(null)
++    const canAttachPaste = !controlsDisabled && pendingSchedule == null && props.attachmentsEnabled !== false
++
++    const offerLongPaste = useCallback((text: string, insert: () => void) => {
++        if (!canAttachPaste || !isLongMessage(text)) return false
++        setLongPaste({ text, insert })
++        return true
++    }, [canAttachPaste])
++
++    const addPastedFiles = useCallback(async (files: File[]) => {
++        try {
++            for (const file of files) {
++                await api.composer().addAttachment(file)
++            }
++        } catch (error) {
++            console.error('Error adding pasted file:', error)
++        }
++    }, [api])
++
++    const handlePaste = useCallback((e: ReactClipboardEvent<HTMLTextAreaElement | HTMLDivElement>) => {
+         const files = Array.from(e.clipboardData?.files || [])
+ 
+-        if (files.length === 0) return
++        if (files.length === 0) {
++            const input = e.currentTarget
++            if (!(input instanceof HTMLTextAreaElement)) return
++            const { value, selectionStart, selectionEnd } = input
++            const text = e.clipboardData.getData('text/plain')
++            const handled = offerLongPaste(text, () => {
++                if (textareaRef.current !== input) return
++                const pastedText = text.replace(/\r\n?/g, '\n')
++                const currentText = input.value
++                // A draft may be restored while the choice is open.
++                const start = currentText === value ? selectionStart : currentText.length
++                const end = currentText === value ? selectionEnd : start
++                const cursor = start + pastedText.length
++                const after = {
++                    text: currentText.slice(0, start) + pastedText + currentText.slice(end),
++                    selection: { start: cursor, end: cursor },
++                }
++                textareaPasteHistory.current = {
++                    before: { text: currentText, selection: { start, end } },
++                    after,
++                    applied: true,
++                }
++                applyTextareaEdit(input, after)
++            })
++            if (handled) e.preventDefault()
++            return
++        }
+ 
+         // The backend rejects scheduledAt + attachments (per-CLI upload dir is
+         // torn down before a mature emit could read the files). The button-based
+@@ -1465,14 +1554,8 @@ export function HappyComposer(props: {
+ 
+         e.preventDefault()
+ 
+-        try {
+-            for (const file of files) {
+-                await api.composer().addAttachment(file)
+-            }
+-        } catch (error) {
+-            console.error('Error adding pasted file:', error)
+-        }
+-    }, [api, pendingSchedule])
++        void addPastedFiles(files)
++    }, [addPastedFiles, applyTextareaEdit, offerLongPaste, pendingSchedule])
+ 
+     // Opens (or closes) the settings sheet. `section` anchors the sheet to a
+     // single section ('model' / 'effort'); the gear passes nothing = full sheet.
+@@ -2312,6 +2395,7 @@ export function HappyComposer(props: {
+                                             onPaste={handlePaste}
+                                             onSessionMentionDrop={handleSessionMentionDrop}
+                                             excludeSessionId={sessionId}
++                                            onTextPaste={offerLongPaste}
+                                             onFocus={() => engageRichComposerFue()}
+                                             resolveSessionMentionTooltip={resolveSessionMentionTooltip}
+                                             onEdit={handleRichEdit}
+@@ -2455,6 +2539,48 @@ export function HappyComposer(props: {
+                         </div>
+                     </div>
+                 </ComposerPrimitive.Root>
++                <Dialog open={longPaste !== null} onOpenChange={(open) => { if (!open) setLongPaste(null) }}>
++                    <DialogContent
++                        aria-describedby={undefined}
++                        onCloseAutoFocus={(event) => {
++                            event.preventDefault()
++                            if (richMentionsEnabled) richInputRef.current?.focus()
++                            else textareaRef.current?.focus({ preventScroll: true })
++                            const insert = pasteOnCloseRef.current
++                            pasteOnCloseRef.current = null
++                            insert?.()
++                        }}
++                    >
++                        <DialogHeader>
++                            <DialogTitle>{t('composer.longPaste.title')}</DialogTitle>
++                        </DialogHeader>
++                        <div className="mt-4 flex flex-wrap justify-end gap-2">
++                            <Button
++                                type="button"
++                                variant="secondary"
++                                disabled={controlsDisabled}
++                                onClick={() => {
++                                    pasteOnCloseRef.current = longPaste?.insert ?? null
++                                    setLongPaste(null)
++                                }}
++                            >
++                                {t('composer.longPaste.asText')}
++                            </Button>
++                            <Button
++                                type="button"
++                                disabled={!canAttachPaste}
++                                onClick={() => {
++                                    if (!longPaste) return
++                                    const file = new File([longPaste.text], 'pasted-text.txt', { type: 'text/plain' })
++                                    void addPastedFiles([file])
++                                    setLongPaste(null)
++                                }}
++                            >
++                                {t('composer.longPaste.asFile')}
++                            </Button>
++                        </div>
++                    </DialogContent>
++                </Dialog>
+             </div>
+         </div>
+         </ComposerParkingContext.Provider>
+diff --git a/web/src/components/AssistantChat/RichComposerInput.test.tsx b/web/src/components/AssistantChat/RichComposerInput.test.tsx
+index f72f1b7ca..f50e6472e 100644
+--- a/web/src/components/AssistantChat/RichComposerInput.test.tsx
++++ b/web/src/components/AssistantChat/RichComposerInput.test.tsx
+@@ -1,4 +1,4 @@
+-import { fireEvent, render, screen } from '@testing-library/react'
++import { act, fireEvent, render, screen } from '@testing-library/react'
+ import { flushSync } from 'react-dom'
+ import { useRef, useState } from 'react'
+ import { afterEach, describe, expect, it, vi } from 'vitest'
+@@ -366,6 +366,57 @@ describe('RichComposerInput paste', () => {
+         expect(onPaste).toHaveBeenCalledTimes(1)
+     })
+ 
++    it('defers text paste and uses the original selection after focus moves', () => {
++        const onTextPaste = vi.fn((_text: string, _insert: () => void) => true)
++        const onValueChange = vi.fn()
++        render(
++            <RichComposerInput
++                value="before selected after"
++                onValueChange={onValueChange}
++                onMirrorChange={() => {}}
++                onTextPaste={onTextPaste}
++            />
++        )
++        const editor = screen.getByTestId('rich-composer-input')
++        editor.focus()
++        const range = document.createRange()
++        range.setStart(editor.firstChild!, 7)
++        range.setEnd(editor.firstChild!, 15)
++        const selection = window.getSelection()!
++        selection.removeAllRanges()
++        selection.addRange(range)
++
++        fireEvent.paste(editor, {
++            clipboardData: { files: [], getData: () => '已選😀' },
++        })
++        expect(onValueChange).not.toHaveBeenCalled()
++        const [text, insert] = onTextPaste.mock.calls[0]
++        expect(text).toBe('已選😀')
++        selection.removeAllRanges()
++        act(insert)
++        expect(onValueChange).toHaveBeenLastCalledWith('before 已選😀 after')
++    })
++
++    it('appends deferred paste when another action restores the draft', () => {
++        const onTextPaste = vi.fn((_text: string, _insert: () => void) => true)
++        const onValueChange = vi.fn()
++        const input = (value: string) => (
++            <RichComposerInput
++                value={value}
++                onValueChange={onValueChange}
++                onMirrorChange={() => {}}
++                onTextPaste={onTextPaste}
++            />
++        )
++        const { rerender } = render(input(''))
++        fireEvent.paste(screen.getByTestId('rich-composer-input'), {
++            clipboardData: { files: [], getData: () => 'pasted text' },
++        })
++        rerender(input('restored draft: '))
++        act(onTextPaste.mock.calls[0][1])
++        expect(onValueChange).toHaveBeenLastCalledWith('restored draft: pasted text')
++    })
++
+     it('inserts plain text without calling onPaste when no files are pasted', () => {
+         const onPaste = vi.fn()
+         const onValueChange = vi.fn()
+diff --git a/web/src/components/AssistantChat/RichComposerInput.tsx b/web/src/components/AssistantChat/RichComposerInput.tsx
+index 6db2f397f..c0bb197f1 100644
+--- a/web/src/components/AssistantChat/RichComposerInput.tsx
++++ b/web/src/components/AssistantChat/RichComposerInput.tsx
+@@ -76,6 +76,7 @@ type Props = {
+     onMirrorChange: (state: { text: string; selection: ComposerSelection }) => void
+     onKeyDown?: (e: ReactKeyboardEvent<HTMLDivElement>) => void
+     onPaste?: (e: ReactClipboardEvent<HTMLDivElement>) => void
++    onTextPaste?: (text: string, insert: () => void) => boolean
+     onFocus?: (e: ReactFocusEvent<HTMLDivElement>) => void
+     onEdit?: () => void
+     /**
+@@ -739,6 +740,7 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
+         onMirrorChange,
+         onKeyDown,
+         onPaste,
++        onTextPaste,
+         onFocus,
+         onEdit,
+         onSessionMentionDrop,
+@@ -1038,19 +1040,20 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
+         emitFromDom()
+     }, [clearMentionTooltip, emitFromDom, onEdit])
+ 
+-    const insertPlainClipboardText = useCallback((text: string) => {
++    const insertPlainClipboardText = useCallback((text: string, selection?: ComposerSelection) => {
+         const root = rootRef.current
+         if (!root || !text) return
+         const segments = segmentsFromEditor(root)
+-        const selection = getMirrorSelection(root)
+         // Parse wire markdown so `[title](/sessions/<id>)` paste restores chips
+         // (copy/cut put that format on the clipboard). Plain prose stays text.
++        const end = selection?.end ?? mirrorComposerSegments(segments).length
++        const insertion = selection ?? { start: end, end }
+         const result = insertSegmentsInComposerSegments(
+             segments,
+-            selection,
++            insertion,
+             parseComposerSegments(text),
+         )
+-        recordUndo(segments, selection)
++        recordUndo(segments, insertion)
+         commitSegments(root, result.segments, result.selection)
+         onEdit?.()
+     }, [commitSegments, onEdit, recordUndo])
+@@ -1081,8 +1084,17 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
+         // Contenteditable default paste inserts HTML; nested blocks collapse in
+         // segmentsFromEditor without depth-aware breaks. Force plain text.
+         e.preventDefault()
+-        insertPlainClipboardText(e.clipboardData?.getData('text/plain') ?? '')
+-    }, [insertPlainClipboardText, onPaste])
++        const root = rootRef.current
++        const text = e.clipboardData?.getData('text/plain') ?? ''
++        if (!root || !text) return
++        const selection = getMirrorSelection(root)
++        const draft = lastEmittedRef.current
++        const insert = () => insertPlainClipboardText(
++            text,
++            lastEmittedRef.current === draft ? selection : undefined,
++        )
++        if (!onTextPaste?.(text, insert)) insert()
++    }, [insertPlainClipboardText, onPaste, onTextPaste])
+ 
+     const handleDragOver = useCallback((e: ReactDragEvent<HTMLDivElement>) => {
+         if (disabled || !dragDataHasSessionMention(e.dataTransfer.types)) return
+diff --git a/web/src/components/AssistantChat/messages/UserMessage.test.tsx b/web/src/components/AssistantChat/messages/UserMessage.test.tsx
+index 7f30e9159..01cab5007 100644
+--- a/web/src/components/AssistantChat/messages/UserMessage.test.tsx
++++ b/web/src/components/AssistantChat/messages/UserMessage.test.tsx
+@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+ import type { PropsWithChildren } from 'react'
+ import { beforeEach, describe, expect, it, vi } from 'vitest'
+ import type { HappyChatContextValue } from '@/components/AssistantChat/context'
++import * as clipboard from '@/lib/clipboard'
+ import { I18nProvider } from '@/lib/i18n-context'
+ import { findLatestCompletedBoundaryId } from '@/lib/assistant-runtime'
+ import { HappyUserMessage } from './UserMessage'
+@@ -278,3 +279,52 @@ describe('translated user prompt', () => {
+         }
+     })
+ })
++
++describe('long user prompts', () => {
++    function mountPrompt(text: string) {
++        const previous = state.message
++        state.message = {
++            id: 'user-text:long', role: 'user', createdAt: new Date(10),
++            content: [{ type: 'text', text }],
++            metadata: { custom: { kind: 'user', localId: null, sourceMessageId: 'stored-long', invokedAt: 10, isTranscriptEcho: false } }
++        }
++        mount()
++        return () => { state.message = previous }
++    }
++
++    it.each(['中🙂'.repeat(2500), 'line\n'.repeat(100)])('keeps shorter prompts expanded', (text) => {
++        const restore = mountPrompt(text)
++        try {
++            expect(screen.queryByRole('button', { name: 'Show more' })).toBeNull()
++        } finally {
++            restore()
++        }
++    })
++
++    it.each([
++        { text: `${'中🙂'.repeat(2500)}尾`, preview: '中🙂'.repeat(500) },
++        { text: `${'line\n'.repeat(10)}${'rest'.repeat(1250)}`, preview: Array(10).fill('line').join('\n') },
++    ])('shows a bounded preview and copies the full prompt while collapsed', async ({ text, preview }) => {
++        const copy = vi.spyOn(clipboard, 'safeCopyToClipboard').mockResolvedValue(undefined)
++        const restore = mountPrompt(text)
++        try {
++            const showMore = screen.getByRole('button', { name: 'Show more' })
++            const content = document.getElementById(showMore.getAttribute('aria-controls')!)
++            expect(content?.textContent).toBe(preview)
++            expect(showMore.getAttribute('aria-expanded')).toBe('false')
++
++            fireEvent.click(screen.getByRole('button', { name: 'Copy' }))
++            await waitFor(() => expect(copy).toHaveBeenCalledWith(text))
++
++            fireEvent.click(showMore)
++            const showLess = screen.getByRole('button', { name: 'Show less' })
++            expect(content?.textContent).toBe(text)
++            expect(showLess.getAttribute('aria-expanded')).toBe('true')
++            fireEvent.click(showLess)
++            expect(content?.textContent).toBe(preview)
++        } finally {
++            restore()
++            copy.mockRestore()
++        }
++    })
++})
+diff --git a/web/src/components/AssistantChat/messages/UserMessage.tsx b/web/src/components/AssistantChat/messages/UserMessage.tsx
+index c4b4219f4..4401ab460 100644
+--- a/web/src/components/AssistantChat/messages/UserMessage.tsx
++++ b/web/src/components/AssistantChat/messages/UserMessage.tsx
+@@ -8,6 +8,7 @@ import { UserBubbleContent, getUserBubbleClassName, shouldShowMessageStatus } fr
+ import { CliOutputBlock } from '@/components/CliOutputBlock'
+ import { getConversationMessageAnchorId } from '@/chat/outline'
+ import { MessageActions, isConversationHistoryBlocked } from '@/components/AssistantChat/messages/MessageActions'
++import { isLongMessage } from '@/lib/longMessage'
+ import { useTranslation } from '@/lib/use-translation'
+ import { MessageTimestamp } from '@/components/AssistantChat/messages/MessageTimestamp'
+ 
+@@ -65,6 +66,7 @@ export function HappyUserMessage() {
+         s.message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
+     )?.translationFailed === true)
+     const [showSentText, setShowSentText] = useState(false)
++    const [expanded, setExpanded] = useState(false)
+     const steered = useAuiState(({ message }) => (
+         message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
+     )?.steered === true)
+@@ -157,6 +159,11 @@ export function HappyUserMessage() {
+     const isTranslated = typeof translatedFrom === 'string' && importIndex < 0
+     const visibleText = isTranslated && !showSentText ? translatedFrom : sentText
+     const hasText = visibleText.length > 0
++    const collapsible = isLongMessage(visibleText)
++    const textId = `${elementId}-text`
++    const preview = collapsible && !expanded
++        ? (visibleText.match(/^.{1,1000}/su)?.[0] ?? '').split(/\r\n|[\r\n]/, 10).join('\n')
++        : null
+     const hasAttachments = attachments && attachments.length > 0
+ 
+     return (
+@@ -169,7 +176,24 @@ export function HappyUserMessage() {
+             <div className={getUserBubbleClassName(status)}>
+                 <div className="flex items-start gap-2">
+                     <div className="min-w-0 flex-1">
+-                        {hasText ? <UserBubbleContent text={visibleText} /> : null}
++                        {collapsible ? (
++                            <>
++                                <div id={textId}>
++                                    {preview !== null ? (
++                                        <div className="line-clamp-10 whitespace-pre-wrap [overflow-wrap:anywhere]">{preview}</div>
++                                    ) : <UserBubbleContent text={visibleText} />}
++                                </div>
++                                <button
++                                    type="button"
++                                    aria-controls={textId}
++                                    aria-expanded={expanded}
++                                    onClick={() => setExpanded((value) => !value)}
++                                    className="mt-1 min-h-6 cursor-pointer text-xs underline underline-offset-2"
++                                >
++                                    {t(expanded ? 'chat.longMessage.showLess' : 'chat.longMessage.showMore')}
++                                </button>
++                            </>
++                        ) : hasText ? <UserBubbleContent text={visibleText} /> : null}
+                         {importedReference ? <details className="mt-2 text-xs">
+                             <summary className="cursor-pointer">{t('branch.importedReference')}</summary>
+                             <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-words">{importedReference}</pre>
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index d9d55c04f..cc9136c4f 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -8,6 +8,11 @@ export default {
+   'loading.files': 'Loading files…',
+   'loading.messages': 'Loading messages…',
+   'loading.machines': 'Loading machines…',
++  'composer.longPaste.title': 'Long paste',
++  'composer.longPaste.asText': 'Paste as text',
++  'composer.longPaste.asFile': 'Attach as .txt',
++  'chat.longMessage.showMore': 'Show more',
++  'chat.longMessage.showLess': 'Show less',
+   'message.copy': 'Copy',
+   'message.copied': 'Copied',
+   'message.info': 'Message details',
+diff --git a/web/src/lib/locales/ja.ts b/web/src/lib/locales/ja.ts
+index 30826ae71..8de33a39f 100644
+--- a/web/src/lib/locales/ja.ts
++++ b/web/src/lib/locales/ja.ts
+@@ -8,6 +8,11 @@ export default {
+   'loading.files': 'ファイルを読み込み中…',
+   'loading.messages': 'メッセージを読み込み中…',
+   'loading.machines': 'マシンを読み込み中…',
++  'composer.longPaste.title': '長文の貼り付け',
++  'composer.longPaste.asText': 'テキストとして貼り付ける',
++  'composer.longPaste.asFile': '.txt として添付する',
++  'chat.longMessage.showMore': 'もっと見る',
++  'chat.longMessage.showLess': '折りたたむ',
+   'message.copy': 'コピー',
+   'message.copied': 'コピーしました',
+   'message.info': 'メッセージの詳細',
+diff --git a/web/src/lib/locales/ru.ts b/web/src/lib/locales/ru.ts
+index 353286e58..fe1c7443a 100644
+--- a/web/src/lib/locales/ru.ts
++++ b/web/src/lib/locales/ru.ts
+@@ -8,6 +8,11 @@ export default {
+   'loading.files': 'Загрузка файлов…',
+   'loading.messages': 'Загрузка сообщений…',
+   'loading.machines': 'Загрузка машин…',
++  'composer.longPaste.title': 'Вставка длинного текста',
++  'composer.longPaste.asText': 'Вставить как текст',
++  'composer.longPaste.asFile': 'Прикрепить как .txt',
++  'chat.longMessage.showMore': 'Показать больше',
++  'chat.longMessage.showLess': 'Свернуть',
+   'message.copy': 'Копировать',
+   'message.copied': 'Скопировано',
+   'message.info': 'Сведения о сообщении',
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index 7c858cb21..5cf1e59a1 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -8,6 +8,11 @@ export default {
+   'loading.files': '加载文件…',
+   'loading.messages': '加载消息…',
+   'loading.machines': '加载机器…',
++  'composer.longPaste.title': '粘贴长文本',
++  'composer.longPaste.asText': '粘贴为文本',
++  'composer.longPaste.asFile': '附加为 .txt 文件',
++  'chat.longMessage.showMore': '展开',
++  'chat.longMessage.showLess': '收起',
+   'message.copy': '复制',
+   'message.copied': '已复制',
+   'message.info': '消息详情',
+diff --git a/web/src/lib/longMessage.test.ts b/web/src/lib/longMessage.test.ts
+new file mode 100644
+index 000000000..00c842441
+--- /dev/null
++++ b/web/src/lib/longMessage.test.ts
+@@ -0,0 +1,13 @@
++import { describe, expect, it } from 'vitest'
++import { isLongMessage } from './longMessage'
++
++describe('isLongMessage', () => {
++    it.each(['a', '漢', '😀'])('uses a strict 5,000-character cutoff for %s', (character) => {
++        expect(isLongMessage(character.repeat(5000))).toBe(false)
++        expect(isLongMessage(character.repeat(5001))).toBe(true)
++    })
++
++    it('accepts short text with many lines', () => {
++        expect(isLongMessage('log\n'.repeat(100))).toBe(false)
++    })
++})
+diff --git a/web/src/lib/longMessage.ts b/web/src/lib/longMessage.ts
+new file mode 100644
+index 000000000..c495765b3
+--- /dev/null
++++ b/web/src/lib/longMessage.ts
+@@ -0,0 +1,12 @@
++const LONG_MESSAGE_THRESHOLD = 5000
++
++export function isLongMessage(text: string): boolean {
++    if (text.length <= LONG_MESSAGE_THRESHOLD) return false
++
++    let characters = 0
++    for (const character of text) {
++        characters++
++        if (characters > LONG_MESSAGE_THRESHOLD) return true
++    }
++    return false
++}
+-- 
+2.54.0 (Apple Git-157)
+
