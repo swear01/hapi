@@ -1,4 +1,5 @@
 import type { ApiSessionClient } from '@/api/apiSession';
+import { cursorTodosBySession } from './cursorTodoSnapshot';
 import type { AgentState } from '@/api/types';
 import type { AcpSdkBackend } from '@/agent/backends/acp';
 import { logger } from '@/ui/logger';
@@ -31,9 +32,6 @@ export type CursorExtensionMessageHandler = (message: AgentMessage) => void;
 
 /** Invoked when the operator accepts a CreatePlan request (Yes / Yes for session). */
 export type CursorCreatePlanAcceptedHandler = () => void;
-
-// ACP backends can be replaced before a just-written agent-state snapshot is acknowledged.
-const cursorTodosBySession = new WeakMap<ApiSessionClient, PlanItem[]>();
 
 export class CursorExtensionAdapter {
     private readonly pending = new Map<string, PendingExtensionRequest>();
@@ -188,8 +186,10 @@ export class CursorExtensionAdapter {
     private handleTodoUpdate(params: unknown): void {
         if (!isObject(params)) return;
         if (!Array.isArray(params.todos)) return;
-        const previous = cursorTodosBySession.get(this.session) ?? this.session.getAgentStateSnapshot?.()?.cursorTodoSnapshot ?? [];
-        const items = params.merge === true ? [...previous] : [];
+        const saved = this.session.getAgentStateSnapshot?.();
+        const cached = cursorTodosBySession.get(this.session);
+        const revision = cached ? cached.revision : saved?.cursorTodoRevision;
+        const items = params.merge === true ? [...(cached?.items ?? saved?.cursorTodoSnapshot ?? [])] : [];
         for (const entry of params.todos) {
             if (!isObject(entry)) continue;
             const content = asString(entry.content) ?? asString(entry.title);
@@ -203,8 +203,10 @@ export class CursorExtensionAdapter {
             if (index < 0) items.push(item);
             else items[index] = item;
         }
-        cursorTodosBySession.set(this.session, items);
-        this.session.updateAgentState(state => ({ ...state, cursorTodoSnapshot: items }));
+        cursorTodosBySession.set(this.session, { revision, items });
+        this.session.updateAgentState(state => state.cursorTodoRevision === revision
+            ? { ...state, cursorTodoSnapshot: items }
+            : state);
         this.onMessage({ type: 'plan', items });
     }
 
