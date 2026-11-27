@@ -2704,9 +2704,9 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             throw error;
         }
 
+        this.backendPermissionMode = modeAfterLoad;
         this.backend = backend;
         this.acpSessionId = acpSessionId;
-        this.backendPermissionMode = modeAfterLoad;
         this.wireAvailableCommands(backend, acpSessionId);
 
         // Fresh ACP process — bookkeeping must reflect THIS spawn's flags, not
