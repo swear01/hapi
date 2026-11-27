@@ -805,7 +805,7 @@ export class RpcGateway {
 
     async forkConversation(
         sessionId: string,
-        params: { messageLocalId?: string; latestCompleted?: boolean; lastTurnId?: string }
+        params: { messageLocalId?: string; latestCompleted?: boolean; lastTurnId?: string; cursorSourceSessionId?: string }
     ): Promise<import('@hapi/protocol/apiTypes').ForkConversationRpcResponse> {
         return await this.sessionRpc(
             sessionId,
@@ -851,7 +851,7 @@ export class RpcGateway {
 
     async rewindConversation(
         sessionId: string,
-        params: { messageLocalId: string; discardedThroughSeq?: number; opencodeRewind?: import('@hapi/protocol/schemas').OpenCodeRewindOperation }
+        params: { messageLocalId: string; cursorSourceSessionId?: string; cursorCommittedSessionId?: string; discardedThroughSeq?: number; opencodeRewind?: import('@hapi/protocol/schemas').OpenCodeRewindOperation }
     ): Promise<import('@hapi/protocol/apiTypes').RewindConversationRpcResult> {
         return await this.sessionRpc(
             sessionId,

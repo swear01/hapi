@@ -38,7 +38,7 @@ Steer, effort and history controls apply to sessions under remote control. The w
 |-------|:-----:|:-------------:|:-------------:|:------:|:--------------------:|
 | Claude Code | ✓ | ✓ | Fork current point | ✓ | ✓ |
 | Codex | ✓ | ✓ (reasoning effort) | Fork (no rewind) | ✓ | ✓ |
-| Cursor Agent | ✓ (ACP sessions) | ✓ (model variants) | — | ✓ | ✓ (ACP attach) |
+| Cursor Agent | ✓ (ACP sessions) | ✓ (model variants) | Fork and rewind on verified ACP builds | ✓ | ✓ (ACP attach) |
 | Grok Build | — | ✓ | Probed | — | — |
 | GitHub Copilot | — | ✓ | — | — | — |
 | Kimi | — | ✓ | — | — | — |
@@ -241,6 +241,10 @@ These commands are isolated in the queue and forwarded to the agent (ACP prompt 
 The slash menu also lists the commands and skills that the running Cursor ACP session advertises. HAPI sends a listed command in its own turn.
 
 Interactive TUI-only commands (`/config`, `/mcp`, `/sandbox`, `/btw`, `/rewind`, …) are not supported remotely.
+
+### Native conversation history
+
+On Cursor Agent `2026.11.22-e9042b2`, an idle remote ACP session can fork a verified native chat store. Historical fork and conversation-only rewind need a checkpoint for the selected user message. See [Conversation history](./conversation-history.md#rewind) for checkpoint lifetime and recovery.
 
 ### Modes
 

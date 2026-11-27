@@ -442,6 +442,7 @@ vi.mock('@/ui/logger', () => ({
 }));
 
 import { classifyCursorAcpLoadError, cursorAcpRemoteLauncher } from './cursorAcpRemoteLauncher';
+import { CursorConversationHistory } from './cursorConversationHistory';
 import { createCursorAcpBackend } from './utils/cursorAcpBackend';
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
 import { CursorSession } from './session';
@@ -778,6 +779,44 @@ describe('cursorAcpRemoteLauncher', () => {
         } finally {
             session.queue.close();
             await running;
+        }
+    });
+
+    it('keeps the source bound and pending input fenced until the Hub commits the exact prepared rewind', async () => {
+        const fork = vi.spyOn(CursorConversationHistory.prototype, 'fork').mockReturnValue('loaded-acp-session');
+        const session = makeSession(null, { keepQueueOpen: true });
+        const { handlers } = session.client.rpcHandlerManager as unknown as {
+            handlers: Map<string, (payload: unknown) => Promise<unknown>>
+        };
+        const running = cursorAcpRemoteLauncher(session);
+        try {
+            await vi.waitFor(() => expect(handlers.has(RPC_METHODS.RewindConversation)).toBe(true));
+            const rewind = handlers.get(RPC_METHODS.RewindConversation)!;
+            const messageLocalId = 'synthetic-turn';
+            await expect(rewind({ messageLocalId })).rejects.toThrow('two-phase Hub');
+            expect(fork).not.toHaveBeenCalled();
+            harness.rejectedModes.add('agent');
+            await expect(rewind({ cursorSourceSessionId: 'new-acp-session', messageLocalId })).rejects.toThrow();
+            expect(session.onSessionFoundWithProtocol).not.toHaveBeenCalledWith('loaded-acp-session', 'acp');
+            harness.rejectedModes.clear();
+            const prepared = await rewind({ cursorSourceSessionId: 'new-acp-session', messageLocalId });
+            expect(prepared).toMatchObject({ success: true, nativeSessionId: 'loaded-acp-session' });
+            expect(session.onSessionFoundWithProtocol).not.toHaveBeenCalledWith('loaded-acp-session', 'acp');
+            expect(fork).toHaveBeenCalledWith('new-acp-session', messageLocalId);
+            await expect(session.applyPermissionModeConfig('yolo')).rejects.toThrow('rewind is pending');
+            await expect(session.applyModelConfig('auto')).rejects.toThrow('rewind is pending');
+            session.queue.push('next prompt', { permissionMode: 'default' }, 'next');
+            await expect(rewind({ cursorCommittedSessionId: 'wrong', messageLocalId })).rejects.toThrow('No matching');
+            expect(harness.promptSends).toBe(0);
+            await expect(rewind({ cursorCommittedSessionId: 'loaded-acp-session', messageLocalId })).resolves.toMatchObject({ success: true });
+            await vi.waitFor(() => expect(harness.promptSends).toBe(1));
+            expect(session.onSessionFoundWithProtocol).toHaveBeenCalledWith('loaded-acp-session', 'acp');
+            const candidate = vi.mocked(createCursorAcpBackend).mock.results.at(-1)!.value;
+            expect(vi.mocked(candidate.prompt).mock.calls[0][0]).toBe('loaded-acp-session');
+        } finally {
+            await session.kill();
+            await running;
+            fork.mockRestore();
         }
     });
 
