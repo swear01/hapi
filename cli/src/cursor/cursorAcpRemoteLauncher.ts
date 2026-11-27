@@ -1,5 +1,6 @@
 import React from 'react';
 import { settleAcpLauncherShutdown } from '@/modules/common/remote/settleAcpLauncherShutdown';
+import { restoreCursorRewindSettings } from './utils/restoreCursorRewindSettings';
 import { CursorConversationHistory, loadCursorHistoryStore } from './cursorConversationHistory';
 import { randomUUID } from 'node:crypto';
 import { basename } from 'node:path';
@@ -35,7 +36,7 @@ import {
     setCursorModelOption,
     wireIdForCursorSessionState
 } from './utils/cursorModeConfig';
-import { CURSOR_AUTO_MODEL_ID, cursorSpawnModelId, isCursorAutoModelId } from '@hapi/protocol';
+import { CURSOR_AUTO_MODEL_ID, cursorSpawnModelId, isCursorAutoModelId, isPermissionModeAllowedForFlavor } from '@hapi/protocol';
 import { CURSOR_PLAN_CONTINUE } from './utils/cursorPlanContinue';
 import {
     cursorPassThroughStatusMessage,
@@ -1642,6 +1643,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
 
             const source = this.idleHistorySource();
             if (params.cursorSourceSessionId !== source) throw new Error('Cursor rewind requires a matching two-phase Hub');
+            const original = this.backend!; // idleHistorySource checked the active connection.
             this.historyGate = Promise.withResolvers<void>();
             let candidate: AcpSdkBackend | undefined;
             try {
@@ -1660,16 +1662,10 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 }) !== id || this.shouldExit || this.sessionTeardownStarted) {
                     throw new Error('Cursor could not load the exact rewind point');
                 }
-                // A candidate must accept the current permission policy and exact model
-                // before the Hub rebinds the source. Rejection leaves the source live.
-                const mode = await this.confirmLoadedPermissionMode(candidate, id);
-                const model = this.currentBackendModel;
-                if (model && !isCursorAutoModelId(model)) {
-                    const result = await applyCursorAcpModel(candidate, id, model);
-                    if (!result.applied || !result.resolvedWireId || wireIdForCursorSessionState(result.requestedWireId ?? model, result.resolvedWireId) !== model) {
-                        throw new Error('Cursor could not restore the confirmed model at the rewind point');
-                    }
-                }
+                const currentMode = this.session.getPermissionMode() ?? 'default';
+                if (!isPermissionModeAllowedForFlavor(currentMode, 'cursor')) throw new Error('Unknown Cursor permission mode');
+                const mode = currentMode as PermissionMode;
+                await restoreCursorRewindSettings(original, source, candidate, id, mode);
                 if (this.shouldExit || this.sessionTeardownStarted) throw new Error('Cursor session ended during rewind');
                 // No more source-side title rows after the Hub begins its cut.
                 this.backend?.setSessionInfoUpdateListener(null);
