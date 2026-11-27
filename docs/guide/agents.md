@@ -220,6 +220,8 @@ Single-file ACP edits can display the before/after diff even when Cursor deliver
 
 Use `--plan`, `--mode`, `--permission-mode` or `--auto-review` at launch. Change a remote ACP session's permission mode between turns from the web UI or with `hapi set-mode`. HAPI waits for Cursor to acknowledge the ACP mode. Smart Auto uses a launch flag or a queued `/auto-review` command, so changing modes in a running process may still leave its native Smart Auto policy in place. For an active terminal session, change modes in Cursor or hand off to HAPI first. A legacy stream-json session uses the new mode for messages queued after the change.
 
+Cursor ACP questions accept the options offered by the agent. Skip leaves the question unanswered; abort cancels it. Completed question cards retain the selected options.
+
 ### Cursor-native worktree & multi-root
 
 - New Session **Worktree** for Cursor uses Cursor's `--worktree` (`~/.cursor/worktrees/<repo>/<name>`), not HAPI's sibling-directory worktree.
