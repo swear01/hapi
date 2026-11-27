@@ -64,6 +64,8 @@ The token dashboard and the account quotas below are only available to the hub o
 
 ## CLI account quotas
 
+On iOS, open **Settings → Usage → CLI account quotas** to see account windows and their local reset times.
+
 The **CLI account quotas** section at the top of **Settings → Token usage** asks every online machine which agent accounts are signed in there and how much of each plan's rate limit is used. Each card shows:
 
 - The agent, and the machine name when more than one machine is online
