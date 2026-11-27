@@ -107,7 +107,7 @@ struct PermissionActionOptions: Equatable {
     init(flavor: String?, toolName: String, acpAllowOptions: [String: String]? = nil) {
         self.acpAllowOptions = acpAllowOptions
         canAllowOnce = acpAllowOptions.map { $0["allow_once"] != nil } ?? true
-        let codex = toolName != "CursorCreatePlan" && isCodexPermissionUX(flavor: flavor, toolName: toolName)
+        let codex = isCodexPermissionUX(flavor: flavor, toolName: toolName)
         denyAction = codex ? .abort : .deny
         canAllowForSession = acpAllowOptions.map { $0["allow_always"] != nil } ?? (codex || !PermissionGates.hideAllowForSession.contains(toolName))
         canAllowAllEdits = flavor == "claude" && PermissionGates.editTools.contains(toolName)

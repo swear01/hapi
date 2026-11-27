@@ -122,7 +122,7 @@ export function PermissionFooter(props: {
         [props.metadata, props.tool.name]
     )
     const scopes = permission?.acpAllowOptions
-    const decision = scopes !== undefined || (replyStyle === 'decision' && props.tool.name !== 'CursorCreatePlan')
+    const decision = scopes !== undefined || replyStyle === 'decision'
     const allowTools = replyStyle === 'allowTools'
 
     if (!permission) return null
