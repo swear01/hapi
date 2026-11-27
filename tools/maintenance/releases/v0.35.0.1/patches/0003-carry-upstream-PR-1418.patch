@@ -1,0 +1,204 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Fri, 13 Nov 2026 03:50:14 +0800
+Subject: [PATCH 03/29] carry(upstream): PR #1418
+
+---
+ .../AssistantChat/HappyComposer.tsx           |  8 +++++
+ .../AssistantChat/RichComposerInput.test.tsx  | 33 +++++++++++++++++++
+ .../AssistantChat/RichComposerInput.tsx       | 21 ++++++++++--
+ web/src/components/SessionList.tsx            | 15 ++++++++-
+ web/src/lib/sessionMentionDrag.ts             | 10 ++++++
+ 5 files changed, 84 insertions(+), 3 deletions(-)
+ create mode 100644 web/src/lib/sessionMentionDrag.ts
+
+diff --git a/web/src/components/AssistantChat/HappyComposer.tsx b/web/src/components/AssistantChat/HappyComposer.tsx
+index b3f698bbe..64cc2eddf 100644
+--- a/web/src/components/AssistantChat/HappyComposer.tsx
++++ b/web/src/components/AssistantChat/HappyComposer.tsx
+@@ -1011,6 +1011,13 @@ export function HappyComposer(props: {
+         haptic('light')
+     }, [api, suggestions, inputState, autocompletePrefixes, haptic, richMentionsEnabled, handleUserEdit])
+ 
++    const handleSessionMentionDrop = useCallback((mention: { id: string; title: string }) => {
++        if (mention.id === sessionId) return
++        handleUserEdit()
++        richInputRef.current?.insertSessionMention(mention, [])
++        richInputRef.current?.focus()
++    }, [handleUserEdit, sessionId])
++
+     const abortDisabled = controlsDisabled || isAborting || !threadIsRunning
+     const switchDisabled = controlsDisabled || isSwitching || !controlledByUser
+     const showSwitchButton = Boolean(controlledByUser && onSwitchToRemote)
+@@ -2441,6 +2448,7 @@ export function HappyComposer(props: {
+                                             onMirrorChange={handleRichMirrorChange}
+                                             onKeyDown={handleKeyDown}
+                                             onPaste={handlePaste}
++                                            onSessionMentionDrop={handleSessionMentionDrop}
+                                             onFocus={() => engageRichComposerFue()}
+                                             resolveSessionMentionTooltip={resolveSessionMentionTooltip}
+                                             onEdit={handleRichEdit}
+diff --git a/web/src/components/AssistantChat/RichComposerInput.test.tsx b/web/src/components/AssistantChat/RichComposerInput.test.tsx
+index 82037ecfe..b9f8e9b5a 100644
+--- a/web/src/components/AssistantChat/RichComposerInput.test.tsx
++++ b/web/src/components/AssistantChat/RichComposerInput.test.tsx
+@@ -513,3 +513,36 @@ describe('RichComposerInput undo history', () => {
+         expect(value.textContent).toBe('ab')
+     })
+ })
++
++describe('RichComposerInput session drops', () => {
++    it('forwards a HAPI session drag payload', () => {
++        const onSessionMentionDrop = vi.fn()
++        render(
++            <RichComposerInput
++                value=""
++                onValueChange={() => {}}
++                onMirrorChange={() => {}}
++                onSessionMentionDrop={onSessionMentionDrop}
++            />
++        )
++
++        const editor = screen.getByRole('textbox')
++        expect(fireEvent.dragOver(editor, {
++            dataTransfer: { types: ['application/x-hapi-session-mention'] },
++        })).toBe(false)
++
++        fireEvent.drop(editor, {
++            dataTransfer: {
++                types: ['application/x-hapi-session-mention'],
++                getData: (type: string) => type === 'application/x-hapi-session-mention'
++                    ? '{"id":"peer-1","title":"Peer session"}'
++                    : '',
++            },
++        })
++
++        expect(onSessionMentionDrop).toHaveBeenCalledWith({
++            id: 'peer-1',
++            title: 'Peer session',
++        })
++    })
++})
+diff --git a/web/src/components/AssistantChat/RichComposerInput.tsx b/web/src/components/AssistantChat/RichComposerInput.tsx
+index 4ff478977..48f6972b2 100644
+--- a/web/src/components/AssistantChat/RichComposerInput.tsx
++++ b/web/src/components/AssistantChat/RichComposerInput.tsx
+@@ -33,6 +33,7 @@ import {
+ } from '@/lib/sessionReference'
+ import { SessionRowSummary } from '@/components/SessionRowSummary'
+ import type { SessionSummary } from '@/types/api'
++import { parseSessionMentionDrag, SESSION_MENTION_DRAG_MIME } from '@/lib/sessionMentionDrag'
+ 
+ export type RichComposerInputHandle = {
+     focus: () => void
+@@ -75,6 +76,7 @@ type Props = {
+     onPaste?: (e: ReactClipboardEvent<HTMLDivElement>) => void
+     onFocus?: (e: ReactFocusEvent<HTMLDivElement>) => void
+     onEdit?: () => void
++    onSessionMentionDrop?: (mention: { id: string; title: string }) => void
+     /** Live session meta for chip hover / aria-label (from useSessions). */
+     resolveSessionMentionTooltip?: ResolveSessionMentionTooltip
+ }
+@@ -686,6 +688,7 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
+         onPaste,
+         onFocus,
+         onEdit,
++        onSessionMentionDrop,
+         resolveSessionMentionTooltip,
+     },
+     ref
+@@ -1027,6 +1030,19 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
+         insertPlainClipboardText(e.clipboardData?.getData('text/plain') ?? '')
+     }, [insertPlainClipboardText, onPaste])
+ 
++    const handleDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => {
++        if (disabled || !e.dataTransfer.types.includes(SESSION_MENTION_DRAG_MIME)) return
++        e.preventDefault()
++        e.dataTransfer.dropEffect = 'copy'
++    }, [disabled])
++
++    const handleDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
++        const mention = parseSessionMentionDrag(e.dataTransfer)
++        if (!mention || disabled) return
++        e.preventDefault()
++        onSessionMentionDrop?.(mention)
++    }, [disabled, onSessionMentionDrop])
++
+     const applyBackwardDelete = useCallback((
+         root: HTMLElement,
+         segments: readonly ComposerSegment[],
+@@ -1067,8 +1083,7 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
+         return () => root.removeEventListener('beforeinput', handleBeforeInput)
+     }, [applyBackwardDelete, applyHistory, recordNativeEdit])
+ 
+-    // No onDrop: intercepting without caretRangeFromPoint appends at EOF / no-ops
+-    // in-editor moves. Native CE drop + plaintext-only / paste path is enough for #1215.
++    // Session drops use the current editor selection; without one, insertion falls back to EOF.
+ 
+     const placeholderRef = useRef<HTMLDivElement>(null)
+ 
+@@ -1199,6 +1214,8 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
+                 onCopy={(e) => handleCopyOrCut(e, false)}
+                 onCut={(e) => handleCopyOrCut(e, true)}
+                 onPaste={handlePaste}
++                onDragOver={handleDragOver}
++                onDrop={handleDrop}
+                 onCompositionStart={() => {
+                     const root = rootRef.current
+                     if (root) recordUndo(segmentsFromEditor(root), getMirrorSelection(root))
+diff --git a/web/src/components/SessionList.tsx b/web/src/components/SessionList.tsx
+index 0a67eb19e..6e7c12f90 100644
+--- a/web/src/components/SessionList.tsx
++++ b/web/src/components/SessionList.tsx
+@@ -129,6 +129,8 @@ import { SessionRowSummary } from '@/components/SessionRowSummary'
+ import { Spinner } from '@/components/Spinner'
+ import { transferComposerDraftThenNavigate } from '@/lib/composer-draft-transfer'
+ import { useToast } from '@/lib/toast-context'
++import { SESSION_MENTION_DRAG_MIME } from '@/lib/sessionMentionDrag'
++import { isMentionableSession } from '@/lib/sessionReference'
+ import {
+     shedToolbarSlots,
+     toolbarActionBudget,
+@@ -1092,7 +1094,7 @@ const SessionItem = memo(function SessionItem(props: {
+         targetMessageQuery,
+         lastSeenVersion
+     } = props
+-    const { haptic } = usePlatform()
++    const { haptic, isTouch } = usePlatform()
+     const [menuOpen, setMenuOpen] = useState(false)
+     const [menuAnchorPoint, setMenuAnchorPoint] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
+     const [renameOpen, setRenameOpen] = useState(false)
+@@ -1263,6 +1265,17 @@ const SessionItem = memo(function SessionItem(props: {
+                     type="button"
+                     {...longPressHandlers}
+                     data-session-scroll-anchor
++                    draggable={!isTouch && isMentionableSession(s)}
++                    onDragStart={(event) => {
++                        // Native drag swallows mouseup: cancel the pending long-press.
++                        longPressHandlers.onMouseLeave(event)
++                        setMenuOpen(false)
++                        event.dataTransfer.effectAllowed = 'copy'
++                        event.dataTransfer.setData(SESSION_MENTION_DRAG_MIME, JSON.stringify({
++                            id: s.id,
++                            title: sessionName || s.id.slice(0, 8),
++                        }))
++                    }}
+                     className={`session-list-item group/session-row flex w-full flex-col gap-1 py-2 pl-2.5 pr-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)] select-none rounded-lg ${selected ? 'bg-[var(--app-secondary-bg)]' : ''}`}
+                     style={{ WebkitTouchCallout: 'none' }}
+                     aria-current={selected ? 'page' : undefined}
+diff --git a/web/src/lib/sessionMentionDrag.ts b/web/src/lib/sessionMentionDrag.ts
+new file mode 100644
+index 000000000..9e48a8e1e
+--- /dev/null
++++ b/web/src/lib/sessionMentionDrag.ts
+@@ -0,0 +1,10 @@
++export const SESSION_MENTION_DRAG_MIME = 'application/x-hapi-session-mention'
++
++export function parseSessionMentionDrag(dataTransfer: Pick<DataTransfer, 'getData'>): { id: string; title: string } | null {
++    try {
++        const { id, title } = JSON.parse(dataTransfer.getData(SESSION_MENTION_DRAG_MIME)) ?? {}
++        return typeof id === 'string' && id.trim() && typeof title === 'string' ? { id, title } : null
++    } catch {
++        return null
++    }
++}

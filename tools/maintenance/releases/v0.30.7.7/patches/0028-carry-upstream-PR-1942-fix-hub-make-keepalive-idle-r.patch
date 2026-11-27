@@ -1,0 +1,1166 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Mon, 19 Oct 2026 15:36:35 +0000
+Subject: [PATCH 28/94] carry(upstream): PR #1942 fix(hub): make keepalive-idle
+ reconciliation robust against metadata churn, replays and retries
+
+Upstream-head: 971b11c8070fc9caa1a2aca695a90898edb4f906
+---
+ hub/README.md                                 |   2 +-
+ .../handlers/cli/sessionHandlers.test.ts      |  66 +++++
+ .../socket/handlers/cli/sessionHandlers.ts    |  40 ++-
+ hub/src/store/index.ts                        |  25 +-
+ hub/src/store/messageStore.ts                 |   5 +
+ hub/src/store/messages.test.ts                |  17 ++
+ hub/src/store/messages.ts                     |  20 +-
+ hub/src/store/sessions.test.ts                |  42 +++
+ hub/src/store/sessions.ts                     |  19 +-
+ hub/src/sync/messageService.ts                |   4 +-
+ hub/src/sync/sessionCache.ts                  |  85 ++++--
+ hub/src/sync/sessionIdle.test.ts              | 260 +++++++++++++++++-
+ hub/src/sync/sessionIdle.ts                   |  44 ++-
+ hub/src/sync/sessionIdleEngine.test.ts        | 141 ++++++++++
+ hub/src/sync/syncEngine.ts                    |  11 +-
+ 15 files changed, 721 insertions(+), 60 deletions(-)
+ create mode 100644 hub/src/sync/sessionIdleEngine.test.ts
+
+diff --git a/hub/README.md b/hub/README.md
+index f485eb3cc..ec4dc6c53 100644
+--- a/hub/README.md
++++ b/hub/README.md
+@@ -55,7 +55,7 @@ Dictation and voice-assistant provider keys can also be added from **Settings 
+ - `FCM_SERVICE_ACCOUNT_PATH` - Service-account JSON for private Firebase builds; the app must use the same project. Invalid configured credentials disable Android push instead of switching projects.
+ - `HAPI_IOS_PUSH` - `relay` (default), `apns`, or `off`.
+ - `HAPI_PUSH_RELAY_URL` - Shared Android/iOS push relay (default: `https://push.hapi.run`; persisted as `iosPushRelayUrl`). Independent of the `--relay` network tunnel.
+-- `HAPI_SESSION_IDLE_TIMEOUT_MS` - Keep-alive-idle window in ms (default: 43200000 / 12 h; `0` disables). See "Session liveness" below.
++- `HAPI_SESSION_IDLE_TIMEOUT_MS` - Keep-alive-idle window in whole ms, digits only (default: 43200000 / 12 h; `0` disables and lifts existing idle marks). Suffixed values such as `1h` are rejected with a warning and fall back to the default. See "Session liveness" below.
+ 
+ Official native apps register their encryption keys automatically; no push
+ provider setup is needed on a fresh hub. See the [native companion push
+diff --git a/hub/src/socket/handlers/cli/sessionHandlers.test.ts b/hub/src/socket/handlers/cli/sessionHandlers.test.ts
+index c0f5be97f..60291e8f2 100644
+--- a/hub/src/socket/handlers/cli/sessionHandlers.test.ts
++++ b/hub/src/socket/handlers/cli/sessionHandlers.test.ts
+@@ -181,6 +181,72 @@ describe('cli session handlers', () => {
+         expect(store.messages.getAllMessages(session.id)).toHaveLength(2)
+     })
+ 
++    it('a replayed message with a known localId is stored once and causes no side effects', () => {
++        const store = new Store(':memory:')
++        const session = store.sessions.getOrCreateSession('replay', { flavor: 'claude' }, null, 'default')
++        const socket = new FakeSocket()
++        const progress = mock(); const activity = mock(); const bgDelta = mock(); const events: SyncEvent[] = []
++        registerSessionHandlers(socket as unknown as CliSocketWithData, {
++            store, resolveSessionAccess: () => ({ ok: true, value: session }), emitAccessError() {},
++            onAgentProgress: progress, onSessionActivity: activity, onBackgroundTaskDelta: bgDelta,
++            onWebappEvent: event => { events.push(event) }
++        })
++        const message = { role: 'user', content: { type: 'text', text: 'hello' } }
++        socket.trigger('message', { sid: session.id, localId: 'replayed-1', message })
++        // Reconnect history resync sends the same row again.
++        socket.trigger('message', { sid: session.id, localId: 'replayed-1', message })
++
++        expect(store.messages.getAllMessages(session.id)).toHaveLength(1)
++        expect(progress).toHaveBeenCalledTimes(1)
++        expect(activity).toHaveBeenCalledTimes(1)
++        expect(socket.roomEvents.filter(e => e.event === 'update')).toHaveLength(1)
++        expect(events.filter(e => e.type === 'message-received')).toHaveLength(1)
++
++        // A background task start replayed the same way must count once, or the
++        // counter never returns to zero and the session never reconciles idle.
++        const started = { role: 'agent', content: { type: 'output', data: { type: 'tool_result', content: 'Command running in background with ID: bg-1' } } }
++        socket.trigger('message', { sid: session.id, localId: 'replayed-2', message: started })
++        socket.trigger('message', { sid: session.id, localId: 'replayed-2', message: started })
++        expect(store.messages.getAllMessages(session.id)).toHaveLength(2)
++        expect(bgDelta).toHaveBeenCalledTimes(1)
++        expect(bgDelta).toHaveBeenCalledWith(session.id, { started: 1, completed: 0 })
++        store.close()
++    })
++
++    it('a repeated messages-consumed ack is dated by the invocation it repeats, not the row clock', () => {
++        const store = new Store(':memory:')
++        const session = store.sessions.getOrCreateSession('consumed-twice', { flavor: 'codex' }, null, 'default')
++        const socket = new FakeSocket()
++        const activity = mock()
++        registerSessionHandlers(socket as unknown as CliSocketWithData, {
++            store, resolveSessionAccess: () => ({ ok: true, value: session }), emitAccessError() {}, onSessionActivity: activity
++        })
++        // The CLI always emits the pair `message` + `messages-consumed` for a prompt.
++        const prompt = { role: 'user', content: { type: 'text', text: 'hello' } }
++        socket.trigger('message', { sid: session.id, localId: 'prompt-1', message: prompt })
++        socket.trigger('messages-consumed', { sid: session.id, localIds: ['prompt-1'] })
++        expect(activity).toHaveBeenCalledTimes(2)
++        const consumedAt = activity.mock.calls[1]![1] as number
++        expect(store.messages.getLocalMessageStates(session.id, ['prompt-1'])).toEqual([{ localId: 'prompt-1', invokedAt: consumedAt }])
++
++        // Later somebody renames the session, which moves the row clock.
++        Bun.sleepSync(2)
++        const stored = store.sessions.getSession(session.id)!
++        expect(store.sessions.updateSessionMetadata(session.id, { ...(stored.metadata as Record<string, unknown>), name: 'renamed' }, stored.metadataVersion, 'default').result).toBe('success')
++        expect(store.sessions.getSession(session.id)!.updatedAt).toBeGreaterThan(consumedAt)
++
++        // On reconnect the CLI replays the pair for the prompt it already
++        // consumed (the Codex history projection does so on every resume). The
++        // repeat still reports activity (a replay may have to re-sync the
++        // cache) but dated by the invocation it repeats, not by the rename.
++        socket.trigger('message', { sid: session.id, localId: 'prompt-1', message: prompt })
++        socket.trigger('messages-consumed', { sid: session.id, localIds: ['prompt-1'] })
++        expect(activity).toHaveBeenCalledTimes(3)
++        expect(activity.mock.calls[2]).toEqual([session.id, consumedAt])
++        expect(store.messages.getLocalMessageStates(session.id, ['prompt-1'])).toEqual([{ localId: 'prompt-1', invokedAt: consumedAt }])
++        store.close()
++    })
++
+     it('drops redundant goal status events before persistence and broadcast', () => {
+         const store = new Store(':memory:')
+         const session = store.sessions.getOrCreateSession('goal-status-session', {}, null, 'default')
+diff --git a/hub/src/socket/handlers/cli/sessionHandlers.ts b/hub/src/socket/handlers/cli/sessionHandlers.ts
+index f60257622..767490837 100644
+--- a/hub/src/socket/handlers/cli/sessionHandlers.ts
++++ b/hub/src/socket/handlers/cli/sessionHandlers.ts
+@@ -10,6 +10,7 @@ import { extractTodoWriteTodosFromMessageContent } from '../../../sync/todos'
+ import { extractTeamStateFromMessageContent, applyTeamStateDelta } from '../../../sync/teams'
+ import { extractBackgroundTaskCount } from '../../../sync/backgroundTasks'
+ import { shouldRecordSessionActivity } from '../../../sync/sessionActivity'
++import { lifecycleRunningSince } from '../../../sync/sessionIdle'
+ import type { CliSocketWithData } from '../../socketTypes'
+ import type { SessionEndReason } from '@hapi/protocol'
+ import type { AccessErrorReason, AccessResult } from './types'
+@@ -167,7 +168,13 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
+             return
+         }
+ 
+-        const msg = store.messages.addMessage(sid, content, localId, undefined, createdAt)
++        const { message: msg, inserted } = store.messages.addMessageWithStatus(sid, content, localId, undefined, createdAt)
++        // A localId the session already stored is a reconnect replay (history
++        // resync, transcript backfill), not new work: no progress clock, no
++        // activity, no todo/team deltas, no re-broadcast.
++        if (!inserted) {
++            return
++        }
+ 
+         // A reasoning stream arrives as a series of growing snapshots under one
+         // stable id, so a stream should cost one row rather than one per
+@@ -331,6 +338,17 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
+                     updatedAt: stored?.updatedAt ?? Date.now()
+                 }
+             })
++
++            // A fresh `running` stamp is the CLI bootstrapping into this session
++            // (cli/src/agent/sessionFactory.ts): agent progress at its own time,
++            // or a days-old session reopened from the terminal reads as idle on
++            // the next tick (tiann/hapi#1820). An echo of the row, or the hub's
++            // own idle -> running write coming back, carries the stamp the row
++            // already had and moves nothing.
++            const runningSince = lifecycleRunningSince(result.value as Metadata | null)
++            if (runningSince !== null && runningSince !== lifecycleRunningSince(sessionAccess.value.metadata as Metadata | null)) {
++                onAgentProgress?.(sid, runningSince)
++            }
+         }
+     }
+ 
+@@ -429,9 +447,9 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
+             return
+         }
+         const invokedAt = Date.now()
+-        let sessionUpdatedAt: number
++        let activityAt: number | null
+         try {
+-            sessionUpdatedAt = store.recordMessagesConsumed(
++            activityAt = store.recordMessagesConsumed(
+                 data.sid,
+                 localIds,
+                 invokedAt,
+@@ -443,10 +461,18 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
+             return
+         }
+ 
+-        try {
+-            onSessionActivity?.(data.sid, sessionUpdatedAt)
+-        } catch (err) {
+-            console.error('onSessionActivity failed', err)
++        // A repeat (the CLI re-sends `message` + `messages-consumed` for a
++        // prompt it already consumed, e.g. the Codex history projection on
++        // resume) is dated by the invocation it repeats, not by the row clock:
++        // the keepalive-idle progress clock reads this time (tiann/hapi#1820),
++        // and a rename since must not wake an idle session that did nothing.
++        // `null`: none of the ids is stored here, so there is nothing to date.
++        if (activityAt !== null) {
++            try {
++                onSessionActivity?.(data.sid, activityAt)
++            } catch (err) {
++                console.error('onSessionActivity failed', err)
++            }
+         }
+ 
+         // Only drop the queued-thinking grace when the CLI explicitly opts in
+diff --git a/hub/src/store/index.ts b/hub/src/store/index.ts
+index bd1927c8c..1a53ca609 100644
+--- a/hub/src/store/index.ts
++++ b/hub/src/store/index.ts
+@@ -130,9 +130,15 @@ export class Store {
+ 
+     /**
+      * Atomically records a CLI prompt-consumption acknowledgement and returns
+-     * the persisted session activity timestamp. A duplicate or sibling-stamped
+-     * acknowledgement leaves the session untouched while returning its existing
+-     * timestamp for replay-safe in-memory cache synchronization.
++     * the activity timestamp to report for it, or `null` when the hub stores
++     * none of the acknowledged ids.
++     *
++     * A first acknowledgement is activity at its own time. A duplicate or
++     * sibling-stamped one leaves the session untouched and reports the
++     * invocation it repeats, so a replay still re-syncs the in-memory cache
++     * without reading whatever metadata write last moved `updated_at` as
++     * agent progress (tiann/hapi#1820); never later than the row clock, which
++     * an acknowledgement that changed nothing must not floor forward.
+      */
+     recordMessagesConsumed(
+         sessionId: string,
+@@ -140,7 +146,7 @@ export class Store {
+         invokedAt: number,
+         namespace: string,
+         steered = false
+-    ): number {
++    ): number | null {
+         return this.db.transaction(() => {
+             const changes = this.messages.markMessagesInvoked(sessionId, localIds, invokedAt, steered)
+             if (changes > 0) {
+@@ -154,8 +160,17 @@ export class Store {
+             if (changes > 0 && session.updatedAt < invokedAt) {
+                 throw new Error('session activity was not persisted after messages-consumed transition')
+             }
++            if (changes > 0) {
++                return invokedAt
++            }
+ 
+-            return session.updatedAt
++            let repeated: number | null = null
++            for (const state of this.messages.getLocalMessageStates(sessionId, localIds)) {
++                if (state.invokedAt !== null && (repeated === null || state.invokedAt > repeated)) {
++                    repeated = state.invokedAt
++                }
++            }
++            return repeated === null ? null : Math.min(repeated, session.updatedAt)
+         })()
+     }
+ 
+diff --git a/hub/src/store/messageStore.ts b/hub/src/store/messageStore.ts
+index c8e12c5c5..9e9841260 100644
+--- a/hub/src/store/messageStore.ts
++++ b/hub/src/store/messageStore.ts
+@@ -6,6 +6,7 @@ import { decodeMessageContent } from './contentCodec'
+ import type { StoredMessage } from './types'
+ import {
+     addMessage,
++    addMessageWithStatus,
+     syncNativeQueuedMessage,
+     addImportedMessage,
+     cancelQueuedMessage,
+@@ -59,6 +60,10 @@ export class MessageStore {
+         return addMessage(this.db, sessionId, content, localId, scheduledAt, createdAt)
+     }
+ 
++    addMessageWithStatus(sessionId: string, content: unknown, localId?: string, scheduledAt?: number | null, createdAt?: number): { message: StoredMessage; inserted: boolean } {
++        return addMessageWithStatus(this.db, sessionId, content, localId, scheduledAt, createdAt)
++    }
++
+     syncNativeQueuedMessage(sessionId: string, localId: string, text: string): StoredMessage {
+         return syncNativeQueuedMessage(this.db, sessionId, localId, text)
+     }
+diff --git a/hub/src/store/messages.test.ts b/hub/src/store/messages.test.ts
+index 45065bb15..fd591dbf1 100644
+--- a/hub/src/store/messages.test.ts
++++ b/hub/src/store/messages.test.ts
+@@ -178,6 +178,23 @@ describe('cancelQueuedMessage', () => {
+ })
+ 
+ describe('recordMessagesConsumed', () => {
++    it('dates a repeated acknowledgement by the invocation it repeats, not the row clock', () => {
++        const store = makeStore()
++        const session = makeSession(store, 'consumed-repeat')
++        store.messages.addMessage(session.id, { role: 'user', content: { type: 'text', text: 'hello' } }, 'local-repeat')
++
++        expect(store.recordMessagesConsumed(session.id, ['local-repeat'], 2_000, 'default')).toBe(2_000)
++        // A rename moves the row clock; the duplicate still dates back to the
++        // invocation it repeats, and ids the hub never stored have no date.
++        const stored = store.sessions.getSession(session.id)!
++        expect(store.sessions.updateSessionMetadata(session.id, { ...(stored.metadata as Record<string, unknown>), name: 'renamed' }, stored.metadataVersion, 'default').result).toBe('success')
++        expect(store.sessions.getSession(session.id)!.updatedAt).toBeGreaterThan(2_000)
++        expect(store.recordMessagesConsumed(session.id, ['local-repeat', 'never-seen'], 3_000, 'default')).toBe(2_000)
++        expect(store.recordMessagesConsumed(session.id, ['never-seen'], 3_000, 'default')).toBeNull()
++        expect(store.messages.getLocalMessageStates(session.id, ['local-repeat']))
++            .toEqual([{ localId: 'local-repeat', invokedAt: 2_000 }])
++    })
++
+     it('rolls back the invocation transition when the session namespace cannot be verified', () => {
+         const store = makeStore()
+         const session = makeSession(store, 'consumed-rollback-wrong-namespace')
+diff --git a/hub/src/store/messages.ts b/hub/src/store/messages.ts
+index c5d028428..d52bd6b82 100644
+--- a/hub/src/store/messages.ts
++++ b/hub/src/store/messages.ts
+@@ -112,6 +112,22 @@ export function addMessage(
+     scheduledAt?: number | null,
+     createdAt?: number
+ ): StoredMessage {
++    return addMessageWithStatus(db, sessionId, content, localId, scheduledAt, createdAt).message
++}
++
++/**
++ * `inserted: false` means the localId resolved to a row the session already had
++ * (a CLI reconnect replay, a client retry): callers must not treat it as new
++ * agent work — no progress, no task deltas, no fresh queue marking.
++ */
++export function addMessageWithStatus(
++    db: Database,
++    sessionId: string,
++    content: unknown,
++    localId?: string,
++    scheduledAt?: number | null,
++    createdAt?: number
++): { message: StoredMessage; inserted: boolean } {
+     const now = Date.now()
+     // Client-provided origin timestamp (e.g. a Claude transcript entry's own
+     // `timestamp`), falling back to server-receive time when absent. Only
+@@ -134,7 +150,7 @@ export function addMessage(
+             'SELECT * FROM messages WHERE session_id = ? AND local_id = ? LIMIT 1'
+         ).get(sessionId, localId) as DbMessageRow | undefined
+         if (existing) {
+-            return toStoredMessage(existing)
++            return { message: toStoredMessage(existing), inserted: false }
+         }
+     }
+ 
+@@ -177,7 +193,7 @@ export function addMessage(
+         if (previousHead && positionAt < previousHead.at) bumpMessageEpoch(db, sessionId)
+         const row = prepareCached(db, 'SELECT * FROM messages WHERE id = ?').get(id) as DbMessageRow | undefined
+         if (!row) throw new Error('Failed to create message')
+-        return toStoredMessage(row)
++        return { message: toStoredMessage(row), inserted: true }
+     })()
+ }
+ 
+diff --git a/hub/src/store/sessions.test.ts b/hub/src/store/sessions.test.ts
+index 79082b43d..800d2e439 100644
+--- a/hub/src/store/sessions.test.ts
++++ b/hub/src/store/sessions.test.ts
+@@ -332,6 +332,48 @@ describe('getOrCreateSession: requested identity', () => {
+     })
+ })
+ 
++describe('updateSessionMetadata: unchanged writes', () => {
++    it('advances the version but not updated_at when the merged value equals the row', () => {
++        // A CLI echoing the row back after a version mismatch (or replaying
++        // its local copy on reconnect) is not activity: list order and the
++        // unread watermark key off updated_at.
++        const store = makeStore()
++        const created = store.sessions.getOrCreateSession(
++            'echo',
++            { path: '/tmp/project', host: 'localhost', lifecycleState: 'running' },
++            null,
++            'default'
++        )
++        Bun.sleepSync(2)
++
++        // `worktree: undefined` is what the CLI's metadata object literally
++        // carries; JSON never stored it, so it must not read as a change.
++        const echo = store.sessions.updateSessionMetadata(
++            created.id,
++            { lifecycleState: 'running', host: 'localhost', path: '/tmp/project', worktree: undefined },
++            created.metadataVersion,
++            'default'
++        )
++        expect(echo.result).toBe('success')
++        const afterEcho = store.sessions.getSession(created.id)!
++        expect(afterEcho.metadataVersion).toBe(created.metadataVersion + 1)
++        expect(afterEcho.updatedAt).toBe(created.updatedAt)
++
++        Bun.sleepSync(2)
++        const changed = store.sessions.updateSessionMetadata(
++            created.id,
++            { path: '/tmp/project', host: 'localhost', lifecycleState: 'running', name: 'renamed' },
++            afterEcho.metadataVersion,
++            'default'
++        )
++        expect(changed.result).toBe('success')
++        const afterChange = store.sessions.getSession(created.id)!
++        expect(afterChange.metadataVersion).toBe(afterEcho.metadataVersion + 1)
++        expect(afterChange.updatedAt).toBeGreaterThan(created.updatedAt)
++        store.close()
++    })
++})
++
+ describe('updateSessionMetadata: refuse un-archive (#1911 M1)', () => {
+     it('merge-preserves hub archive on unauthorized running write (success, not mismatch)', () => {
+         const store = makeStore()
+diff --git a/hub/src/store/sessions.ts b/hub/src/store/sessions.ts
+index c26c38c20..29344fd96 100644
+--- a/hub/src/store/sessions.ts
++++ b/hub/src/store/sessions.ts
+@@ -2,6 +2,7 @@ import type { Database } from 'bun:sqlite'
+ import { prepareCached } from './statementCache'
+ import { bumpSessionDeletionEpoch } from './sessionInvalidation'
+ import { randomUUID } from 'node:crypto'
++import { isDeepStrictEqual } from 'node:util'
+ 
+ import type { StoredSession, VersionedUpdateResult } from './types'
+ import { safeJsonParse } from './json'
+@@ -407,6 +408,17 @@ export function adoptPreallocatedSession(
+     })()
+ }
+ 
++/**
++ * Same stored value after the write? Compared on the JSON the row would hold,
++ * so key order and `undefined` members (which `JSON.stringify` drops) do not
++ * make an echo look like a change.
++ */
++function isMetadataUnchanged(prior: unknown, merged: unknown): boolean {
++    if (prior === null || prior === undefined) return false
++    const encoded = JSON.stringify(merged)
++    return encoded !== undefined && isDeepStrictEqual(prior, safeJsonParse(encoded))
++}
++
+ export function updateSessionMetadata(
+     db: Database,
+     id: string,
+@@ -416,7 +428,6 @@ export function updateSessionMetadata(
+     options?: { touchUpdatedAt?: boolean; allowUnarchive?: boolean }
+ ): VersionedUpdateResult<unknown | null> {
+     const now = Date.now()
+-    const touchUpdatedAt = options?.touchUpdatedAt !== false
+     const allowUnarchive = options?.allowUnarchive === true
+ 
+     try {
+@@ -443,6 +454,12 @@ export function updateSessionMetadata(
+                 merged = preserveHubArchiveOnMerged(prior, merged)
+             }
+ 
++            // A write that changes nothing — a CLI echoing the row back after
++            // a version mismatch, a reconnect replaying its local copy — is
++            // not activity. Keep `updated_at` where it was so list order and
++            // the unread watermark stay honest; the version still advances.
++            const touchUpdatedAt = options?.touchUpdatedAt !== false && !isMetadataUnchanged(prior, merged)
++
+             const result = updateVersionedField({
+                 db,
+                 table: 'sessions',
+diff --git a/hub/src/sync/messageService.ts b/hub/src/sync/messageService.ts
+index 8cced78cb..9c6335071 100644
+--- a/hub/src/sync/messageService.ts
++++ b/hub/src/sync/messageService.ts
+@@ -852,7 +852,7 @@ export class MessageService {
+             scheduledAt?: number | null
+             deliveryMode?: MessageDeliveryMode
+         }
+-    ): Promise<{ actualSessionId: string; createdAt: number }> {
++    ): Promise<{ actualSessionId: string; createdAt: number; inserted: boolean; invokedAt: number | null }> {
+         // Defence-in-depth invariant for non-REST callers (Telegram bot, MCP,
+         // internal callers).  Attachment paths live under the CLI session's
+         // upload directory which `cleanupUploadDir` purges on session end; a
+@@ -958,7 +958,7 @@ export class MessageService {
+                 ...(msg.deliveryState ? { deliveryState: msg.deliveryState } : {})
+             }
+         })
+-        return { actualSessionId, createdAt: msg.createdAt }
++        return { actualSessionId, createdAt: msg.createdAt, inserted: inserted.inserted, invokedAt: msg.invokedAt }
+     }
+ 
+     /**
+diff --git a/hub/src/sync/sessionCache.ts b/hub/src/sync/sessionCache.ts
+index ad58453ee..68bd99f77 100644
+--- a/hub/src/sync/sessionCache.ts
++++ b/hub/src/sync/sessionCache.ts
+@@ -1,11 +1,11 @@
+ import { SESSION_LIFECYCLE_IDLE, SESSION_LIFECYCLE_RUNNING } from '@hapi/protocol'
+ import { AgentStateSchema, MetadataSchema, SessionPatchSchema, TeamStateSchema } from '@hapi/protocol/schemas'
+-import type { CodexCollaborationMode, CopilotAgentMode, PermissionMode, Session, SessionPatch } from '@hapi/protocol/types'
++import type { CodexCollaborationMode, CopilotAgentMode, Metadata, PermissionMode, Session, SessionPatch } from '@hapi/protocol/types'
+ import type { Store } from '../store'
+ import { clampAliveTime } from './aliveTime'
+ import { EventPublisher } from './eventPublisher'
+ import { extractTodoWriteTodosFromMessageContent, TodosSchema } from './todos'
+-import { resolveSessionIdleTimeoutMs, shouldClearKeepaliveIdle, shouldMarkKeepaliveIdle } from './sessionIdle'
++import { lifecycleRunningSince, resolveSessionIdleTimeoutMs, shouldClearKeepaliveIdle, shouldMarkKeepaliveIdle } from './sessionIdle'
+ 
+ const QUEUED_MESSAGE_THINKING_GRACE_MS = 15_000
+ // tiann/hapi#919: metadata writers (renameSession, clearSessionArchiveMetadata,
+@@ -27,8 +27,9 @@ export class SessionCache {
+     /**
+      * Last time the hub saw real agent progress per session (tiann/hapi#1820).
+      * Deliberately NOT bumped by `session-alive`: keepalives are exactly the
+-     * signal this clock has to be immune to. Seeded lazily from `updatedAt`,
+-     * so a hub restart re-derives it from the last human turn on disk.
++     * signal this clock has to be immune to. Seeded lazily from the durable
++     * progress records on disk (see `getAgentProgressAt`), so a hub restart
++     * re-derives it without trusting `updatedAt`.
+      */
+     private readonly agentProgressAtBySessionId: Map<string, number> = new Map()
+     private readonly sessionIdleTimeoutMs: number = resolveSessionIdleTimeoutMs()
+@@ -587,6 +588,25 @@ export class SessionCache {
+         }
+     }
+ 
++    /**
++     * Abort tree-kills the agent process and every background shell under it
++     * (cli/src/claude/sdk/query.ts cleanup), so the `<task-notification>` that
++     * would have closed the counter can never arrive. Forget the tasks, or the
++     * session reads as "working" until session-end and never reconciles idle
++     * (tiann/hapi#1820).
++     */
++    clearBackgroundTasks(sessionId: string): void {
++        const session = this.sessions.get(sessionId)
++        if (!session || (session.backgroundTaskCount ?? 0) === 0) return
++
++        session.backgroundTaskCount = 0
++        this.publisher.emit({
++            type: 'session-updated',
++            sessionId,
++            data: { backgroundTaskCount: 0 } satisfies SessionPatch
++        })
++    }
++
+     setBackgroundTaskCount(sessionId: string, next: number): void {
+         const session = this.sessions.get(sessionId)
+         if (!session) return
+@@ -612,7 +632,10 @@ export class SessionCache {
+         }
+ 
+         const nextUpdatedAt = Math.max(stored.updatedAt, updatedAt)
+-        this.recordAgentProgress(sessionId, nextUpdatedAt)
++        // Progress is the activity's own time, not the floored row clock: a history
++        // replay carrying an old timestamp must not wake an idle session just because
++        // some metadata write moved `updatedAt` since.
++        this.recordAgentProgress(sessionId, updatedAt)
+         const touched = this.store.sessions.touchSessionUpdatedAt(sessionId, nextUpdatedAt, stored.namespace)
+         const session = this.sessions.get(sessionId)
+ 
+@@ -648,7 +671,11 @@ export class SessionCache {
+      */
+     recordAgentProgress(sessionId: string, at: number = Date.now()): void {
+         if (!Number.isFinite(at)) return
+-        const previous = this.agentProgressAtBySessionId.get(sessionId) ?? 0
++        // Seed a cold entry from disk before comparing: an old timestamp
++        // arriving ahead of the first tick (a transcript backfill right after
++        // a hub restart) must not become the baseline that hides newer
++        // stored progress.
++        const previous = this.agentProgressAtBySessionId.get(sessionId) ?? this.seedAgentProgressAt(sessionId)
+         if (at > previous) {
+             this.agentProgressAtBySessionId.set(sessionId, at)
+         }
+@@ -656,24 +683,34 @@ export class SessionCache {
+ 
+     /**
+      * A cold cache (hub restart) has observed no progress of its own, so seed
+-     * it once from disk.
++     * it once from disk: the newest stored message (assistant output never
++     * moves `updatedAt`, so a session that was streaming a minute before the
++     * restart must not read as hours idle), the todo / team-state clocks, the
++     * CLI's `running` stamp (a session reopened just before the restart has
++     * nothing else yet) and, for a session that has none of those, its
++     * creation.
+      *
+-     * `updatedAt` alone is not enough: assistant messages deliberately do not
+-     * move it, so a session that was streaming output a minute before the
+-     * restart would read as hours idle and get marked on the very next tick.
+-     * The newest stored message is the durable record of that output.
+-     *
+-     * `updatedAt` stays a floor on top of the seed, because todos / teamState
+-     * / agentState writes bump it without routing through
+-     * `recordAgentProgress`.
++     * `updatedAt` is deliberately not consulted, neither as seed nor as a
++     * floor. It moves on every CLI `update-metadata` write — a title, a
++     * summary, the idle mark itself echoed back after a version mismatch —
++     * and none of that is agent progress; reading it here lifted the mark on
++     * the very next tick and let a zombie hide behind its metadata churn.
+      */
++    private seedAgentProgressAt(sessionId: string): number {
++        const session = this.sessions.get(sessionId) ?? this.store.sessions.getSession(sessionId)
++        const seeded = Math.max(
++            this.store.messages.getNewestMessagePosition(sessionId)?.at ?? 0,
++            session?.todosUpdatedAt ?? 0,
++            session?.teamStateUpdatedAt ?? 0,
++            lifecycleRunningSince(session?.metadata as Metadata | null | undefined) ?? 0,
++            session?.createdAt ?? 0
++        )
++        this.agentProgressAtBySessionId.set(sessionId, seeded)
++        return seeded
++    }
++
+     private getAgentProgressAt(session: Session): number {
+-        let observed = this.agentProgressAtBySessionId.get(session.id)
+-        if (observed === undefined) {
+-            observed = this.store.messages.getNewestMessagePosition(session.id)?.at ?? 0
+-            this.agentProgressAtBySessionId.set(session.id, observed)
+-        }
+-        return Math.max(observed, session.updatedAt)
++        return this.agentProgressAtBySessionId.get(session.id) ?? this.seedAgentProgressAt(session.id)
+     }
+ 
+     /**
+@@ -689,12 +726,12 @@ export class SessionCache {
+      * Returns the session ids newly marked `idle`.
+      */
+     reconcileKeepaliveIdle(now: number = Date.now(), timeoutMs: number = this.sessionIdleTimeoutMs): string[] {
+-        if (timeoutMs <= 0) return []
+-
+         const marked: string[] = []
+         // Snapshot: a lifecycle write refreshes the cached Session in place.
++        // A disabled window (`timeoutMs <= 0`) never marks, but still walks
++        // the sessions so marks left by an earlier configuration get lifted.
+         for (const session of Array.from(this.sessions.values())) {
+-            const progressAt = this.getAgentProgressAt(session)
++            const progressAt = timeoutMs > 0 ? this.getAgentProgressAt(session) : 0
+             if (shouldClearKeepaliveIdle(session, progressAt, now, timeoutMs)) {
+                 this.writeLifecycleState(session.id, SESSION_LIFECYCLE_RUNNING)
+                 continue
+diff --git a/hub/src/sync/sessionIdle.test.ts b/hub/src/sync/sessionIdle.test.ts
+index 6a1f872d6..a3d92497f 100644
+--- a/hub/src/sync/sessionIdle.test.ts
++++ b/hub/src/sync/sessionIdle.test.ts
+@@ -1,4 +1,4 @@
+-import { describe, expect, it } from 'bun:test'
++import { describe, expect, it, setSystemTime } from 'bun:test'
+ import { Database } from 'bun:sqlite'
+ import { mkdtempSync, rmSync } from 'node:fs'
+ import { tmpdir } from 'node:os'
+@@ -46,16 +46,39 @@ function session(overrides: Partial<Session> = {}): Session {
+ }
+ 
+ describe('resolveSessionIdleTimeoutMs', () => {
++    const quiet = () => {}
++
+     it('defaults when unset or unparseable', () => {
+-        expect(resolveSessionIdleTimeoutMs({})).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
+-        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '  ' })).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
+-        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: 'soon' })).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
+-        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '-1' })).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
++        expect(resolveSessionIdleTimeoutMs({}, quiet)).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
++        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '  ' }, quiet)).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
++        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: 'soon' }, quiet)).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
++        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '-1' }, quiet)).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
+     })
+ 
+     it('honours an explicit window, and 0 disables', () => {
+-        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '3600000' })).toBe(3_600_000)
+-        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '0' })).toBe(0)
++        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '3600000' }, quiet)).toBe(3_600_000)
++        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: ' 3600000 ' }, quiet)).toBe(3_600_000)
++        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '0' }, quiet)).toBe(0)
++    })
++
++    it('refuses a suffixed value instead of reading "1h" as 1 ms, and says so', () => {
++        // parseInt("1h") === 1 would turn every quiet session idle on the
++        // next 5 s tick — a plausible operator typo with a drastic effect.
++        const warnings: string[] = []
++        const warn = (message: string) => { warnings.push(message) }
++        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '1h' }, warn)).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
++        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '12h' }, warn)).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
++        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '1e3' }, warn)).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
++        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '+5' }, warn)).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
++        expect(warnings).toHaveLength(4)
++        expect(warnings[0]).toContain('"1h"')
++        expect(warnings[0]).toContain('whole milliseconds')
++    })
++
++    it('stays silent on a valid value', () => {
++        const warnings: string[] = []
++        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '3600000' }, (m) => { warnings.push(m) })).toBe(3_600_000)
++        expect(warnings).toEqual([])
+     })
+ })
+ 
+@@ -127,6 +150,12 @@ describe('shouldClearKeepaliveIdle', () => {
+         expect(shouldClearKeepaliveIdle(idle(), NOW - 87 * HOUR, NOW, window)).toBe(false)
+     })
+ 
++    it('lifts an existing mark once the window is disabled', () => {
++        // Nothing else ever writes `running` back (the CLI only stamps it at
++        // bootstrap), so "disabled" has to mean "no marks", not "frozen".
++        expect(shouldClearKeepaliveIdle(idle(), NOW - 87 * HOUR, NOW, 0)).toBe(true)
++    })
++
+     it('ignores sessions that are not idle', () => {
+         expect(shouldClearKeepaliveIdle(session(), NOW - 1 * HOUR, NOW, window)).toBe(false)
+     })
+@@ -272,11 +301,226 @@ describe('SessionCache.reconcileKeepaliveIdle', () => {
+         expect(cache.getSession(sessionId)!.metadata?.lifecycleState).toBe('running')
+     })
+ 
+-    it('does nothing when the window is disabled', () => {
++    it('never marks when the window is disabled', () => {
+         const { cache, sessionId, later } = setup()
+         cache.handleSessionAlive({ sid: sessionId, time: Date.now() })
+ 
+         expect(cache.reconcileKeepaliveIdle(later, 0)).toEqual([])
+         expect(cache.getSession(sessionId)!.metadata?.lifecycleState).toBe('running')
+     })
++
++    it('disabling the window lifts marks left behind by an earlier configuration', () => {
++        const { store, cache, sessionId, later } = setup()
++        cache.handleSessionAlive({ sid: sessionId, time: Date.now() })
++        expect(cache.reconcileKeepaliveIdle(later, window)).toEqual([sessionId])
++        expect(cache.getSession(sessionId)!.metadata?.lifecycleState).toBe('idle')
++
++        // Operator sets HAPI_SESSION_IDLE_TIMEOUT_MS=0 and restarts the hub:
++        // a fresh cache over the same rows, the CLI still connected and still
++        // holding `running` locally, so nothing on its side rewrites the row.
++        const restarted = new SessionCache(store, createPublisher([]))
++        restarted.reloadAll()
++        restarted.handleSessionAlive({ sid: sessionId, time: Date.now() })
++        expect(restarted.getSession(sessionId)!.metadata?.lifecycleState).toBe('idle')
++
++        expect(restarted.reconcileKeepaliveIdle(later, 0)).toEqual([])
++        expect(restarted.getSession(sessionId)!.metadata?.lifecycleState).toBe('running')
++        expect((store.sessions.getSession(sessionId)!.metadata as { lifecycleState?: string }).lifecycleState).toBe('running')
++    })
++
++    it('a metadata write without agent progress does not lift the idle mark', () => {
++        const { store, cache, sessionId, later } = setup()
++        cache.handleSessionAlive({ sid: sessionId, time: Date.now() })
++        cache.reconcileKeepaliveIdle(later, window)
++        // Snapshot the scalars: the patch below mutates the cached object.
++        const idle = cache.getSession(sessionId)!
++        const { metadata: idleMetadata, metadataVersion: idleVersion, updatedAt: idleUpdatedAt } = idle
++        expect(idleMetadata?.lifecycleState).toBe('idle')
++
++        // The wall clock catches up with the mark, then the CLI writes
++        // metadata: it adopted the hub's `idle` after a version mismatch and
++        // retries with a changed title. Same handler and same store call as
++        // production (`update-metadata` touches `updated_at`).
++        setSystemTime(new Date(later))
++        try {
++            const handlers = new Map<string, (payload: unknown, ack?: (response: unknown) => void) => void>()
++            registerSessionHandlers({
++                on: (event: string, handler: (payload: unknown, ack?: (response: unknown) => void) => void) => {
++                    handlers.set(event, handler)
++                },
++                to: () => ({ emit: () => {} })
++            } as never, {
++                store,
++                resolveSessionAccess: (id: string) => {
++                    const stored = store.sessions.getSessionByNamespace(id, 'default')
++                    return stored ? { ok: true, value: stored } : { ok: false, reason: 'not-found' }
++                },
++                emitAccessError: () => {},
++                onWebappEvent: (event: SyncEvent) => {
++                    if (event.type === 'session-updated') cache.applySessionPatch(event.sessionId, event.data)
++                }
++            } as never)
++
++            let ack: unknown
++            handlers.get('update-metadata')?.({
++                sid: sessionId,
++                metadata: { ...idleMetadata, name: 'renamed while idle' },
++                expectedVersion: idleVersion
++            }, (response) => { ack = response })
++            expect(ack).toMatchObject({ result: 'success' })
++
++            const renamed = cache.getSession(sessionId)!
++            expect(renamed.metadata?.name).toBe('renamed while idle')
++            // The title change is list activity …
++            expect(renamed.updatedAt).toBeGreaterThanOrEqual(later)
++            expect(renamed.updatedAt).toBeGreaterThan(idleUpdatedAt)
++            // … but not agent progress: the next tick leaves the mark alone.
++            expect(cache.reconcileKeepaliveIdle(later + 1, window)).toEqual([])
++            expect(cache.getSession(sessionId)!.metadata?.lifecycleState).toBe('idle')
++
++            // Control: real progress at the same moment does wake it.
++            cache.recordAgentProgress(sessionId, later)
++            cache.reconcileKeepaliveIdle(later + 1, window)
++            expect(cache.getSession(sessionId)!.metadata?.lifecycleState).toBe('running')
++        } finally {
++            setSystemTime()
++        }
++    })
++
++    it('seeds a cold cache from todos / team-state clocks, not from updatedAt', () => {
++        const dir = mkdtempSync(join(tmpdir(), 'hapi-1820-seed-'))
++        try {
++            const dbPath = join(dir, 'hapi.db')
++            const store = new Store(dbPath)
++            const cache = new SessionCache(store, createPublisher([]))
++            const sessionId = cache.getOrCreateSession(
++                'tag-seed',
++                { path: '/tmp/project', host: 'localhost', flavor: 'claude', lifecycleState: 'running' },
++                null,
++                'default'
++            ).id
++            const now = Date.now()
++            // Last message 80h ago, but the agent rewrote its todo list an hour
++            // ago (a TodoWrite lands inside a message the hub counts as
++            // progress; here only its durable clock survives the restart).
++            const raw = new Database(dbPath)
++            raw.prepare('UPDATE sessions SET created_at = ?, updated_at = ?, todos_updated_at = ? WHERE id = ?')
++                .run(now - 80 * HOUR, now - 80 * HOUR, now - 1 * HOUR, sessionId)
++            raw.close()
++
++            const restarted = new SessionCache(store, createPublisher([]))
++            restarted.reloadAll()
++            restarted.handleSessionAlive({ sid: sessionId, time: now })
++            expect(restarted.reconcileKeepaliveIdle(now, window)).toEqual([])
++            expect(restarted.getSession(sessionId)!.metadata?.lifecycleState).toBe('running')
++            expect(restarted.reconcileKeepaliveIdle(now + 13 * HOUR, window)).toEqual([sessionId])
++        } finally {
++            rmSync(dir, { recursive: true, force: true })
++        }
++    })
++
++    it('an old progress timestamp arriving before the first tick does not poison the cold seed', () => {
++        const { store, sessionId } = setup()
++        // Assistant output just now: the durable progress record on disk.
++        store.messages.addMessage(sessionId, { role: 'agent', content: { type: 'text', text: 'still working' } })
++        const now = Date.now()
++
++        // Hub restart: fresh cache, empty progress map. The reconnecting CLI
++        // backfills an old transcript entry before the first tick has run, and
++        // the handler reports it as progress at its own (old) timestamp.
++        const restarted = new SessionCache(store, createPublisher([]))
++        restarted.reloadAll()
++        restarted.handleSessionAlive({ sid: sessionId, time: now })
++        restarted.recordAgentProgress(sessionId, now - 80 * HOUR)
++
++        // The baseline is still the newest message, not the stale replay.
++        expect(restarted.reconcileKeepaliveIdle(now + 1 * HOUR, window)).toEqual([])
++        expect(restarted.getSession(sessionId)!.metadata?.lifecycleState).toBe('running')
++    })
++
++    it('a reopened days-old session is not marked idle on the first tick', () => {
++        const dir = mkdtempSync(join(tmpdir(), 'hapi-1820-reopen-'))
++        try {
++            const dbPath = join(dir, 'hapi.db')
++            const store = new Store(dbPath)
++            const cache = new SessionCache(store, createPublisher([]))
++            const sessionId = cache.getOrCreateSession(
++                'tag-reopen',
++                { path: '/tmp/project', host: 'localhost', flavor: 'claude', lifecycleState: 'running' },
++                null,
++                'default'
++            ).id
++            store.messages.addMessage(sessionId, { role: 'user', content: { type: 'text', text: 'last turn' } }, 'last-turn')
++            const now = Date.now()
++            // The last turn was 80h ago and the CLI archived the session on exit.
++            const exited = store.sessions.getSession(sessionId)!
++            expect(store.sessions.updateSessionMetadata(
++                sessionId,
++                { ...(exited.metadata as Record<string, unknown>), lifecycleState: 'archived', lifecycleStateSince: now - 80 * HOUR, archivedBy: 'cli' },
++                exited.metadataVersion,
++                'default'
++            ).result).toBe('success')
++            const raw = new Database(dbPath)
++            raw.prepare('UPDATE sessions SET created_at = ?, updated_at = ? WHERE id = ?')
++                .run(now - 80 * HOUR, now - 80 * HOUR, sessionId)
++            raw.prepare('UPDATE messages SET created_at = ?, invoked_at = ? WHERE session_id = ?')
++                .run(now - 80 * HOUR, now - 80 * HOUR, sessionId)
++            raw.close()
++
++            // The hub restarted since and has ticked at least once, so the
++            // progress clock is warm: seeded from the 80h-old turn.
++            const restarted = new SessionCache(store, createPublisher([]))
++            restarted.reloadAll()
++            expect(restarted.reconcileKeepaliveIdle(now - 79 * HOUR, window)).toEqual([])
++
++            // `hapi --existing-session-id`: the CLI bootstraps with a fresh
++            // `running` stamp through the production handler, then starts its
++            // keepalive. It has not said anything yet.
++            const handlers = new Map<string, (payload: unknown, ack?: (response: unknown) => void) => void>()
++            registerSessionHandlers({
++                on: (event: string, handler: (payload: unknown, ack?: (response: unknown) => void) => void) => {
++                    handlers.set(event, handler)
++                },
++                to: () => ({ emit: () => {} })
++            } as never, {
++                store,
++                resolveSessionAccess: (id: string) => {
++                    const stored = store.sessions.getSessionByNamespace(id, 'default')
++                    return stored ? { ok: true, value: stored } : { ok: false, reason: 'not-found' }
++                },
++                emitAccessError: () => {},
++                onAgentProgress: (id: string, at: number) => { restarted.recordAgentProgress(id, at) },
++                onWebappEvent: (event: SyncEvent) => {
++                    if (event.type === 'session-updated') restarted.applySessionPatch(event.sessionId, event.data)
++                }
++            } as never)
++            let ack: unknown
++            handlers.get('update-metadata')?.({
++                sid: sessionId,
++                metadata: { path: '/tmp/project', host: 'localhost', flavor: 'claude', lifecycleState: 'running', lifecycleStateSince: now },
++                expectedVersion: store.sessions.getSession(sessionId)!.metadataVersion
++            }, (response) => { ack = response })
++            expect(ack).toMatchObject({ result: 'success' })
++            restarted.handleSessionAlive({ sid: sessionId, time: now })
++            expect(restarted.getSession(sessionId)!.metadata?.lifecycleState).toBe('running')
++
++            // First tick after the reopen: the process only just started; the
++            // old transcript is not its idleness.
++            expect(restarted.reconcileKeepaliveIdle(now + 5_000, window)).toEqual([])
++            expect(restarted.getSession(sessionId)!.metadata?.lifecycleState).toBe('running')
++
++            // A hub restart right after the reopen has only the stamp on disk.
++            const again = new SessionCache(store, createPublisher([]))
++            again.reloadAll()
++            again.handleSessionAlive({ sid: sessionId, time: now })
++            expect(again.reconcileKeepaliveIdle(now + 5_000, window)).toEqual([])
++            expect(again.getSession(sessionId)!.metadata?.lifecycleState).toBe('running')
++
++            // Once the reopened process itself has been quiet for the window,
++            // it is marked like any other.
++            expect(again.reconcileKeepaliveIdle(now + 13 * HOUR, window)).toEqual([sessionId])
++        } finally {
++            rmSync(dir, { recursive: true, force: true })
++        }
++    })
+ })
+diff --git a/hub/src/sync/sessionIdle.ts b/hub/src/sync/sessionIdle.ts
+index ddb04089e..bfbae8048 100644
+--- a/hub/src/sync/sessionIdle.ts
++++ b/hub/src/sync/sessionIdle.ts
+@@ -15,29 +15,52 @@
+  */
+ 
+ import { SESSION_LIFECYCLE_IDLE, SESSION_LIFECYCLE_RUNNING } from '@hapi/protocol'
+-import type { Session } from '@hapi/protocol/types'
++import type { Metadata, Session } from '@hapi/protocol/types'
+ 
+ /** Keepalive-only for this long ⇒ reconcile `running` → `idle`. */
+ export const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 12 * 60 * 60 * 1000
+ 
+ /**
+- * `HAPI_SESSION_IDLE_TIMEOUT_MS` window, in ms. `0` disables reconciliation
+- * entirely; an unset or unparseable value falls back to the default.
++ * `HAPI_SESSION_IDLE_TIMEOUT_MS` window, in ms. `0` never marks a session
++ * idle (and lifts marks an earlier configuration left behind); an unset or
++ * unparseable value falls back to the default.
++ *
++ * Whole milliseconds only. `parseInt` would read "1h" as 1 ms and quietly
++ * mark every session idle on the next tick, so a value with a suffix (or
++ * anything else that is not a plain digit string) is refused, and loudly.
+  */
+ export function resolveSessionIdleTimeoutMs(
+-    env: Record<string, string | undefined> = process.env
++    env: Record<string, string | undefined> = process.env,
++    warn: (message: string) => void = (message) => console.warn(message)
+ ): number {
+     const raw = env.HAPI_SESSION_IDLE_TIMEOUT_MS
+     if (raw === undefined || raw.trim() === '') {
+         return DEFAULT_SESSION_IDLE_TIMEOUT_MS
+     }
+-    const parsed = Number.parseInt(raw.trim(), 10)
+-    if (!Number.isFinite(parsed) || parsed < 0) {
++    const trimmed = raw.trim()
++    const parsed = /^\d+$/.test(trimmed) ? Number(trimmed) : Number.NaN
++    if (!Number.isSafeInteger(parsed)) {
++        warn(`[session-idle] Ignoring HAPI_SESSION_IDLE_TIMEOUT_MS=${JSON.stringify(raw)}: expected whole milliseconds (e.g. 3600000 for 1h); using the default ${DEFAULT_SESSION_IDLE_TIMEOUT_MS}`)
+         return DEFAULT_SESSION_IDLE_TIMEOUT_MS
+     }
+     return parsed
+ }
+ 
++/**
++ * When the CLI last stamped this session `running`, or `null`.
++ *
++ * The CLI writes `lifecycleState: 'running'` with a fresh `lifecycleStateSince`
++ * exactly once, at bootstrap (cli/src/agent/sessionFactory.ts). For a session
++ * reopened after days of silence that stamp is the only sign of life until the
++ * first turn, so it counts as agent progress at its own time; otherwise the
++ * reopened session reads as idle on the very next tick.
++ */
++export function lifecycleRunningSince(metadata: Metadata | null | undefined): number | null {
++    if (metadata?.lifecycleState !== SESSION_LIFECYCLE_RUNNING) return null
++    const since = metadata.lifecycleStateSince
++    return typeof since === 'number' ? since : null
++}
++
+ /** Work the hub can see that must never be reconciled away as a zombie. */
+ function hasLiveWork(session: Session): boolean {
+     if (session.thinking) return true
+@@ -88,7 +111,10 @@ export function shouldClearKeepaliveIdle(
+     timeoutMs: number
+ ): boolean {
+     if (session.metadata?.lifecycleState !== SESSION_LIFECYCLE_IDLE) return false
+-    // Opting out after the fact still lifts an existing mark.
+-    if (session.metadata.idleReconcileExempt === true) return true
+-    return timeoutMs > 0 && now - agentProgressAt <= timeoutMs
++    // Opting out after the fact still lifts an existing mark, and so does
++    // disabling the window: the CLI only stamps `running` at bootstrap, so a
++    // mark left behind by an earlier configuration would otherwise outlive
++    // the configuration that made it.
++    if (session.metadata.idleReconcileExempt === true || timeoutMs <= 0) return true
++    return now - agentProgressAt <= timeoutMs
+ }
+diff --git a/hub/src/sync/sessionIdleEngine.test.ts b/hub/src/sync/sessionIdleEngine.test.ts
+new file mode 100644
+index 000000000..d8654d1ea
+--- /dev/null
++++ b/hub/src/sync/sessionIdleEngine.test.ts
+@@ -0,0 +1,141 @@
++import { describe, expect, it, mock, setSystemTime } from 'bun:test'
++import type { SyncEvent } from '@hapi/protocol/types'
++import { Store } from '../store'
++import { RpcRegistry } from '../socket/rpcRegistry'
++import type { SessionCache } from './sessionCache'
++import { SyncEngine } from './syncEngine'
++
++/**
++ * tiann/hapi#1820 at the SyncEngine level. `sessionIdle.test.ts` pins the
++ * pure rules and the cache; these tests drive the engine entry points the
++ * hub actually wires (activity, sends, abort, the inactivity tick) and check
++ * that only real agent progress moves the lifecycle.
++ */
++
++const HOUR = 60 * 60 * 1000
++
++const RUNNING = { path: '/tmp/project', host: 'localhost', flavor: 'claude', lifecycleState: 'running' } as const
++
++function createEngine() {
++    const store = new Store(':memory:')
++    const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
++    return { store, engine }
++}
++
++function withIdleWindow<T>(windowMs: number, run: () => T): T {
++    const previous = process.env.HAPI_SESSION_IDLE_TIMEOUT_MS
++    process.env.HAPI_SESSION_IDLE_TIMEOUT_MS = String(windowMs)
++    try {
++        return run()
++    } finally {
++        if (previous === undefined) {
++            delete process.env.HAPI_SESSION_IDLE_TIMEOUT_MS
++        } else {
++            process.env.HAPI_SESSION_IDLE_TIMEOUT_MS = previous
++        }
++    }
++}
++
++describe('SyncEngine keepalive-idle tick', () => {
++    it('a replayed old activity timestamp does not wake an idle session, a new one does', () => {
++        withIdleWindow(HOUR, () => {
++            const { store, engine } = createEngine()
++            try {
++                const session = engine.getOrCreateSession('replay', RUNNING, null, 'default')
++                const startedAt = Date.now()
++                engine.handleSessionAlive({ sid: session.id, time: startedAt })
++                setSystemTime(new Date(startedAt + 2 * HOUR))
++                engine.handleSessionAlive({ sid: session.id, time: Date.now() })
++                ;(engine as unknown as { expireInactive(): void }).expireInactive()
++                expect(engine.getSession(session.id)?.metadata?.lifecycleState).toBe('idle')
++
++                // A metadata write moved updatedAt to now; a history replay then reports
++                // activity from before the idle window.
++                const current = store.sessions.getSessionByNamespace(session.id, 'default')!
++                const renamed = store.sessions.updateSessionMetadata(session.id, { ...current.metadata!, name: 'renamed' }, current.metadataVersion, 'default')
++                expect(renamed.result).toBe('success')
++                expect(store.sessions.getSession(session.id)!.updatedAt).toBeGreaterThan(startedAt)
++                engine.recordSessionActivity(session.id, startedAt)
++                ;(engine as unknown as { expireInactive(): void }).expireInactive()
++                expect(engine.getSession(session.id)?.metadata?.lifecycleState).toBe('idle')
++
++                // Genuine new activity still wakes it.
++                engine.recordSessionActivity(session.id, Date.now())
++                ;(engine as unknown as { expireInactive(): void }).expireInactive()
++                expect(engine.getSession(session.id)?.metadata?.lifecycleState).toBe('running')
++            } finally {
++                setSystemTime()
++                engine.stop()
++            }
++        })
++    })
++
++    it('a duplicate send of an already consumed message neither queues a turn nor counts as progress', async () => {
++        // sendMessage emits to the CLI namespace: give the engine a socket.io stand-in.
++        const store = new Store(':memory:')
++        const io = { of: () => ({ to: () => ({ emit() {} }) }) }
++        const engine = new SyncEngine(store, io as never, new RpcRegistry(), { broadcast() {} } as never)
++        try {
++            const session = engine.getOrCreateSession('retry', RUNNING, null, 'default')
++            engine.handleSessionAlive({ sid: session.id, time: Date.now() })
++            const cache = (engine as unknown as { sessionCache: SessionCache }).sessionCache
++            const queued = mock(cache.markMessageQueued.bind(cache)); cache.markMessageQueued = queued
++            const activity = mock(cache.recordSessionActivity.bind(cache)); cache.recordSessionActivity = activity
++
++            await engine.sendMessage(session.id, { text: 'hello', localId: 'retry-1' })
++            expect(queued).toHaveBeenCalledTimes(1)
++            // Still queued: a deliberate retry re-arms the grace window (aliveEvents.test.ts).
++            await engine.sendMessage(session.id, { text: 'hello', localId: 'retry-1' })
++            expect(queued).toHaveBeenCalledTimes(2)
++
++            // Consumed by the agent: a late duplicate of the same POST changes nothing.
++            expect(store.messages.markMessagesInvoked(session.id, ['retry-1'], Date.now())).toBe(1)
++            const before = activity.mock.calls.length
++            await engine.sendMessage(session.id, { text: 'hello', localId: 'retry-1' })
++            expect(queued).toHaveBeenCalledTimes(2)
++            // The message service still reports the stored row's own time (harmless:
++            // the progress clock only moves forward); no "now" activity is recorded.
++            const createdAt = store.messages.getAllMessages(session.id)[0]!.createdAt
++            expect(activity.mock.calls.slice(before)).toEqual([[session.id, createdAt]])
++        } finally {
++            engine.stop()
++        }
++    })
++
++    it('abort forgets background tasks so the session can reconcile idle', async () => {
++        const { engine } = createEngine()
++        try {
++            const session = engine.getOrCreateSession('abort', RUNNING, null, 'default')
++            engine.handleSessionAlive({ sid: session.id, time: Date.now(), thinking: true })
++            engine.handleBackgroundTaskDelta(session.id, { started: 1, completed: 0 })
++            engine.handleSessionAlive({ sid: session.id, time: Date.now(), thinking: false })
++            expect(engine.getSession(session.id)?.backgroundTaskCount).toBe(1)
++            const cache = (engine as unknown as { sessionCache: SessionCache }).sessionCache
++            const later = Date.now() + 87 * HOUR
++            // A counter that can never be closed pins the session on "working".
++            expect(cache.reconcileKeepaliveIdle(later, 12 * HOUR)).toEqual([])
++            // Web clients have rendered the counter and only a `session-updated`
++            // patch takes it back (the alive broadcast does not carry it).
++            const events: SyncEvent[] = []
++            engine.subscribe((event) => { events.push(event) })
++            const cleared = () => events.filter((e) => e.type === 'session-updated' && e.data?.backgroundTaskCount === 0)
++
++            const gateway = (engine as unknown as { rpcGateway: { abortSession: unknown } }).rpcGateway
++            // The CLI refuses (no handler): nothing was killed, keep the count.
++            gateway.abortSession = mock(async () => { throw new Error('handler-not-registered') })
++            await expect(engine.abortSession(session.id)).rejects.toThrow()
++            expect(engine.getSession(session.id)?.backgroundTaskCount).toBe(1)
++            expect(cleared()).toHaveLength(0)
++
++            // The CLI acknowledged: its process tree, background shells
++            // included, is gone and no <task-notification> will follow.
++            gateway.abortSession = mock(async () => {})
++            await engine.abortSession(session.id)
++            expect(engine.getSession(session.id)?.backgroundTaskCount).toBe(0)
++            expect(cleared()).toHaveLength(1)
++            expect(cache.reconcileKeepaliveIdle(later, 12 * HOUR)).toEqual([session.id])
++        } finally {
++            engine.stop()
++        }
++    })
++})
+diff --git a/hub/src/sync/syncEngine.ts b/hub/src/sync/syncEngine.ts
+index 1c3ffe713..487d759ce 100644
+--- a/hub/src/sync/syncEngine.ts
++++ b/hub/src/sync/syncEngine.ts
+@@ -1154,7 +1154,12 @@ export class SyncEngine {
+         if (this.historyActionsInFlight.has(sessionId)) {
+             throw new Error('Conversation history action already in progress')
+         }
+-        const { actualSessionId, createdAt: activeTurnStartedAt } = await this.messageService.sendMessage(sessionId, payload)
++        const { actualSessionId, createdAt: activeTurnStartedAt, inserted, invokedAt } = await this.messageService.sendMessage(sessionId, payload)
++        // A retry of a message the agent already consumed resolved to that old row:
++        // nothing is queued, so it is neither a fresh turn nor agent progress (it must
++        // not wake an idle session or re-arm `thinking`). A retry of a still-queued
++        // message keeps starting a fresh grace window.
++        if (!inserted && invokedAt !== null) return
+         this.sessionCache.markMessageQueued(actualSessionId, Date.now(), activeTurnStartedAt)
+         this.sessionCache.recordSessionActivity(actualSessionId, Date.now())
+     }
+@@ -1267,6 +1272,10 @@ export class SyncEngine {
+ 
+     async abortSession(sessionId: string): Promise<void> {
+         await this.rpcGateway.abortSession(sessionId)
++        // The CLI answered: its agent process tree (background shells
++        // included) is going down, so no task notification will close the
++        // counter any more.
++        this.sessionCache.clearBackgroundTasks(sessionId)
+     }
+ 
+     private assertConversationHistoryIdle(session: Session): void {

@@ -1,0 +1,121 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Thu, 22 Oct 2026 11:55:34 +0000
+Subject: [PATCH 56/94] fix(codex): fail closed when a shared rewind cannot
+ complete
+
+The hub treated a CLI `{ error }` reply to CompleteConversationRewind as
+success, so a failed completion left the CLI barrier closed without
+quarantining the session. Also clear the barrier token before unlinking on a
+proven rejection, and never send an id-less error frame for a rejected
+notification.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ cli/src/codex/shared/gateway.test.ts | 11 +++++++++++
+ cli/src/codex/shared/gateway.ts      |  3 ++-
+ cli/src/codex/shared/rewind.test.ts  |  6 ++++++
+ cli/src/codex/shared/rewind.ts       |  3 ++-
+ hub/src/sync/rpcGateway.test.ts      |  5 +++++
+ hub/src/sync/rpcGateway.ts           |  7 ++++++-
+ 6 files changed, 32 insertions(+), 3 deletions(-)
+
+diff --git a/cli/src/codex/shared/gateway.test.ts b/cli/src/codex/shared/gateway.test.ts
+index 305efc85f..f3ebbfeb9 100644
+--- a/cli/src/codex/shared/gateway.test.ts
++++ b/cli/src/codex/shared/gateway.test.ts
+@@ -57,6 +57,17 @@ describe('native gateway barriers', () => {
+             expect(f.before).not.toHaveBeenCalled();
+         } finally { await f.close(); }
+     });
++    it('does not answer a notification rejected by rewind admission', async () => {
++        const f = await fixture(async () => {}, async () => { throw new Error('rewind pending'); });
++        try {
++            const client = await f.connect(); const replies: Envelope[] = [];
++            client.on('message', raw => replies.push(JSON.parse(raw.toString())));
++            client.send(JSON.stringify({ method: 'thread/note', params: { threadId: 'root' } }));
++            client.send(JSON.stringify({ id: 2, method: 'turn/start', params: { threadId: 'root' } }));
++            await vi.waitFor(() => expect(replies).toHaveLength(1));
++            expect(replies[0]).toMatchObject({ id: 2, error: { message: 'rewind pending' } });
++        } finally { await f.close(); }
++    });
+     it('namespaces colliding native request IDs by connection and withholds replies until binding', async () => {
+         let release!: () => void; const barrier = new Promise<void>(resolve => { release = resolve; });
+         const after = vi.fn(async () => { await barrier; }); const f = await fixture(after);
+diff --git a/cli/src/codex/shared/gateway.ts b/cli/src/codex/shared/gateway.ts
+index 310f02804..0dd95697f 100644
+--- a/cli/src/codex/shared/gateway.ts
++++ b/cli/src/codex/shared/gateway.ts
+@@ -99,7 +99,8 @@ export async function startCodexGateway(options: {
+                     if (transformed.id === undefined) release?.();
+                 } catch (error) {
+                     release?.();
+-                    send(downstream, { id: message.id, error: { code: -32600, message: error instanceof Error ? error.message : String(error) } });
++                    // A notification has no id to answer.
++                    if (message.id !== undefined) send(downstream, { id: message.id, error: { code: -32600, message: error instanceof Error ? error.message : String(error) } });
+                 }
+             }).catch(() => downstream.close(1011, 'Codex connection failed')).finally(() => { processing--; drained(); });
+         });
+diff --git a/cli/src/codex/shared/rewind.test.ts b/cli/src/codex/shared/rewind.test.ts
+index a2ffb40cf..c55a26010 100644
+--- a/cli/src/codex/shared/rewind.test.ts
++++ b/cli/src/codex/shared/rewind.test.ts
+@@ -39,6 +39,12 @@ describe('shared rewind admission', () => {
+         const replacement = new SharedRewindBarrier(file); await replacement.load();
+         replacement.enter()();
+     });
++    it('unlocks a proven rejection whose barrier file is already gone', async () => {
++        const { file, barrier } = await fixture();
++        await barrier.begin(); await rm(file);
++        await barrier.cancel();
++        barrier.enter()();
++    });
+     it('treats new native methods as mutations by default', () => {
+         expect(isNativeHistoryRead('thread/turns/list')).toBe(true);
+         for (const method of ['turn/start', 'turn/steer', 'thread/queue/add', 'thread/queue/start',
+diff --git a/cli/src/codex/shared/rewind.ts b/cli/src/codex/shared/rewind.ts
+index 970c993a6..a6b899be4 100644
+--- a/cli/src/codex/shared/rewind.ts
++++ b/cli/src/codex/shared/rewind.ts
+@@ -36,7 +36,8 @@ export class SharedRewindBarrier {
+     }
+     /** Only before native dispatch: rejection is proven, so no reconciliation is needed. */
+     async cancel(): Promise<void> {
+-        await unlink(this.file); this.token = undefined;
++        this.token = undefined;
++        await unlink(this.file).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; });
+     }
+     async complete(token: string, reconcile: () => Promise<void>): Promise<void> {
+         if (this.completing) await this.completing;
+diff --git a/hub/src/sync/rpcGateway.test.ts b/hub/src/sync/rpcGateway.test.ts
+index d9f1dfa7e..12046266b 100644
+--- a/hub/src/sync/rpcGateway.test.ts
++++ b/hub/src/sync/rpcGateway.test.ts
+@@ -277,4 +277,9 @@ describe('RpcGateway permission RPC error surfacing (tiann/hapi#1735)', () => {
+         const { gateway } = createGateway()
+         await expect(gateway.approvePermission('session-1', 'request-1')).resolves.toBeUndefined()
+     })
++
++    it('rejects a rewind completion the CLI failed', async () => {
++        const gateway = createGatewayWithResponse('Invalid rewind transaction')
++        await expect(gateway.completeConversationRewind('session-1', 'token-1')).rejects.toThrow('Invalid rewind transaction')
++    })
+ })
+diff --git a/hub/src/sync/rpcGateway.ts b/hub/src/sync/rpcGateway.ts
+index 3095c1abe..374b92495 100644
+--- a/hub/src/sync/rpcGateway.ts
++++ b/hub/src/sync/rpcGateway.ts
+@@ -603,7 +603,12 @@ export class RpcGateway {
+     }
+ 
+     async completeConversationRewind(sessionId: string, rewindToken: string): Promise<void> {
+-        await this.sessionRpc(sessionId, RPC_METHODS.CompleteConversationRewind, { rewindToken }, 120_000)
++        const response = await this.sessionRpc(sessionId, RPC_METHODS.CompleteConversationRewind, { rewindToken }, 120_000)
++        // The CLI answers handler failures with { error } instead of rejecting.
++        const error = (response as { error?: unknown } | null)?.error
++        if (error !== undefined) {
++            throw new Error(String(error))
++        }
+     }
+ 
+     async listOpencodeReasoningEffortOptionsForSession(sessionId: string): Promise<RpcListOpencodeReasoningEffortOptionsResponse> {

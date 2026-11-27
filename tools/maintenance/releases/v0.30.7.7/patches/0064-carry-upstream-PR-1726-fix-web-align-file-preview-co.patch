@@ -1,0 +1,109 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Fri, 23 Oct 2026 18:17:57 +0000
+Subject: [PATCH 64/94] carry(upstream): PR #1726 fix(web): align file preview
+ content around scrollbars
+
+---
+ web/src/index.css                     | 23 +++++++++++++++++++
+ web/src/routes/sessions/file.test.tsx |  2 ++
+ web/src/routes/sessions/file.tsx      | 32 +++++++++++++++++++++++++--
+ 3 files changed, 55 insertions(+), 2 deletions(-)
+
+diff --git a/web/src/index.css b/web/src/index.css
+index 97f22d590..e9e52eca7 100644
+--- a/web/src/index.css
++++ b/web/src/index.css
+@@ -334,6 +334,29 @@ html:has(.chat-scroll-y) #root {
+     touch-action: pan-y;
+ }
+ 
++/* Keep file-preview content aligned to the previous left edge while reserving
++ * the scrollbar slot on the right on both touch and pointer devices. */
++.file-preview-scroll-y {
++    overflow-x: hidden;
++    scrollbar-gutter: stable;
++}
++
++/* Older WebViews without scrollbar-gutter still need a stable right slot. */
++@supports not (scrollbar-gutter: stable) {
++    .file-preview-scroll-y {
++        overflow-y: scroll;
++    }
++}
++
++/* Include the reserved scrollbar width in the visible content width so the
++ * outer left and right edge spacing remains equal. */
++.file-preview-scroll-content {
++    position: relative;
++    width: calc(100% + var(--file-preview-scrollbar-compensation, 0px));
++    max-width: calc(var(--content-max-w, 960px) + var(--file-preview-scrollbar-compensation, 0px));
++    left: var(--file-preview-scroll-content-offset, 0px);
++}
++
+ /* Keep only the two primary session surfaces visually quiet while idle.
+  * Preserve scrollbar width/gutters so hiding the thumb cannot shift content. */
+ .scrollbar-auto-hide {
+diff --git a/web/src/routes/sessions/file.test.tsx b/web/src/routes/sessions/file.test.tsx
+index d317083f1..0d2af8f72 100644
+--- a/web/src/routes/sessions/file.test.tsx
++++ b/web/src/routes/sessions/file.test.tsx
+@@ -88,6 +88,8 @@ describe('FilePage markdown preview', () => {
+         await waitFor(() => {
+             expect(screen.getByTestId('markdown-preview')).toHaveTextContent('# Heading')
+         })
++        expect(screen.getByTestId('markdown-preview').closest('.file-preview-scroll-content')).not.toBeNull()
++        expect(screen.getByTestId('markdown-preview').closest('.file-preview-scroll-y')).not.toBeNull()
+         expect(screen.getByText(formatFileMetadata(fileSize, fileModified, 'en')!)).toBeInTheDocument()
+         expect(screen.getAllByText(filePath)).toHaveLength(1)
+         const previewCopyButton = screen.getByRole('button', { name: 'Copy file content' })
+diff --git a/web/src/routes/sessions/file.tsx b/web/src/routes/sessions/file.tsx
+index 6d5a70dc2..053381462 100644
+--- a/web/src/routes/sessions/file.tsx
++++ b/web/src/routes/sessions/file.tsx
+@@ -352,6 +352,34 @@ export default function FilePage() {
+         restoreFileScroll()
+         restoredScrollKeyRef.current = fileScrollKey
+     }, [diffQuery.isLoading, fileQuery.isLoading, fileScrollKey, restoreFileScroll])
++    useLayoutEffect(() => {
++        const element = fileScrollRef.current
++        if (!element) return
++        const content = element.querySelector<HTMLElement>('.file-preview-scroll-content')
++
++        const updateScrollbarCompensation = () => {
++            const scrollbarWidth = Math.max(0, element.offsetWidth - element.clientWidth)
++            element.style.setProperty('--file-preview-scrollbar-compensation', `${scrollbarWidth}px`)
++            const contentWidth = content?.getBoundingClientRect().width ?? element.clientWidth
++            const contentOffset = scrollbarWidth > 0
++                ? Math.min(
++                    scrollbarWidth / 2,
++                    Math.max(0, (element.offsetWidth - contentWidth) / 2)
++                )
++                : 0
++            element.style.setProperty('--file-preview-scroll-content-offset', `${contentOffset}px`)
++        }
++
++        updateScrollbarCompensation()
++        const resizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(updateScrollbarCompensation)
++        resizeObserver?.observe(element)
++        if (content) resizeObserver?.observe(content)
++        window.addEventListener('resize', updateScrollbarCompensation)
++        return () => {
++            resizeObserver?.disconnect()
++            window.removeEventListener('resize', updateScrollbarCompensation)
++        }
++    }, [])
+ 
+     const setMarkdownPreviewMode = (mode: MarkdownPreviewMode) => {
+         setMarkdownMode(mode)
+@@ -468,8 +496,8 @@ export default function FilePage() {
+                 </div>
+             ) : null}
+ 
+-            <div ref={fileScrollRef} data-hapi-file-scroll="true" className="app-scroll-y flex-1 min-h-0">
+-                <div className="mx-auto w-full max-w-content p-4">
++            <div ref={fileScrollRef} data-hapi-file-scroll="true" className="app-scroll-y file-preview-scroll-y flex-1 min-h-0">
++                <div className="file-preview-scroll-content mx-auto w-full max-w-content p-4">
+                     {diffErrorMessage ? (
+                         <div className="mb-3 rounded-md bg-amber-500/10 p-2 text-xs text-[var(--app-hint)]">
+                             {diffErrorMessage}

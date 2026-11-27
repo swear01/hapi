@@ -1,0 +1,393 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sun, 25 Oct 2026 18:27:47 +0000
+Subject: [PATCH 86/94] carry(upstream): PR #2165 perf(web): stop hidden and
+ unchanged sidebar rows from re-rendering
+
+Upstream-PR: https://github.com/tiann/hapi/pull/2165
+Upstream-Head: 8cdde7392dba9270d83fbd468fff0d061a0e5b9c
+---
+ .../SessionList.directory-action.test.tsx     | 54 ++++++++++++++
+ web/src/components/SessionList.tsx            | 71 ++++++++++++-------
+ web/src/components/SessionRowSummary.test.tsx | 45 +++++++++++-
+ web/src/components/SessionRowSummary.tsx      | 15 ++--
+ web/src/router.tsx                            |  5 +-
+ 5 files changed, 157 insertions(+), 33 deletions(-)
+
+diff --git a/web/src/components/SessionList.directory-action.test.tsx b/web/src/components/SessionList.directory-action.test.tsx
+index c5aaa55f6..5b6810b47 100644
+--- a/web/src/components/SessionList.directory-action.test.tsx
++++ b/web/src/components/SessionList.directory-action.test.tsx
+@@ -266,6 +266,9 @@ describe('SessionList time filter', () => {
+             />
+         )
+ 
++        // Inactive groups start collapsed and do not mount their rows.
++        fireEvent.click(screen.getByTitle('/work/recent'))
++        fireEvent.click(screen.getByTitle('/work/old'))
+         expect(screen.getByRole('button', { name: /Recent session/ })).toBeInTheDocument()
+         expect(screen.getByRole('button', { name: /Old session/ })).toBeInTheDocument()
+ 
+@@ -429,6 +432,9 @@ describe('SessionList action menu parity', () => {
+             />
+         )
+ 
++        if (!active) {
++            fireEvent.click(screen.getByTitle('/home/ubuntu'))
++        }
+         fireEvent.contextMenu(screen.getByRole('button', { name: new RegExp(active ? 'Running session' : 'Closed session') }))
+         fireEvent.click(screen.getByRole('menuitem', { name: 'Export conversation' }))
+ 
+@@ -1263,6 +1269,53 @@ describe('SessionList collapse behavior', () => {
+         expect(screen.getByRole('button', { name: /Matching task 4/ })).toBeInTheDocument()
+     })
+ 
++    it('mounts collapsed group rows only while open or closing', () => {
++        const sessions = [makeSession({
++            id: 'session-closed',
++            updatedAt: 100,
++            metadata: { path: '/work/hapi', name: 'Closed task', flavor: 'codex' },
++        })]
++        render(renderSessionList(sessions, null))
++
++        const header = screen.getByTitle('/work/hapi')
++        expect(screen.queryByRole('button', { name: /Closed task/ })).toBeNull()
++
++        fireEvent.click(header)
++        const row = screen.getByRole('button', { name: /Closed task/ })
++
++        fireEvent.click(header)
++        expect(row).toBeInTheDocument()
++        const panel = row.closest('.collapsible-panel')!
++        fireEvent.transitionEnd(panel.querySelector('.collapsible-inner')!)
++        expect(row).toBeInTheDocument()
++        fireEvent.transitionEnd(panel)
++        expect(screen.queryByRole('button', { name: /Closed task/ })).toBeNull()
++    })
++
++    it('keeps a collapsing row mounted while its rename dialog is open', () => {
++        const sessions = [makeSession({
++            id: 'session-closed',
++            updatedAt: 100,
++            metadata: { path: '/work/hapi', name: 'Closed task', flavor: 'codex' },
++        })]
++        render(renderSessionList(sessions, null))
++
++        const header = screen.getByTitle('/work/hapi')
++        fireEvent.click(header)
++        fireEvent.contextMenu(screen.getByRole('button', { name: /Closed task/ }))
++        fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
++        expect(screen.getByRole('dialog', { name: 'Rename Session' })).toBeInTheDocument()
++
++        fireEvent.click(header)
++        const panel = document.querySelector('.collapsible-panel')!
++        fireEvent.transitionEnd(panel)
++        expect(screen.getByRole('dialog', { name: 'Rename Session' })).toBeInTheDocument()
++
++        fireEvent.keyDown(screen.getByRole('dialog', { name: 'Rename Session' }), { key: 'Escape' })
++        expect(screen.queryByRole('dialog', { name: 'Rename Session' })).toBeNull()
++        expect(screen.queryByRole('button', { name: /Closed task/ })).toBeNull()
++    })
++
+     it('expands and collapses the session preview one batch at a time', () => {
+         localStorage.setItem('hapi-session-preview-limit', '2')
+         const sessions = Array.from({ length: 6 }, (_, index) => makeSession({
+@@ -1276,6 +1329,7 @@ describe('SessionList collapse behavior', () => {
+         }))
+ 
+         render(renderSessionList(sessions, null))
++        fireEvent.click(screen.getByTitle('/work/hapi'))
+ 
+         expect(screen.getByRole('button', { name: 'Expand 2' })).toBeInTheDocument()
+         expect(screen.queryByRole('button', { name: 'Collapse 2' })).toBeNull()
+diff --git a/web/src/components/SessionList.tsx b/web/src/components/SessionList.tsx
+index 397c6404c..d715d12b9 100644
+--- a/web/src/components/SessionList.tsx
++++ b/web/src/components/SessionList.tsx
+@@ -1,4 +1,4 @@
+-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
++import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+ import * as Popover from '@radix-ui/react-popover'
+ import { SessionListScrollAnchor } from './SessionListScrollAnchor'
+ import type { SessionSummary } from '@/types/api'
+@@ -102,7 +102,6 @@ import {
+     useSessionReadReady
+ } from '@/lib/sessionLastSeen'
+ import { useSessionRowTooltipIds } from '@/components/HoverTooltip'
+-import { subscribeCodexImportedSessions } from '@/lib/codexImportedSessions'
+ import { formatReopenError } from '@/lib/reopenError'
+ import { resolveCursorReopenGate } from '@/lib/sessionResume'
+ import { getSessionTitle, hasSessionTitleSignal } from '@/lib/sessionTitle'
+@@ -1341,7 +1340,38 @@ export function SessionListSearch(props: {
+     )
+ }
+ 
+-function SessionItem(props: {
++// A row with an open menu or dialog holds its collapsed panel mounted.
++const CollapsiblePanelHoldContext = createContext<((held: boolean) => void) | null>(null)
++
++// Collapsed rows unmount after the close transition; mounted-but-hidden rows
++// would otherwise re-render on every session or machine update.
++function CollapsiblePanel(props: { open: boolean; children: ReactNode }) {
++    const [settled, setSettled] = useState(!props.open)
++    const [holds, setHolds] = useState(0)
++    const hold = useCallback((held: boolean) => setHolds((count) => count + (held ? 1 : -1)), [])
++    if (props.open && settled) {
++        setSettled(false)
++    }
++    return (
++        <div
++            className="collapsible-panel"
++            data-open={props.open || undefined}
++            onTransitionEnd={(event) => {
++                if (!props.open && event.target === event.currentTarget) {
++                    setSettled(true)
++                }
++            }}
++        >
++            <div className="collapsible-inner">
++                <CollapsiblePanelHoldContext.Provider value={hold}>
++                    {!settled || holds > 0 ? props.children : null}
++                </CollapsiblePanelHoldContext.Provider>
++            </div>
++        </div>
++    )
++}
++
++const SessionItem = memo(function SessionItem(props: {
+     session: SessionSummary
+     onSelect: (sessionId: string) => void
+     showPath?: boolean
+@@ -1410,6 +1440,13 @@ function SessionItem(props: {
+         s.metadata?.flavor ?? null
+     )
+     const [reopenError, setReopenError] = useState<string | null>(null)
++    const holdPanel = useContext(CollapsiblePanelHoldContext)
++    const overlayOpen = menuOpen || renameOpen || exportOpen || archiveOpen || deleteOpen || reopenError !== null
++    useEffect(() => {
++        if (!overlayOpen || !holdPanel) return
++        holdPanel(true)
++        return () => holdPanel(false)
++    }, [overlayOpen, holdPanel])
+ 
+     const handleSetPinMode = async (mode: 'none' | 'project' | 'global') => {
+         try {
+@@ -1593,7 +1630,7 @@ function SessionItem(props: {
+             ) : null}
+         </>
+     )
+-}
++})
+ 
+ type PullToRefreshState = 'idle' | 'pulling' | 'ready'
+ 
+@@ -1671,7 +1708,6 @@ export function SessionList(props: {
+     const [customStart, setCustomStart] = useState('')
+     const [customEnd, setCustomEnd] = useState('')
+     const [markAllReadOpen, setMarkAllReadOpen] = useState(false)
+-    const [, setCodexImportedSessionsVersion] = useState(0)
+     // Actions-box width is the real icon budget (#2039). Measuring the full
+     // row and subtracting a guessed search reserve left empty space after More.
+     const headerRowRef = useRef<HTMLDivElement>(null)
+@@ -1730,13 +1766,6 @@ export function SessionList(props: {
+     const timeRange = getSessionTimeRange(customStart, customEnd)
+     const isFiltering = normalizedQuery.length > 0 || timeRange !== null
+ 
+-    useEffect(() => {
+-        // 中文注释：监听导入标记变化，让列表在“导入完成”或“用户已在 Hapi 中继续会话”后立即刷新时间文案。
+-        return subscribeCodexImportedSessions(() => {
+-            setCodexImportedSessionsVersion((value) => value + 1)
+-        })
+-    }, [])
+-
+     const resolveMachineLabel = (machineId: string | null): string => {
+         if (machineId && machineLabelsById[machineId]) {
+             return machineLabelsById[machineId]
+@@ -2078,8 +2107,7 @@ export function SessionList(props: {
+                         ({count})
+                     </span>
+                 </div>
+-                <div className="collapsible-panel" data-open={(!collapsed || isFiltering) || undefined}>
+-                    <div className="collapsible-inner">
++                <CollapsiblePanel open={!collapsed || isFiltering}>
+                     <div className="flex flex-col gap-0.5 ml-3 pl-1 py-1">
+                         {bucketKeys.map((bucketKey) => {
+                             const bucket = RUNNING_BUCKETS.find((b) => b.key === bucketKey)
+@@ -2116,8 +2144,7 @@ export function SessionList(props: {
+                             )
+                         })}
+                     </div>
+-                    </div>
+-                </div>
++                </CollapsiblePanel>
+             </div>
+         )
+     }
+@@ -2177,8 +2204,7 @@ export function SessionList(props: {
+                 />
+ 
+                 {/* Sessions */}
+-                <div className="collapsible-panel" data-open={!isCollapsed || undefined}>
+-                    <div className="collapsible-inner">
++                <CollapsiblePanel open={!isCollapsed}>
+                     <div className="flex flex-col gap-0.5 ml-3 pl-1 py-1">
+                         {visibleGroupSessions.map((s, index) => (
+                             <div key={s.id} className="contents">
+@@ -2226,8 +2252,7 @@ export function SessionList(props: {
+                             </div>
+                         ) : null}
+                     </div>
+-                    </div>
+-                </div>
++                </CollapsiblePanel>
+             </div>
+         )
+     }
+@@ -2735,8 +2760,7 @@ export function SessionList(props: {
+                                 ({globalPinnedSessions.length})
+                             </span>
+                         </div>
+-                        <div className="collapsible-panel" data-open={(!pinnedSectionCollapsed || isFiltering) || undefined}>
+-                            <div className="collapsible-inner">
++                        <CollapsiblePanel open={!pinnedSectionCollapsed || isFiltering}>
+                                 <div className="flex flex-col gap-0.5 ml-3 pl-1 py-1">
+                                     {globalPinnedSessions.map((s) => (
+                                         <SessionItem
+@@ -2757,8 +2781,7 @@ export function SessionList(props: {
+                                         />
+                                     ))}
+                                 </div>
+-                            </div>
+-                        </div>
++                        </CollapsiblePanel>
+                     </div>
+                 ) : null}
+ 
+diff --git a/web/src/components/SessionRowSummary.test.tsx b/web/src/components/SessionRowSummary.test.tsx
+index a936cbd35..34072eff7 100644
+--- a/web/src/components/SessionRowSummary.test.tsx
++++ b/web/src/components/SessionRowSummary.test.tsx
+@@ -1,7 +1,8 @@
+-import { cleanup, render, screen } from '@testing-library/react'
+-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
++import { act, cleanup, render, screen } from '@testing-library/react'
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+ import type { SessionSummary } from '@/types/api'
+ import { I18nProvider } from '@/lib/i18n-context'
++import { markCodexSessionsImported } from '@/lib/codexImportedSessions'
+ import { SessionRowSummary } from './SessionRowSummary'
+ 
+ afterEach(() => cleanup())
+@@ -240,3 +241,43 @@ describe('SessionRowSummary keepalive-idle (tiann/hapi#1820)', () => {
+         expect(title.parentElement!.parentElement!.className).not.toContain('opacity-75')
+     })
+ })
++
++describe('SessionRowSummary time label', () => {
++    beforeEach(() => {
++        localStorage.clear()
++    })
++
++    afterEach(() => {
++        vi.useRealTimers()
++    })
++
++    it('advances the relative time without a parent render', () => {
++        vi.useFakeTimers()
++        vi.setSystemTime(1_800_000_000_000)
++        render(
++            <I18nProvider>
++                <SessionRowSummary session={makeSummary({ updatedAt: 1_800_000_000_000, backgroundTaskCount: 0 })} />
++            </I18nProvider>
++        )
++        expect(screen.getByText('just now')).toBeInTheDocument()
++
++        act(() => { vi.advanceTimersByTime(2 * 60_000) })
++        expect(screen.getByText('2m ago')).toBeInTheDocument()
++    })
++
++    it('shows a Codex import marker set after the first render', () => {
++        render(
++            <I18nProvider>
++                <SessionRowSummary session={makeSummary({
++                    updatedAt: Date.now() - 3 * 60 * 60_000,
++                    backgroundTaskCount: 0,
++                    metadata: { path: '/demo', name: 'Imported', flavor: 'codex', agentSessionId: 'codex-thread' },
++                })} />
++            </I18nProvider>
++        )
++        expect(screen.queryByText('just imported from Codex')).toBeNull()
++
++        act(() => { markCodexSessionsImported(['codex-thread']) })
++        expect(screen.getByText('just imported from Codex')).toBeInTheDocument()
++    })
++})
+diff --git a/web/src/components/SessionRowSummary.tsx b/web/src/components/SessionRowSummary.tsx
+index 0a79d4b33..fb829dfde 100644
+--- a/web/src/components/SessionRowSummary.tsx
++++ b/web/src/components/SessionRowSummary.tsx
+@@ -1,4 +1,4 @@
+-import { useMemo } from 'react'
++import { useMemo, useSyncExternalStore } from 'react'
+ import type { SessionSummary } from '@/types/api'
+ import { AgentFlavorIcon } from '@/components/AgentFlavorIcon'
+ import { ScheduleIcon } from '@/components/icons'
+@@ -8,7 +8,8 @@ import { classifySessionAttention } from '@/lib/sessionAttention'
+ import { getSessionLastSeenAt, getSessionManualUnreadAt } from '@/lib/sessionLastSeen'
+ import { formatRelativeTime } from '@/lib/relativeTime'
+ import { formatScheduledTooltipDetail } from '@/lib/scheduledTime'
+-import { getCodexImportedAt } from '@/lib/codexImportedSessions'
++import { getCodexImportedAt, subscribeCodexImportedSessions } from '@/lib/codexImportedSessions'
++import { useMinuteTick } from '@/hooks/useMinuteTick'
+ import { getSessionTitle } from '@/lib/sessionTitle'
+ import { useTranslation } from '@/lib/use-translation'
+ import { getWorktreeSessionLabel } from '@/lib/sessionWorktreeLabel'
+@@ -67,11 +68,9 @@ function formatCodexImportedRelativeTime(
+ 
+ function getSessionTimeLabel(
+     session: SessionSummary,
++    importedAt: number | null,
+     t: (key: string, params?: Record<string, string | number>) => string
+ ): string | null {
+-    const importedAt = session.metadata?.flavor === 'codex'
+-        ? getCodexImportedAt(session.metadata?.agentSessionId)
+-        : null
+     if (importedAt !== null) {
+         return formatCodexImportedRelativeTime(importedAt, t)
+     }
+@@ -150,7 +149,11 @@ export function SessionRowSummary(props: {
+     )
+     const attentionId = attentionTooltipIdProp ?? ownedIds.attentionId
+     const scheduleId = scheduleTooltipIdProp ?? ownedIds.scheduleId
+-    const timeLabel = getSessionTimeLabel(s, t)
++    // Rows are memoized, so the label keeps itself current.
++    useMinuteTick()
++    const codexSessionId = s.metadata?.flavor === 'codex' ? s.metadata?.agentSessionId : null
++    const importedAt = useSyncExternalStore(subscribeCodexImportedSessions, () => getCodexImportedAt(codexSessionId))
++    const timeLabel = getSessionTimeLabel(s, importedAt, t)
+ 
+     return (
+         <div className={`flex w-full min-w-0 flex-col gap-1 ${className ?? ''}`}>
+diff --git a/web/src/router.tsx b/web/src/router.tsx
+index 1749563f3..d4c3a2d69 100644
+--- a/web/src/router.tsx
++++ b/web/src/router.tsx
+@@ -193,6 +193,9 @@ function SessionsPage() {
+     useSelectedSessionSeen(selectedSessionId, selectedSession?.updatedAt)
+     const isSessionsIndex = pathname === '/sessions' || pathname === '/sessions/'
+     const sidebar = useSidebarResize()
++    const handleSelectSession = useCallback((sessionId: string) => {
++        navigate(getSessionListSelectionNavigation(sessionId))
++    }, [navigate])
+     const handleNewSessionInDirectory = useCallback((args: { machineId: string | null; directory: string }) => {
+         navigate({
+             to: '/sessions/new',
+@@ -223,7 +226,7 @@ function SessionsPage() {
+                         key={initializedHub === baseUrl ? 'last-seen-ready' : 'last-seen-pending'}
+                         sessions={sessions}
+                         selectedSessionId={selectedSessionId}
+-                        onSelect={(sessionId) => navigate(getSessionListSelectionNavigation(sessionId))}
++                        onSelect={handleSelectSession}
+                         onNewSession={() => navigate({
+                             to: '/sessions/new',
+                             ...PRESERVE_SESSION_SIDEBAR_SCROLL,

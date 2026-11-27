@@ -1,0 +1,336 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Mon, 19 Oct 2026 15:37:17 +0000
+Subject: [PATCH 31/94] carry(upstream): PR #1955 fix(web): allow retrying
+ failed abort requests
+
+Upstream-head: 58faa21e6420662ec8a306944b3aafd562992385
+---
+ .github/workflows/test.yml                    |  2 +-
+ e2e/abort-retry.spec.ts                       | 79 +++++++++++++++++++
+ web/e2e-fixtures/abort-retry-fixture.html     | 12 +++
+ web/e2e-fixtures/abort-retry-fixture.tsx      | 61 ++++++++++++++
+ .../AssistantChat/HappyComposer.tsx           | 16 ++++
+ web/src/components/SessionChat.tsx            | 12 ++-
+ web/src/hooks/mutations/useSessionActions.ts  |  4 +
+ web/src/lib/locales/en.ts                     |  1 +
+ web/src/lib/locales/zh-CN.ts                  |  1 +
+ 9 files changed, 185 insertions(+), 3 deletions(-)
+ create mode 100644 e2e/abort-retry.spec.ts
+ create mode 100644 web/e2e-fixtures/abort-retry-fixture.html
+ create mode 100644 web/e2e-fixtures/abort-retry-fixture.tsx
+
+diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
+index 820d93a09..b359f2cfc 100644
+--- a/.github/workflows/test.yml
++++ b/.github/workflows/test.yml
+@@ -18,7 +18,7 @@ jobs:
+             # Required by cli/src/utils/windowsProcessTree.pwsh.test.ts — image
+             # inspect alone does not pull; silent skip was fake B1 coverage (#1911).
+             - run: docker pull mcr.microsoft.com/powershell:latest
+-            - run: bun run test:e2e -- terminal-wrap-fidelity.spec.ts composer-copy.spec.ts session-list-scroll.spec.ts cold-initial-tail.spec.ts scrollbar-auto-hide.spec.ts attachment-removal.spec.ts
++            - run: bun run test:e2e -- terminal-wrap-fidelity.spec.ts composer-copy.spec.ts session-list-scroll.spec.ts cold-initial-tail.spec.ts scrollbar-auto-hide.spec.ts attachment-removal.spec.ts abort-retry.spec.ts
+             - run: bun run test
+ 
+     # Serial runner-integration suite: starts real detached runner/session
+diff --git a/e2e/abort-retry.spec.ts b/e2e/abort-retry.spec.ts
+new file mode 100644
+index 000000000..67b4cc48f
+--- /dev/null
++++ b/e2e/abort-retry.spec.ts
+@@ -0,0 +1,79 @@
++import { expect, test } from '@playwright/test'
++
++for (const width of [390, 1280]) {
++    test(`failed stop can be retried without losing the draft (${width}px)`, async ({ page }) => {
++        await page.setViewportSize({ width, height: 844 })
++        const errors: string[] = []
++        page.on('pageerror', error => errors.push(error.message))
++        let attempts = 0
++        let release: (() => void) | undefined
++        await page.route('**/api/sessions/abort-retry-fixture/abort', async route => {
++            expect(route.request().method()).toBe('POST')
++            attempts += 1
++            await new Promise<void>(resolve => { release = resolve })
++            await route.fulfill({
++                status: attempts <= 2 ? 503 : 200,
++                contentType: 'application/json',
++                body: JSON.stringify(attempts <= 2 ? { error: 'Temporary stop failure' } : { ok: true }),
++            })
++        })
++        await page.goto('/e2e-fixtures/abort-retry-fixture.html')
++        const stop = page.getByRole('button', { name: 'Abort', exact: true })
++        await expect(stop).toBeEnabled()
++        const draft = page.locator('[data-testid="rich-composer-input"], textarea').first()
++        await draft.fill('Keep this unsent draft')
++
++        // Repeated failures must each enable an explicit retry. There must be
++        // no automatic retry, duplicate stop request, or swallowed UI error.
++        for (let attempt = 1; attempt <= 2; attempt += 1) {
++            await stop.click()
++            await expect.poll(() => attempts).toBe(attempt)
++            await expect(stop).toBeDisabled()
++            release!()
++            await expect(stop).toBeEnabled()
++            await expect(page.getByRole('alert')).toContainText('Could not stop the turn. Try again.')
++            expect(attempts).toBe(attempt)
++        }
++
++        await stop.click()
++        await expect.poll(() => attempts).toBe(3)
++        await expect(page.getByRole('alert')).toHaveCount(0)
++        await expect(stop).toBeDisabled()
++        const success = page.waitForResponse(response => response.url().endsWith('/api/sessions/abort-retry-fixture/abort'))
++        release!()
++        expect((await success).status()).toBe(200)
++        // An HTTP success is not the turn-completed event: keep stop pending
++        // until the runtime receives the agent's stopped state.
++        await expect(stop).toBeDisabled()
++        await page.getByRole('button', { name: 'Receive turn completion' }).click()
++        await expect(stop).toBeDisabled()
++        if (await draft.evaluate(el => el instanceof HTMLTextAreaElement)) {
++            await expect(draft).toHaveValue('Keep this unsent draft')
++        } else {
++            await expect(draft).toHaveText('Keep this unsent draft')
++        }
++        expect(attempts).toBe(3)
++        expect(errors).toEqual([])
++    })
++
++    test(`a failed stop error clears when the turn ends on its own (${width}px)`, async ({ page }) => {
++        await page.setViewportSize({ width, height: 844 })
++        await page.route('**/api/sessions/abort-retry-fixture/abort', route => route.fulfill({
++            status: 503,
++            contentType: 'application/json',
++            body: JSON.stringify({ error: 'Temporary stop failure' }),
++        }))
++        await page.goto('/e2e-fixtures/abort-retry-fixture.html')
++        const stop = page.getByRole('button', { name: 'Abort', exact: true })
++        await stop.click()
++        await expect(page.getByRole('alert')).toContainText('Could not stop the turn.')
++        await expect(stop).toBeEnabled()
++        await page.getByRole('button', { name: 'Receive turn completion' }).click()
++        await expect(page.getByRole('alert')).toHaveCount(0)
++        await expect(stop).toBeDisabled()
++        await page.getByRole('button', { name: 'Receive next turn' }).click()
++        await expect(stop).toBeEnabled()
++        await expect(page.getByRole('alert')).toHaveCount(0)
++    })
++
++}
+diff --git a/web/e2e-fixtures/abort-retry-fixture.html b/web/e2e-fixtures/abort-retry-fixture.html
+new file mode 100644
+index 000000000..9223d9df9
+--- /dev/null
++++ b/web/e2e-fixtures/abort-retry-fixture.html
+@@ -0,0 +1,12 @@
++<!doctype html>
++<html lang="en">
++    <head>
++        <meta charset="UTF-8" />
++        <meta name="viewport" content="width=device-width, initial-scale=1" />
++        <title>Abort retry fixture</title>
++    </head>
++    <body>
++        <div id="root"></div>
++        <script type="module" src="./abort-retry-fixture.tsx"></script>
++    </body>
++</html>
+diff --git a/web/e2e-fixtures/abort-retry-fixture.tsx b/web/e2e-fixtures/abort-retry-fixture.tsx
+new file mode 100644
+index 000000000..3cf9faf21
+--- /dev/null
++++ b/web/e2e-fixtures/abort-retry-fixture.tsx
+@@ -0,0 +1,61 @@
++import { useState } from 'react'
++import ReactDOM from 'react-dom/client'
++import { AssistantRuntimeProvider } from '@assistant-ui/react'
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
++import '../src/index.css'
++import { ApiClient } from '../src/api/client'
++import type { Session } from '../src/types/api'
++import { I18nProvider } from '../src/lib/i18n-context'
++import { useHappyRuntime } from '../src/lib/assistant-runtime'
++import { useSessionActions } from '../src/hooks/mutations/useSessionActions'
++import { HappyComposer } from '../src/components/AssistantChat/HappyComposer'
++
++// Real composer, assistant-ui runtime, mutation hook, and HTTP client. Only
++// this synthetic session's abort endpoint is intercepted by the browser test.
++const api = new ApiClient('abort-retry-fixture')
++const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } })
++
++function Harness() {
++    const [running, setRunning] = useState(true)
++    const session = { id: 'abort-retry-fixture', active: true, thinking: running } as Session
++    const { abortSession, abortError, clearAbortError } = useSessionActions(api, session.id, 'codex')
++    const runtime = useHappyRuntime({
++        session,
++        blocks: [],
++        messagesVersion: 0,
++        historyVersion: 0,
++        isSending: false,
++        isRunning: running,
++        onSendMessage: () => {},
++        onAbort: async () => {
++            try {
++                await abortSession()
++            } catch {
++                // Same error ownership as SessionChat: mutation -> composer.
++            }
++        },
++    })
++    return (
++        <main style={{ maxWidth: 680, margin: '24px auto', padding: 12 }}>
++            <p>Keep the agent running while the stop request fails.</p>
++            <button onClick={() => setRunning(false)}>Receive turn completion</button>
++            <button onClick={() => setRunning(true)}>Receive next turn</button>
++            <AssistantRuntimeProvider runtime={runtime}>
++                <HappyComposer
++                    sessionId={session.id}
++                    active
++                    thinking={running}
++                    abortError={abortError}
++                    onClearAbortError={clearAbortError}
++                    agentFlavor="codex"
++                />
++            </AssistantRuntimeProvider>
++        </main>
++    )
++}
++
++ReactDOM.createRoot(document.getElementById('root')!).render(
++    <QueryClientProvider client={queryClient}>
++        <I18nProvider><Harness /></I18nProvider>
++    </QueryClientProvider>,
++)
+diff --git a/web/src/components/AssistantChat/HappyComposer.tsx b/web/src/components/AssistantChat/HappyComposer.tsx
+index 8d5ed500f..178db0c7f 100644
+--- a/web/src/components/AssistantChat/HappyComposer.tsx
++++ b/web/src/components/AssistantChat/HappyComposer.tsx
+@@ -333,6 +333,8 @@ export function HappyComposer(props: {
+     active?: boolean
+     allowSendWhenInactive?: boolean
+     thinking?: boolean
++    abortError?: Error | null
++    onClearAbortError?: () => void
+     agentState?: AgentState | null
+     backgroundTaskCount?: number
+     contextSize?: number
+@@ -496,6 +498,8 @@ export function HappyComposer(props: {
+         onSchedule: onScheduleProp,
+         onClearSchedule: onClearScheduleProp,
+         sendError = null,
++        abortError = null,
++        onClearAbortError,
+         onClearSendError,
+         onSuppressSendErrorRestore,
+         pendingSendIntentRef,
+@@ -1048,6 +1052,12 @@ export function HappyComposer(props: {
+         api.thread().cancelRun()
+     }, [abortDisabled, api, haptic])
+ 
++    useEffect(() => {
++        if (!abortError) return
++        setIsAborting(false)
++        if (!threadIsRunning) onClearAbortError?.()
++    }, [abortError, threadIsRunning, onClearAbortError])
++
+     const handleSwitch = useCallback(async () => {
+         if (switchDisabled || !onSwitchToRemote) return
+         haptic('light')
+@@ -2342,6 +2352,12 @@ export function HappyComposer(props: {
+                         </div>
+                     ) : null}
+ 
++                    {abortError && threadIsRunning ? (
++                        <div role="alert" className="mb-2 rounded-md bg-[var(--app-subtle-bg)] px-3 py-2 text-sm text-red-600">
++                            {t('composer.abortFailed')} {abortError.message}
++                        </div>
++                    ) : null}
++
+                     {sendError ? (
+                         <div
+                             role="alert"
+diff --git a/web/src/components/SessionChat.tsx b/web/src/components/SessionChat.tsx
+index d3b52db7f..208fa9b43 100644
+--- a/web/src/components/SessionChat.tsx
++++ b/web/src/components/SessionChat.tsx
+@@ -1276,6 +1276,8 @@ function SessionChatInner(props: SessionChatProps) {
+     ), [agentFlavor, cursorModelEffortOptions, props.session.model])
+     const {
+         abortSession,
++        abortError,
++        clearAbortError,
+         switchSession,
+         setPermissionMode,
+         setCollaborationMode,
+@@ -1713,8 +1715,12 @@ function SessionChatInner(props: SessionChatProps) {
+ 
+     // Abort handler
+     const handleAbort = useCallback(async () => {
+-        await abortSession()
+-        props.onRefresh()
++        try {
++            await abortSession()
++            props.onRefresh()
++        } catch {
++            // The mutation error is shown by the composer, which enables retry.
++        }
+     }, [abortSession, props.onRefresh])
+ 
+     // Switch to remote handler
+@@ -2148,6 +2154,8 @@ function SessionChatInner(props: SessionChatProps) {
+                         onVoiceSessionResolved={props.onVoiceSessionResolved}
+                         onResumeStoredDraft={() => handleSend('', undefined, null)}
+                         thinking={props.session.thinking}
++                        abortError={abortError}
++                        onClearAbortError={clearAbortError}
+                         agentState={props.session.agentState}
+                         backgroundTaskCount={props.session.backgroundTaskCount}
+                         contextSize={reduced.latestUsage?.contextSize}
+diff --git a/web/src/hooks/mutations/useSessionActions.ts b/web/src/hooks/mutations/useSessionActions.ts
+index 4c9ce03b7..b48a5e814 100644
+--- a/web/src/hooks/mutations/useSessionActions.ts
++++ b/web/src/hooks/mutations/useSessionActions.ts
+@@ -16,6 +16,8 @@ export function useSessionActions(
+     codexCollaborationModeSupported?: boolean
+ ): {
+     abortSession: () => Promise<void>
++    abortError: Error | null
++    clearAbortError: () => void
+     archiveSession: () => Promise<void>
+     reopenSession: () => Promise<ReopenSessionResponse>
+     switchSession: () => Promise<void>
+@@ -282,6 +284,8 @@ export function useSessionActions(
+ 
+     return {
+         abortSession: abortMutation.mutateAsync,
++        abortError: abortMutation.error,
++        clearAbortError: abortMutation.reset,
+         archiveSession: archiveMutation.mutateAsync,
+         reopenSession: reopenMutation.mutateAsync,
+         switchSession: switchMutation.mutateAsync,
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index 14280f404..11763ef73 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -655,6 +655,7 @@ export default {
+   'composer.settings': 'Settings',
+   'composer.terminal': 'Terminal',
+   'composer.abort': 'Abort',
++  'composer.abortFailed': 'Could not stop the turn. Try again.',
+   'composer.switchRemote': 'Switch to remote mode',
+   'composer.attach': 'Attach file',
+   'composer.expand': 'Expand message editor',
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index debf50114..0011ef6d3 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -653,6 +653,7 @@ export default {
+   'composer.settings': '设置',
+   'composer.terminal': '终端',
+   'composer.abort': '中止',
++  'composer.abortFailed': '停止失败，请重试。',
+   'composer.switchRemote': '切换到远程模式',
+   'composer.attach': '添加文件',
+   'composer.expand': '展开消息编辑器',

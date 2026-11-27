@@ -1,0 +1,1198 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 14 Nov 2026 01:39:23 +0800
+Subject: [PATCH 12/29] carry(upstream): PR #1849
+
+---
+ cli/src/agent/sessionFactory.test.ts          |  16 +
+ cli/src/agent/sessionFactory.ts               |   5 +
+ cli/src/codex/shared/projection.title.test.ts |  25 ++
+ cli/src/codex/shared/projection.ts            |   5 +-
+ cli/src/codex/shared/runtime.ts               |   8 +-
+ hub/README.md                                 |  13 +-
+ .../handlers/cli/sessionHandlers.test.ts      |   9 +-
+ .../socket/handlers/cli/sessionHandlers.ts    |   2 +
+ hub/src/store/sessions.test.ts                |   6 +-
+ hub/src/store/sessions.ts                     |   2 +
+ hub/src/sync/archivedFork.test.ts             |  33 +-
+ hub/src/sync/automaticTitleSuggestion.test.ts |  14 +
+ hub/src/sync/automaticTitleSuggestion.ts      |   4 +-
+ hub/src/sync/forkTitleGeneration.test.ts      | 325 ++++++++++++++++++
+ hub/src/sync/sessionCache.ts                  |  67 +++-
+ hub/src/sync/syncEngine.ts                    |  61 +++-
+ shared/src/schemas.ts                         |   4 +
+ web/e2e/fork-title-session.spec.ts            | 230 +++++++++++++
+ web/playwright.live.config.ts                 |   1 +
+ 19 files changed, 810 insertions(+), 20 deletions(-)
+ create mode 100644 hub/src/sync/forkTitleGeneration.test.ts
+ create mode 100644 web/e2e/fork-title-session.spec.ts
+
+diff --git a/cli/src/agent/sessionFactory.test.ts b/cli/src/agent/sessionFactory.test.ts
+index 027f0bffa..f0917b8d9 100644
+--- a/cli/src/agent/sessionFactory.test.ts
++++ b/cli/src/agent/sessionFactory.test.ts
+@@ -99,6 +99,22 @@ function createSession(): Session {
+ }
+ 
+ describe('bootstrapExistingSession', () => {
++    it.each(['claude', 'grok', 'pi'])('preserves fork title ownership through %s bootstrap', async flavor => {
++        const session = createSession()
++        const seed = { text: 'Fork: Current parent title', updatedAt: 123 }
++        session.metadata = { ...session.metadata!, flavor, forkedFrom: 'parent', summary: seed,
++            forkTitleSeed: seed, titleLocked: true, forkTitleGenerationAttemptedAt: 456 }
++        const client = { updateMetadata: vi.fn() }
++        getSessionMock.mockResolvedValue(session)
++        getOrCreateMachineMock.mockResolvedValue({ id: 'machine-1' })
++        sessionSyncClientMock.mockReturnValue(client)
++        readSettingsMock.mockResolvedValue({ machineId: 'machine-1' })
++        const result = await bootstrapExistingSession({ sessionId: session.id, flavor, workingDirectory: '/tmp/project' })
++        const expected = { forkedFrom: 'parent', summary: seed, forkTitleSeed: seed, titleLocked: true,
++            forkTitleGenerationAttemptedAt: 456 }
++        expect(result.metadata).toMatchObject(expected)
++        expect(client.updateMetadata.mock.calls[0][0](session.metadata)).toMatchObject(expected)
++    })
+     beforeEach(() => {
+         getSessionMock.mockReset()
+         getOrCreateSessionMock.mockReset()
+diff --git a/cli/src/agent/sessionFactory.ts b/cli/src/agent/sessionFactory.ts
+index e6da974da..cab1a4c7e 100644
+--- a/cli/src/agent/sessionFactory.ts
++++ b/cli/src/agent/sessionFactory.ts
+@@ -159,6 +159,11 @@ function pickExistingSessionMetadata(metadata: Metadata | null | undefined): Par
+     if (metadata.name !== undefined) preserved.name = metadata.name
+     if (metadata.summary !== undefined) preserved.summary = metadata.summary
+     if (metadata.acpManualTitle !== undefined) preserved.acpManualTitle = metadata.acpManualTitle
++    if (metadata.forkTitleSeed !== undefined) preserved.forkTitleSeed = metadata.forkTitleSeed
++    if (metadata.titleLocked !== undefined) preserved.titleLocked = metadata.titleLocked
++    if (metadata.forkTitleGenerationAttemptedAt !== undefined) {
++        preserved.forkTitleGenerationAttemptedAt = metadata.forkTitleGenerationAttemptedAt
++    }
+     if (metadata.claudeSessionId !== undefined) preserved.claudeSessionId = metadata.claudeSessionId
+     if (metadata.claudeSessionIdHistory !== undefined) preserved.claudeSessionIdHistory = metadata.claudeSessionIdHistory
+     if (metadata.codexSessionId !== undefined) preserved.codexSessionId = metadata.codexSessionId
+diff --git a/cli/src/codex/shared/projection.title.test.ts b/cli/src/codex/shared/projection.title.test.ts
+index a106b80ee..2d7051e23 100644
+--- a/cli/src/codex/shared/projection.title.test.ts
++++ b/cli/src/codex/shared/projection.title.test.ts
+@@ -39,6 +39,31 @@ describe('shared Codex titles', () => {
+         expect(f.metadata()).toMatchObject({ name: 'Manual name', titleLocked: true })
+     })
+ 
++    it('never restores inherited title tools onto a fork, while a new live rename still works', async () => {
++        const f = fixture();
++        f.update(metadata => ({ ...metadata, name: undefined, forkedFrom: 'parent' }));
++        await f.projection.history(history(titleItem('inherited', 'Old parent title')));
++        expect(f.metadata().name).toBeUndefined();
++        await f.projection.notification('item/completed', params(titleItem('new', 'New child title'), 'new-turn'));
++        expect(f.metadata().name).toBe('New child title');
++    });
++
++    it('protects a fork title lock from a new live rename', async () => {
++        const f = fixture();
++        f.update(metadata => ({ ...metadata, name: undefined, forkedFrom: 'parent', titleLocked: true,
++            summary: { text: 'Fork: Current title', updatedAt: 1 } }));
++        await f.projection.notification('item/completed', params(titleItem('new', 'Unexpected')));
++        expect(f.metadata().name).toBeUndefined();
++        expect(f.metadata().summary?.text).toBe('Fork: Current title');
++    });
++
++    it('rechecks fork ownership when a cold replay metadata write was queued', async () => {
++        const f = fixture(undefined, true);
++        f.update(metadata => ({ ...metadata, name: undefined })); f.flush();
++        await f.projection.history(history(titleItem('old', 'Old parent title')));
++        const rename = f.update.mock.calls.at(-1)![0];
++        expect(rename({ path: '/repo', host: 'test', forkedFrom: 'parent' }).name).toBeUndefined();
++    });
+     it('renames via metadata.name so a spawn name does not hide change_title', async () => {
+         const f = fixture();
+         const item = titleItem('title', ' Remote title ');
+diff --git a/cli/src/codex/shared/projection.ts b/cli/src/codex/shared/projection.ts
+index d92e9cd1a..a44bdcb17 100644
+--- a/cli/src/codex/shared/projection.ts
++++ b/cli/src/codex/shared/projection.ts
+@@ -355,10 +355,11 @@ export class SharedCodexProjection {
+         // Repair sessions created while remote title projection was missing.
+         // Recheck inside the metadata lock: live updates may still be queued,
+         // and a replay must never replace an existing or newer display title.
+-        if (latestTitle && titleRevision === this.titleRevision && !metadataHasDisplayTitle(this.session.getMetadata())) {
++        if (latestTitle && titleRevision === this.titleRevision && !this.session.getMetadata()?.forkedFrom
++            && !metadataHasDisplayTitle(this.session.getMetadata())) {
+             const title = latestTitle;
+             this.session.updateMetadata(metadata => {
+-                if (titleRevision !== this.titleRevision || metadataHasDisplayTitle(metadata)) {
++                if (titleRevision !== this.titleRevision || metadata.forkedFrom || metadataHasDisplayTitle(metadata)) {
+                     return metadata;
+                 }
+                 const normalized = normalizeSessionDisplayTitle(title);
+diff --git a/cli/src/codex/shared/runtime.ts b/cli/src/codex/shared/runtime.ts
+index bde583a46..c59c889f7 100644
+--- a/cli/src/codex/shared/runtime.ts
++++ b/cli/src/codex/shared/runtime.ts
+@@ -5,6 +5,7 @@ import { join } from 'node:path';
+ import { tmpdir } from 'node:os';
+ import { randomUUID, randomBytes, createHash } from 'node:crypto';
+ import { configuration } from '@/configuration';
++import { buildForkSessionSummary } from '@hapi/protocol';
+ import { bootstrapSession, bootstrapExistingSession } from '@/agent/sessionFactory';
+ import { notifyRunnerSessionStarted } from '@/runner/controlClient';
+ import { getProcessStartMarker, killProcessByChildProcess } from '@/utils/process';
+@@ -14,7 +15,6 @@ import { codexHome, saveRuntime, runtimeDirectory, runtimeAuthHash, findColdBind
+ import { startCodexGateway, record, string, type Envelope } from './gateway';
+ import { resolveSharedCodex, sharedLaunchConfig, initializeSharedClient, checkSharedCapabilities, takeReservedSessionId, type SharedLaunchOptions } from './launch';
+ import { SharedCodexRoot } from './root';
+-import { buildForkSessionSummary } from '@hapi/protocol';
+ 
+ export type RuntimeReady = { sessionId: string; runtime: CodexRuntimeRecord };
+ type Reservation = { root: SharedCodexRoot; resumeId?: string };
+@@ -175,7 +175,7 @@ export async function runSharedRuntime(options: SharedLaunchOptions, onReady?: (
+         const forkSummary = parent ? buildForkSessionSummary(parent.session.getMetadata()) : undefined;
+         const shared = { flavor: 'codex', startedBy: options.startedBy ?? 'terminal', workingDirectory: cwd,
+             exportSessionEnv: false, reportStarted: false, metadataOverrides: {
+-                ...(forkSummary ? { summary: forkSummary } : {}),
++                ...(forkSummary ? { summary: forkSummary, forkTitleSeed: forkSummary } : {}),
+                 capabilities: {
+                     terminal: true,
+                     concurrentClients: true,
+@@ -237,7 +237,9 @@ export async function runSharedRuntime(options: SharedLaunchOptions, onReady?: (
+         // new-thread subscription. Subscribe once without changing settings.
+         await control.request('thread/resume', { threadId, excludeTurns: true });
+         await root.activate(initialOptions);
+-        await root.session.flush();
++        // Notify only after fork metadata and replayed transcript are durable.
++        // Native terminal /fork does not pass through the Hub's REST fork path.
++        if (await root.session.flush()) root.session.emitSessionReady();
+         await persist();
+         // The hub's view of the metadata is what the hub kept of it: a hub
+         // without the field strips hostStartMarker, and the runner ignores an
+diff --git a/hub/README.md b/hub/README.md
+index c5459d8b5..9e492dcd9 100644
+--- a/hub/README.md
++++ b/hub/README.md
+@@ -47,10 +47,17 @@ turn when the session has no manual name or existing summary. Automatic
+ failures are silent and never block the agent conversation. The manual
+ **Generate** action remains available.
+ 
++For forked sessions, the child immediately shows `Fork: <source title>` and
++the Hub uses the same provider on the completed fork snapshot without waiting
++for another turn. Missing configuration or provider failure keeps the initial
++title. An explicit rename, title edit, or title lock made during generation wins
++over the pending result. Inherited Codex title-tool history does not rename a
++fork; new live rename calls still work.
++
+ Configure `HAPI_TITLE_PROVIDER_BASE_URL`, `HAPI_TITLE_PROVIDER_API_KEY`, and
+-`HAPI_TITLE_PROVIDER_MODEL` on the Hub. The attempt is persisted across restarts;
+-manual or Agent titles arriving during generation are preserved. No automatic
+-request is made without a configured provider.
++`HAPI_TITLE_PROVIDER_MODEL` on the Hub. The automatic first-turn attempt and the
++fork attempt are persisted across restarts. No automatic request is made
++without a configured provider.
+ 
+ ### Optional
+ 
+diff --git a/hub/src/socket/handlers/cli/sessionHandlers.test.ts b/hub/src/socket/handlers/cli/sessionHandlers.test.ts
+index 13f7dc7fd..af8f068e5 100644
+--- a/hub/src/socket/handlers/cli/sessionHandlers.test.ts
++++ b/hub/src/socket/handlers/cli/sessionHandlers.test.ts
+@@ -502,6 +502,8 @@ describe('cli session handlers', () => {
+         ['jobsAcceptedFromSessionIds', ['foreign-session']],
+         ['jobsTransferredToSessionId', 'foreign-session'],
+         ['jobKeyRedirects', { 'foreign-session/beets': 'beets.foreign' }],
++        ['forkTitleSeed', { text: 'Fork: forged', updatedAt: 1 }],
++        ['forkTitleGenerationAttemptedAt', 1234],
+     ] as const)(
+         'ignores a forged hub-owned %s addition from CLI metadata',
+         (field, forged) => {
+@@ -569,6 +571,8 @@ describe('cli session handlers', () => {
+             path: '/tmp/project',
+             titleSuggestionAutoAttemptedAt: 1234,
+             titleSuggestionTurn: { first: true, completed: false },
++            forkTitleSeed: { text: 'Fork: Parent', updatedAt: 1234 },
++            forkTitleGenerationAttemptedAt: 5678,
+             promptTitle: 'Fix the login bug'
+         }, null, 'default')
+         const socket = new FakeSocket()
+@@ -581,12 +585,15 @@ describe('cli session handlers', () => {
+         socket.trigger('update-metadata', {
+             sid: session.id,
+             expectedVersion: session.metadataVersion,
+-            metadata: { path: '/tmp/project', titleSuggestionAutoAttemptedAt: 9999, titleSuggestionTurn: { first: false, completed: true } }
++            metadata: { path: '/tmp/project', titleSuggestionAutoAttemptedAt: 9999, titleSuggestionTurn: { first: false, completed: true },
++                forkTitleSeed: { text: 'Fork: forged', updatedAt: 9999 }, forkTitleGenerationAttemptedAt: 9999 }
+         }, () => {})
+ 
+         expect(store.sessions.getSessionByNamespace(session.id, 'default')?.metadata).toMatchObject({
+             titleSuggestionAutoAttemptedAt: 1234,
+             titleSuggestionTurn: { first: true, completed: false },
++            forkTitleSeed: { text: 'Fork: Parent', updatedAt: 1234 },
++            forkTitleGenerationAttemptedAt: 5678,
+             promptTitle: 'Fix the login bug'
+         })
+     })
+diff --git a/hub/src/socket/handlers/cli/sessionHandlers.ts b/hub/src/socket/handlers/cli/sessionHandlers.ts
+index 5eb806055..15182362b 100644
+--- a/hub/src/socket/handlers/cli/sessionHandlers.ts
++++ b/hub/src/socket/handlers/cli/sessionHandlers.ts
+@@ -75,6 +75,8 @@ const HUB_OWNED_METADATA_KEYS = [
+     'opencodeClearOperation',
+     'titleSuggestionAutoAttemptedAt',
+     'titleSuggestionTurn',
++    'forkTitleSeed',
++    'forkTitleGenerationAttemptedAt',
+     'jobsAcceptedFromSessionIds',
+     'jobsTransferredToSessionId',
+     'jobKeyRedirects',
+diff --git a/hub/src/store/sessions.test.ts b/hub/src/store/sessions.test.ts
+index 2f7c8f6f8..9a7feb5a2 100644
+--- a/hub/src/store/sessions.test.ts
++++ b/hub/src/store/sessions.test.ts
+@@ -512,7 +512,9 @@ describe('updateSessionMetadata: protocol resume token preservation', () => {
+                 path: '/tmp/project',
+                 host: 'example',
+                 titleSuggestionAutoAttemptedAt: 1234,
+-                titleSuggestionTurn: { first: true, completed: false }
++                titleSuggestionTurn: { first: true, completed: false },
++                forkTitleSeed: { text: 'Fork: Parent', updatedAt: 1234 },
++                forkTitleGenerationAttemptedAt: 5678
+             },
+             null,
+             'default'
+@@ -528,6 +530,8 @@ describe('updateSessionMetadata: protocol resume token preservation', () => {
+         expect(result.result).toBe('success')
+         expect(getMetadata(store, session.id)?.titleSuggestionAutoAttemptedAt).toBe(1234)
+         expect(getMetadata(store, session.id)?.titleSuggestionTurn).toEqual({ first: true, completed: false })
++        expect(getMetadata(store, session.id)?.forkTitleSeed).toEqual({ text: 'Fork: Parent', updatedAt: 1234 })
++        expect(getMetadata(store, session.id)?.forkTitleGenerationAttemptedAt).toBe(5678)
+         store.close()
+     })
+ 
+diff --git a/hub/src/store/sessions.ts b/hub/src/store/sessions.ts
+index d4b14f861..1d984d5fa 100644
+--- a/hub/src/store/sessions.ts
++++ b/hub/src/store/sessions.ts
+@@ -81,6 +81,8 @@ const HUB_OWNED_METADATA_FIELDS = [
+     'codexResumePending',
+     'titleSuggestionAutoAttemptedAt',
+     'titleSuggestionTurn',
++    'forkTitleSeed',
++    'forkTitleGenerationAttemptedAt',
+     'promptTitle'
+ ] as const
+ 
+diff --git a/hub/src/sync/archivedFork.test.ts b/hub/src/sync/archivedFork.test.ts
+index 3ceb2a307..97d72ec93 100644
+--- a/hub/src/sync/archivedFork.test.ts
++++ b/hub/src/sync/archivedFork.test.ts
+@@ -1,10 +1,10 @@
+-import { describe, expect, it } from 'bun:test'
++import { describe, expect, it, vi } from 'bun:test'
+ import { randomUUID } from 'node:crypto'
+ import { Store } from '../store'
+ import { SyncEngine } from './syncEngine'
+ import { ArchiveCleanupError } from './archiveCleanupError'
+ import { RpcRegistry } from '../socket/rpcRegistry'
+-import { MACHINE_CAPABILITIES } from '@hapi/protocol'
++import { MACHINE_CAPABILITIES, type Metadata } from '@hapi/protocol'
+ import type { RpcGateway } from './rpcGateway'
+ import type { ForkArchivedCodexRequest } from '@hapi/protocol/apiTypes'
+ 
+@@ -118,6 +118,35 @@ describe('archived Codex fork coordination', () => {
+         } finally { f.engine.stop() }
+     })
+ 
++    it('seeds archived fork title ownership and generates a configured title', async () => {
++        const f = fixture()
++        try {
++            const current = f.store.sessions.getSession(f.source.id)!
++            f.store.sessions.updateSessionMetadata(f.source.id, {
++                ...(current.metadata as object), name: 'Parent title'
++            }, current.metadataVersion, 'ns')
++            ;(f.engine as unknown as { sessionCache: { refreshSession(id: string): void } }).sessionCache.refreshSession(f.source.id)
++            const spawn = f.rpc.spawnSession
++            let seedAtSpawn: Metadata['forkTitleSeed']
++            f.rpc.spawnSession = async (...args) => {
++                const childId = args[12]!
++                seedAtSpawn = f.engine.getSession(childId)?.metadata?.forkTitleSeed
++                return spawn(...args)
++            }
++            const suggestion = vi.spyOn((f.engine as unknown as { titleSuggestionService: { suggestTitle(id: string): Promise<string> } }).titleSuggestionService,
++                'suggestTitle').mockResolvedValue('Generated child title')
++
++            const result = await f.engine.forkConversation(f.source.id, 'ns')
++            expect(result.type).toBe('success')
++            if (result.type !== 'success') return
++            expect(seedAtSpawn).toMatchObject({ text: 'Fork: Parent title' })
++            for (let retry = 0; retry < 20 && suggestion.mock.calls.length === 0; retry++) await new Promise(resolve => setTimeout(resolve, 10))
++            expect(suggestion).toHaveBeenCalledWith(result.sessionId)
++            for (let retry = 0; retry < 20 && f.engine.getSession(result.sessionId)?.metadata?.summary?.text !== 'Generated child title'; retry++) await new Promise(resolve => setTimeout(resolve, 10))
++            expect(f.engine.getSession(result.sessionId)?.metadata?.summary?.text).toBe('Generated child title')
++        } finally { f.engine.stop() }
++    })
++
+     it('keeps an unconfirmed resume fenced until archive proves Runner termination', async () => {
+         const f = fixture()
+         try {
+diff --git a/hub/src/sync/automaticTitleSuggestion.test.ts b/hub/src/sync/automaticTitleSuggestion.test.ts
+index cba43062e..90e407462 100644
+--- a/hub/src/sync/automaticTitleSuggestion.test.ts
++++ b/hub/src/sync/automaticTitleSuggestion.test.ts
+@@ -66,6 +66,20 @@ describe('AutomaticTitleSuggestionService', () => {
+         expect(summary.cache.getSession(summary.session.id)?.metadata?.titleSuggestionAutoAttemptedAt).toBeUndefined()
+     })
+ 
++    it('does not request or reserve a provider attempt when the title is locked', async () => {
++        let calls = 0
++        const { cache, session, automatic } = setup({
++            provider: { suggest: async () => { calls += 1; return 'Unexpected title' } }
++        })
++        await cache.renameSession(session.id, undefined, true)
++
++        automatic.onTurnStarted(session.id)
++        await automatic.onTurnCompleted(session.id)
++
++        expect(calls).toBe(0)
++        expect(cache.getSession(session.id)?.metadata?.titleSuggestionAutoAttemptedAt).toBeUndefined()
++    })
++
+     it('records a failed attempt and does not retry automatically', async () => {
+         let calls = 0
+         const { cache, session, automatic } = setup({
+diff --git a/hub/src/sync/automaticTitleSuggestion.ts b/hub/src/sync/automaticTitleSuggestion.ts
+index 6721a1a2b..3e3b6371b 100644
+--- a/hub/src/sync/automaticTitleSuggestion.ts
++++ b/hub/src/sync/automaticTitleSuggestion.ts
+@@ -33,7 +33,7 @@ export class AutomaticTitleSuggestionService {
+         const prior = this.observedTurns.get(sessionId)
+         if (prior && !prior.completed) return
+         const metadata = this.sessionCache.getSession(sessionId)?.metadata
+-        if (metadata?.name?.trim() || metadata?.summary?.text?.trim()
++        if (metadata?.titleLocked === true || metadata?.name?.trim() || metadata?.summary?.text?.trim()
+             || metadata?.titleSuggestionAutoAttemptedAt !== undefined) return
+         try {
+             // Capture before assistant output can interleave with steering.
+@@ -78,7 +78,7 @@ export class AutomaticTitleSuggestionService {
+                     if (this.stopped) return
+                     if (!this.titleSuggestionService.isConfigured()) return
+                     const metadata = this.sessionCache.getSession(sessionId)?.metadata
+-                    if (metadata?.name?.trim() || metadata?.summary?.text?.trim()
++                    if (metadata?.titleLocked === true || metadata?.name?.trim() || metadata?.summary?.text?.trim()
+                         || metadata?.titleSuggestionAutoAttemptedAt !== undefined) return
+                     if (turn?.first === false) return
+                     if (!this.titleSuggestionService.hasCompletedFirstTurn(sessionId, turn?.first)) return
+diff --git a/hub/src/sync/forkTitleGeneration.test.ts b/hub/src/sync/forkTitleGeneration.test.ts
+new file mode 100644
+index 000000000..073751bda
+--- /dev/null
++++ b/hub/src/sync/forkTitleGeneration.test.ts
+@@ -0,0 +1,325 @@
++import { describe, expect, it } from 'bun:test'
++import { Store } from '../store'
++import { RpcRegistry } from '../socket/rpcRegistry'
++import { SyncEngine } from './syncEngine'
++import { TitleSuggestionService } from './titleSuggestion'
++import type { Metadata } from '@hapi/protocol/types'
++
++const flush = () => new Promise(resolve => setTimeout(resolve, 0))
++
++function fixture(shared = true, childMetadata: Partial<Metadata> = {}, flavor = 'codex') {
++    const store = new Store(':memory:')
++    const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
++    const source = engine.getOrCreateSession('parent', {
++        path: '/tmp/work', host: 'test', machineId: 'machine', flavor, codexSessionId: 'native-parent',
++        name: 'Current title', capabilities: { concurrentClients: shared,
++            conversationHistory: { forkCurrent: true, forkAtMessage: true } }
++    }, null, 'default')
++    engine.handleSessionAlive({ sid: source.id, time: Date.now() })
++    const child = shared ? engine.getOrCreateSession('child', {
++        path: '/tmp/work', host: 'test', machineId: 'machine', flavor, codexSessionId: 'native-child',
++        forkedFrom: source.id, capabilities: { concurrentClients: true }, ...childMetadata
++    }, null, 'default') : undefined
++    if (child && childMetadata.titleLocked === true) {
++        const current = store.sessions.getSession(child.id)!
++        store.sessions.updateSessionMetadata(child.id, { ...(current.metadata as Metadata), titleLocked: true },
++            current.metadataVersion, 'default', { allowTitleUpdate: true, titleLocked: true })
++        ;(engine as any).sessionCache.refreshSession(child.id)
++    }
++    if (child) engine.handleSessionAlive({ sid: child.id, time: Date.now() })
++    const internal = engine as any
++    internal.rpcGateway.forkConversation = async () => ({ nativeSessionId: 'native-child',
++        ...(child ? { sessionId: child.id } : {}) })
++    internal.rpcGateway.spawnSession = async (...args: unknown[]) => ({ type: 'success', sessionId: args[12] })
++    internal.waitForExactNativeForkBound = async () => true
++    const setMetadata = (id: string, update: (metadata: Metadata) => Metadata) => {
++        const current = store.sessions.getSession(id)!
++        store.sessions.updateSessionMetadata(id, update(current.metadata as Metadata), current.metadataVersion, 'default')
++        internal.sessionCache.refreshSession(id)
++    }
++    const message = (id: string, text: string, localId: string) => {
++        store.messages.addMessage(id, { role: 'user', content: text }, localId)
++        store.messages.markMessagesInvoked(id, [localId], Date.now())
++    }
++    return { store, engine, source, child, internal, setMetadata, message,
++        close() { engine.stop(); store.close() } }
++}
++
++describe('fork title generation', () => {
++    it('generates for a native shared fork readiness event and deduplicates the REST trigger', async () => {
++        const seed = { text: 'Fork: Current title', updatedAt: 1 }
++        const f = fixture(true, { summary: seed, forkTitleSeed: seed })
++        try {
++            let requests = 0
++            let finish!: (title: string) => void
++            f.internal.titleSuggestionService.suggestTitle = async () => {
++                requests++
++                return await new Promise<string>(resolve => { finish = resolve })
++            }
++            f.engine.handleSessionReady({ sid: f.child!.id, time: Date.now() })
++            f.engine.handleSessionReady({ sid: f.child!.id, time: Date.now() })
++            await flush()
++            expect(requests).toBe(1)
++            await f.engine.forkConversation(f.source.id, 'default')
++            expect(requests).toBe(1)
++            const reconnected = new SyncEngine(f.store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
++            try {
++                ;(reconnected as any).titleSuggestionService.suggestTitle = async () => { requests++; return 'Duplicate' }
++                reconnected.handleSessionReady({ sid: f.child!.id, time: Date.now() })
++                expect(requests).toBe(1)
++            } finally { reconnected.stop() }
++            finish('Native terminal fork title')
++            await flush()
++            expect(f.engine.getSession(f.child!.id)?.metadata?.summary?.text).toBe('Native terminal fork title')
++        } finally { f.close() }
++    })
++    it.each(['manual-name', 'manual-summary', 'locked', 'deleted', 'stopped'])(
++        'does not apply an in-flight result after %s', async action => {
++            const f = fixture()
++            try {
++                let finish!: (title: string) => void
++                f.internal.titleSuggestionService.suggestTitle = () => new Promise<string>(resolve => { finish = resolve })
++                const result = await f.engine.forkConversation(f.source.id, 'default')
++                expect(result.type).toBe('success')
++                const id = f.child!.id
++                if (action === 'manual-name') await f.engine.renameSession(id, 'Chosen child name')
++                if (action === 'manual-summary') await f.engine.updateSessionSummary(id, 'User-generated draft')
++                if (action === 'locked') await f.engine.renameSession(id, undefined, true)
++                if (action === 'deleted') f.store.sessions.deleteSession(id, 'default')
++                if (action === 'stopped') f.engine.stop()
++                finish('Provider result')
++                await flush()
++                expect((f.store.sessions.getSession(id)?.metadata as Metadata | undefined)?.summary?.text).not.toBe('Provider result')
++                if (action === 'manual-name') expect(f.engine.getSession(id)?.metadata?.name).toBe('Chosen child name')
++                if (action === 'manual-summary') expect(f.engine.getSession(id)?.metadata?.summary?.text).toBe('User-generated draft')
++                if (action === 'manual-name' || action === 'manual-summary') {
++                    expect(f.engine.getSession(id)?.metadata?.forkTitleSeed).toBeUndefined()
++                    expect(f.engine.getSession(id)?.metadata?.forkTitleGenerationAttemptedAt).toBeUndefined()
++                }
++            } finally { f.close() }
++        })
++
++    it.each(['unconfigured', 'failure', 'empty'])(
++        'keeps the seed when the provider is %s and permits a later manual retry', async mode => {
++            const f = fixture()
++            try {
++                if (mode === 'unconfigured') f.internal.titleSuggestionService = new TitleSuggestionService(f.store)
++                else {
++                    f.message(f.child!.id, 'Fork topic', 'prompt')
++                    f.internal.titleSuggestionService = new TitleSuggestionService(f.store, { provider: {
++                        suggest: async () => { if (mode === 'failure') throw new Error(mode); return '   ' }
++                    } })
++                }
++                await f.engine.forkConversation(f.source.id, 'default')
++                await flush()
++                expect(f.engine.getSession(f.child!.id)?.metadata?.summary?.text).toBe('Fork: Current title')
++                f.internal.titleSuggestionService.suggestTitle = async () => 'Manual retry result'
++                const title = await f.engine.suggestSessionTitle(f.child!.id)
++                await f.engine.updateSessionSummary(f.child!.id, title)
++                expect(f.engine.getSession(f.child!.id)?.metadata?.summary?.text).toBe('Manual retry result')
++            } finally { f.close() }
++        })
++
++    it.each(['claude', 'grok', 'pi'])(
++        'uses the completed %s fork prefix and excludes its historical boundary and queued prompts', async flavor => {
++            const f = fixture(false, {}, flavor)
++            try {
++                f.message(f.source.id, 'Earlier payment topic', 'before')
++                f.message(f.source.id, 'Excluded boundary', 'boundary')
++                f.message(f.source.id, 'Later source topic', 'after')
++                f.setMetadata(f.source.id, metadata => ({ ...metadata, conversationHistoryPoints: { boundary: true } }))
++                f.internal.rpcGateway.forkConversation = async () => {
++                    // A row arriving during the native RPC must not enter the prefix.
++                    f.store.messages.addMessage(f.source.id, { role: 'user', content: 'Queued source prompt' }, 'queued')
++                    return { nativeSessionId: 'native-child' }
++                }
++                let prompt = ''
++                f.internal.titleSuggestionService = new TitleSuggestionService(f.store, {
++                    provider: { suggest: async value => { prompt = value; return 'Payment branch' } }
++                })
++                const result = await f.engine.forkConversation(f.source.id, 'default', 'boundary')
++                if (result.type !== 'success') throw new Error(result.message)
++                expect(result.type).toBe('success')
++                await flush()
++                expect(prompt).toContain('Earlier payment topic')
++                expect(prompt).not.toContain('Excluded boundary')
++                expect(prompt).not.toContain('Later source topic')
++                expect(prompt).not.toContain('Queued source prompt')
++                expect(f.engine.getSession(result.sessionId)?.metadata?.summary?.text).toBe('Payment branch')
++                expect(f.engine.getSession(f.source.id)?.metadata?.name).toBe('Current title')
++            } finally { f.close() }
++        })
++
++    it('passes the shared child history to the same provider service used by manual Generate', async () => {
++        const f = fixture()
++        try {
++            f.message(f.source.id, 'Parent-only later topic', 'parent-only')
++            f.message(f.child!.id, 'Actual fork topic', 'child-prompt')
++            let prompt = ''
++            f.internal.titleSuggestionService = new TitleSuggestionService(f.store, {
++                provider: { suggest: async value => { prompt = value; return 'Child topic' } }
++            })
++            await f.engine.forkConversation(f.source.id, 'default')
++            await flush()
++            expect(prompt).toContain('Actual fork topic')
++            expect(prompt).not.toContain('Parent-only later topic')
++            expect(f.engine.getSession(f.child!.id)?.metadata?.summary?.text).toBe('Child topic')
++            expect(f.engine.getSession(f.child!.id)?.metadata?.forkTitleSeed).toBeUndefined()
++        } finally { f.close() }
++    })
++
++    it.each([{ name: 'Existing name' }, { summary: { text: 'Existing summary', updatedAt: 1 } }, { titleLocked: true }])(
++        'preserves an already named or locked child: %j', async metadata => {
++            const f = fixture(true, metadata)
++            try {
++                let requests = 0
++                f.internal.titleSuggestionService.suggestTitle = async () => { requests++; return 'Unexpected' }
++                await f.engine.forkConversation(f.source.id, 'default')
++                expect(requests).toBe(0)
++                expect(f.engine.getSession(f.child!.id)?.metadata).toMatchObject(metadata)
++            } finally { f.close() }
++        })
++
++    it('does not invoke a provider when native fork fails', async () => {
++        const f = fixture()
++        try {
++            let requests = 0
++            f.internal.titleSuggestionService.suggestTitle = async () => { requests++; return 'Unexpected' }
++            f.internal.rpcGateway.forkConversation = async () => { throw new Error('Native failure') }
++            expect(await f.engine.forkConversation(f.source.id, 'default')).toMatchObject({ type: 'error' })
++            expect(requests).toBe(0)
++        } finally { f.close() }
++    })
++
++    it.each(['unrelated-update', 'rename', 'write-error'])(
++        'rechecks title ownership after a metadata %s', async action => {
++            const f = fixture()
++            try {
++                let finish!: (title: string) => void
++                f.internal.titleSuggestionService.suggestTitle = () => new Promise<string>(resolve => { finish = resolve })
++                await f.engine.forkConversation(f.source.id, 'default')
++                const original = f.store.sessions.updateSessionMetadata.bind(f.store.sessions)
++                let raced = false
++                f.store.sessions.updateSessionMetadata = (...args) => {
++                    if (!raced) {
++                        raced = true
++                        if (action === 'write-error') return { result: 'error' }
++                        const current = f.store.sessions.getSession(f.child!.id)!
++                        original(current.id, { ...(current.metadata as Metadata),
++                            ...(action === 'rename' ? { name: 'Concurrent rename' } : { version: 'new-version' })
++                        }, current.metadataVersion, 'default')
++                    }
++                    return original(...args)
++                }
++                finish('Provider result')
++                await flush()
++                const metadata = f.engine.getSession(f.child!.id)?.metadata
++                expect(metadata?.summary?.text).toBe(action === 'unrelated-update' ? 'Provider result' : 'Fork: Current title')
++                if (action === 'rename') expect(metadata?.name).toBe('Concurrent rename')
++                if (action === 'unrelated-update') expect(metadata?.version).toBe('new-version')
++            } finally { f.close() }
++        })
++
++    it('generates a title for an untitled fork when history is available', async () => {
++        const f = fixture()
++        try {
++            f.setMetadata(f.source.id, metadata => ({ ...metadata, name: undefined }))
++            f.message(f.child!.id, 'Untitled fork topic', 'prompt')
++            f.internal.titleSuggestionService = new TitleSuggestionService(f.store, {
++                provider: { suggest: async () => 'Untitled branch named' }
++            })
++            await f.engine.forkConversation(f.source.id, 'default')
++            await flush()
++            expect(f.engine.getSession(f.child!.id)?.metadata?.summary?.text).toBe('Untitled branch named')
++        } finally { f.close() }
++    })
++
++    it('seeds the shared child and generates from its fork snapshot without waiting for another turn', async () => {
++        const store = new Store(':memory:')
++        const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
++        try {
++            const source = engine.getOrCreateSession('parent', {
++                path: '/tmp/work', host: 'test', machineId: 'machine', flavor: 'codex', codexSessionId: 'native-parent',
++                name: 'Current parent title', capabilities: { concurrentClients: true, conversationHistory: { forkCurrent: true } }
++            }, null, 'default')
++            engine.handleSessionAlive({ sid: source.id, time: Date.now() })
++            const child = engine.getOrCreateSession('child', {
++                path: '/tmp/work', host: 'test', machineId: 'machine', flavor: 'codex', codexSessionId: 'native-child',
++                forkedFrom: source.id, capabilities: { concurrentClients: true }
++            }, null, 'default')
++            engine.handleSessionAlive({ sid: child.id, time: Date.now() })
++            store.messages.addMessage(child.id, { role: 'user', content: 'Latest payment topic' }, 'prompt')
++            store.messages.markMessagesInvoked(child.id, ['prompt'], Date.now())
++            const internal = engine as any
++            internal.rpcGateway.forkConversation = async () => ({ nativeSessionId: 'native-child', sessionId: child.id })
++            let finish!: (value: string) => void
++            let requested = false
++            internal.titleSuggestionService.suggestTitle = async () => {
++                requested = true
++                return await new Promise<string>(resolve => { finish = resolve })
++            }
++            expect(await engine.forkConversation(source.id, 'default')).toEqual({ type: 'success', sessionId: child.id })
++            expect(engine.getSession(child.id)?.metadata?.summary?.text).toBe('Fork: Current parent title')
++            expect(requested).toBe(true)
++            finish('Payment optimization')
++            await new Promise(resolve => setTimeout(resolve, 0))
++            expect(engine.getSession(child.id)?.metadata?.summary?.text).toBe('Payment optimization')
++        } finally { engine.stop() }
++    })
++})
++
++it('seeds and generates when native readiness sees titled Hub source but untitled child metadata', async () => {
++    const f = fixture(true)
++    try {
++        let requests = 0
++        f.internal.titleSuggestionService.suggestTitle = async () => {
++            requests += 1
++            return 'Native readiness title'
++        }
++        f.engine.handleSessionReady({ sid: f.child!.id, time: Date.now() })
++        await flush()
++        expect(requests).toBe(1)
++        const metadata = f.engine.getSession(f.child!.id)?.metadata
++        expect(metadata?.summary?.text).toBe('Native readiness title')
++        expect(metadata?.forkTitleSeed).toBeUndefined()
++    } finally { f.close() }
++})
++it('does not seed a native readiness child from a parent in another namespace', async () => {
++    const f = fixture(true)
++    try {
++        const foreign = f.engine.getOrCreateSession('foreign-parent', {
++            path: '/tmp/foreign', host: 'test', machineId: 'machine', flavor: 'codex',
++            codexSessionId: 'native-foreign', name: 'Foreign title',
++            capabilities: { concurrentClients: true },
++        }, null, 'other')
++        f.setMetadata(f.child!.id, metadata => ({
++            ...metadata,
++            name: undefined,
++            summary: undefined,
++            forkTitleSeed: undefined,
++            forkedFrom: foreign.id,
++        }))
++        let requests = 0
++        f.internal.titleSuggestionService.suggestTitle = async () => {
++            requests += 1
++            throw new Error('provider unavailable')
++        }
++        f.engine.handleSessionReady({ sid: f.child!.id, time: Date.now() })
++        await flush()
++        expect(requests).toBe(1)
++        expect(f.engine.getSession(f.child!.id)?.metadata?.summary).toBeUndefined()
++    } finally { f.close() }
++})
++it('reconciles a stale CLI fork seed after an idle source rename before readiness claims generation', async () => {
++    const seed = { text: 'Fork: Old', updatedAt: 1 }
++    const f = fixture(true, { summary: seed, forkTitleSeed: seed })
++    try {
++        await f.engine.renameSession(f.source.id, 'New')
++        f.internal.titleSuggestionService = new TitleSuggestionService(f.store)
++        f.engine.handleSessionReady({ sid: f.child!.id, time: Date.now() })
++        await flush()
++        await f.engine.forkConversation(f.source.id, 'default')
++        await flush()
++        expect(f.engine.getSession(f.child!.id)?.metadata?.summary?.text).toBe('Fork: New')
++    } finally { f.close() }
++})
+diff --git a/hub/src/sync/sessionCache.ts b/hub/src/sync/sessionCache.ts
+index baec20ae0..e02e54e13 100644
+--- a/hub/src/sync/sessionCache.ts
++++ b/hub/src/sync/sessionCache.ts
+@@ -1184,7 +1184,10 @@ export class SessionCache {
+             }
+ 
+             const currentMetadata = session.metadata ?? { path: '', host: '' }
+-            const newMetadata = name === undefined ? { ...currentMetadata } : { ...currentMetadata, name }
++            const { forkTitleSeed: _seed, forkTitleGenerationAttemptedAt: _attempt, ...rest } = currentMetadata
++            const newMetadata = name === undefined
++                ? { ...rest, forkTitleSeed: null, forkTitleGenerationAttemptedAt: null }
++                : { ...rest, name, forkTitleSeed: null, forkTitleGenerationAttemptedAt: null }
+ 
+             const result = this.store.sessions.updateSessionMetadata(
+                 sessionId,
+@@ -1209,6 +1212,61 @@ export class SessionCache {
+         throw new Error('Session was modified concurrently. Please try again.')
+     }
+ 
++    /** Seed an already-bound shared child without overwriting a newer title. */
++    async seedForkTitle(sessionId: string, seed: { text: string; updatedAt: number } | undefined): Promise<void> {
++        if (!seed) return
++        for (let attempt = 0; attempt < METADATA_RETRY_ATTEMPTS; attempt += 1) {
++            const session = this.refreshSession(sessionId)
++            const metadata = session?.metadata
++            if (!session || !metadata || metadata.name?.trim() || metadata.titleLocked === true) return
++            if (metadata.forkTitleGenerationAttemptedAt !== undefined) return
++            if (metadata.summary && (metadata.summary.text !== metadata.forkTitleSeed?.text
++                || metadata.summary.updatedAt !== metadata.forkTitleSeed?.updatedAt)) return
++            const result = this.store.sessions.updateSessionMetadata(sessionId,
++                { ...metadata, summary: seed, forkTitleSeed: seed }, session.metadataVersion, session.namespace,
++                { touchUpdatedAt: false })
++            if (result.result === 'error') return
++            if (result.result === 'success') { this.refreshSession(sessionId); return }
++        }
++    }
++
++    /** Persistent CAS claim deduplicates native readiness and REST completion. */
++    claimForkTitleGeneration(sessionId: string, expected: { text: string; updatedAt: number } | undefined): boolean {
++        for (let attempt = 0; attempt < METADATA_RETRY_ATTEMPTS; attempt += 1) {
++            const session = this.refreshSession(sessionId)
++            const metadata = session?.metadata
++            if (!session || !metadata?.forkedFrom || metadata.forkTitleGenerationAttemptedAt !== undefined
++                || metadata.name?.trim() || metadata.titleLocked === true
++                || metadata.summary?.text !== expected?.text || metadata.summary?.updatedAt !== expected?.updatedAt
++                || metadata.forkTitleSeed?.text !== expected?.text || metadata.forkTitleSeed?.updatedAt !== expected?.updatedAt) return false
++            const result = this.store.sessions.updateSessionMetadata(sessionId,
++                { ...metadata, forkTitleGenerationAttemptedAt: Date.now() }, session.metadataVersion, session.namespace,
++                { touchUpdatedAt: false })
++            if (result.result === 'error') return false
++            if (result.result === 'success') { this.refreshSession(sessionId); return true }
++        }
++        return false
++    }
++
++    /** Only replace the exact fork seed captured before the provider request. */
++    async updateForkTitle(sessionId: string, text: string, expected: { text: string; updatedAt: number } | undefined): Promise<boolean> {
++        for (let attempt = 0; attempt < METADATA_RETRY_ATTEMPTS; attempt += 1) {
++            const session = this.refreshSession(sessionId)
++            const metadata = session?.metadata
++            if (!session || !metadata?.forkedFrom || metadata.name?.trim() || metadata.titleLocked === true
++                || metadata.summary?.text !== expected?.text || metadata.summary?.updatedAt !== expected?.updatedAt
++                || metadata.forkTitleSeed?.text !== expected?.text || metadata.forkTitleSeed?.updatedAt !== expected?.updatedAt) return false
++            const { forkTitleSeed: _seed, forkTitleGenerationAttemptedAt: _attempt, ...rest } = metadata
++            const result = this.store.sessions.updateSessionMetadata(sessionId,
++                { ...rest, summary: { text, updatedAt: Date.now() }, forkTitleSeed: null,
++                    forkTitleGenerationAttemptedAt: null }, session.metadataVersion, session.namespace,
++                { touchUpdatedAt: false })
++            if (result.result === 'error') return false
++            if (result.result === 'success') { this.refreshSession(sessionId); return true }
++        }
++        return false
++    }
++
+     async updateSessionSummary(sessionId: string, text: string, titleLocked?: boolean): Promise<void> {
+         // Keep the generated/native title separate from metadata.name. A
+         // manually chosen name must continue to win in the Web title helper,
+@@ -1220,12 +1278,15 @@ export class SessionCache {
+             }
+ 
+             const currentMetadata = session.metadata ?? { path: '', host: '' }
++            const { forkTitleSeed: _seed, forkTitleGenerationAttemptedAt: _attempt, ...rest } = currentMetadata
+             const newMetadata = {
+-                ...currentMetadata,
++                ...rest,
+                 summary: {
+                     text,
+                     updatedAt: Date.now()
+-                }
++                },
++                forkTitleSeed: null,
++                forkTitleGenerationAttemptedAt: null
+             }
+ 
+             const result = this.store.sessions.updateSessionMetadata(
+diff --git a/hub/src/sync/syncEngine.ts b/hub/src/sync/syncEngine.ts
+index a860acf54..4686f15a4 100644
+--- a/hub/src/sync/syncEngine.ts
++++ b/hub/src/sync/syncEngine.ts
+@@ -220,6 +220,7 @@ export class SyncEngine {
+     private readonly titleTurnCompletedIds = new Set<string>()
+     private readonly rpcGateway: RpcGateway
+     private inactivityTimer: NodeJS.Timeout | null = null
++    private stopped = false
+     /** Sessions that emitted `session-ready` (Cursor ACP or validated Pi get_state). */
+     private readonly sessionReadyIds = new Set<string>()
+     /** Same-ID PTY rows with a resume currently in flight. */
+@@ -349,6 +350,7 @@ export class SyncEngine {
+     }
+ 
+     stop(): void {
++        this.stopped = true
+         this.automaticTitleSuggestionService.stop()
+         this.titleTurnCompletedIds.clear()
+         if (this.inactivityTimer) {
+@@ -826,6 +828,9 @@ export class SyncEngine {
+     handleSessionReady(payload: { sid: string; time: number }): void {
+         this.sessionReadyIds.add(payload.sid)
+         const session = this.sessionCache.getSession(payload.sid)
++        if (session?.metadata?.forkedFrom && session.metadata.capabilities?.concurrentClients) {
++            void this.generateForkTitle(payload.sid)
++        }
+         if (session?.active && session.metadata?.codexResumePending
+             && session.metadata.codexResumePending.nativeSessionId === session.metadata.codexSessionId) {
+             this.writeCodexResumePending(session.id, session.namespace, undefined)
+@@ -2228,6 +2233,7 @@ export class SyncEngine {
+                 this.setArchivedForkAttempt(source.id, namespace, attempt)
+             }
+             const childId = attempt.childSessionId
++            const forkSummary = buildForkSessionSummary(metadata)
+             let child = this.sessionCache.refreshSession(childId)
+             if (child?.active) {
+                 if (!attempt.nativeSessionId || child.metadata?.codexSessionId !== attempt.nativeSessionId
+@@ -2241,7 +2247,8 @@ export class SyncEngine {
+                 child = this.sessionCache.getOrCreateSession(`archived-fork:${attempt.operationId}`, {
+                     path: metadata.path, host: metadata.host, machineId: metadata.machineId, flavor: 'codex',
+                     forkedFrom: source.id, startedBy: 'runner',
+-                    summary: buildForkSessionSummary(metadata)
++                    capabilities: { concurrentClients: true },
++                    ...(forkSummary ? { summary: forkSummary, forkTitleSeed: forkSummary } : {}),
+                 }, null, namespace, source.model ?? undefined, source.effort ?? undefined, source.modelReasoningEffort ?? undefined, childId)
+             } else if (child.namespace !== namespace || child.metadata?.forkedFrom !== source.id) throw new Error('Invalid archived fork reservation')
+             if (attempt.spawnAttempted) {
+@@ -2397,7 +2404,10 @@ export class SyncEngine {
+         if (rpcResult.sessionId) {
+             const child = await this.validateSharedChild(source, rpcResult.sessionId, rpcResult.nativeSessionId)
+             if (!child || child.metadata?.forkedFrom !== sessionId) return { type: 'error', message: 'Invalid shared-runtime fork binding' }
+-            this.restoreForkSummaryMetadata(child.id, namespace, buildForkSessionSummary(source.metadata))
++            const currentSource = this.sessionCache.refreshSession(sessionId)
++            const forkSummary = buildForkSessionSummary(currentSource?.metadata ?? source.metadata)
++            await this.sessionCache.seedForkTitle(child.id, forkSummary)
++            void this.generateForkTitle(child.id)
+             return { type: 'success', sessionId: child.id }
+         }
+ 
+@@ -2426,7 +2436,7 @@ export class SyncEngine {
+             host: source.metadata?.host ?? 'unknown',
+             machineId,
+             flavor,
+-            ...(forkSummary ? { summary: forkSummary } : {}),
++            ...(forkSummary ? { summary: forkSummary, forkTitleSeed: forkSummary } : {}),
+             forkedFrom: sessionId,
+             startedBy: 'runner',
+             capabilities: source.metadata?.capabilities,
+@@ -2554,6 +2564,7 @@ export class SyncEngine {
+                 }
+             }
+ 
++            void this.generateForkTitle(childId)
+             return { type: 'success', sessionId: childId }
+         } catch (error) {
+             if (childCreated) {
+@@ -2568,6 +2579,50 @@ export class SyncEngine {
+         }
+     }
+ 
++    /** Generate from the completed fork snapshot without delaying fork. */
++    private async generateForkTitle(sessionId: string): Promise<void> {
++        let metadata = this.sessionCache.getSession(sessionId)?.metadata
++        if (!metadata || metadata.name?.trim() || metadata.titleLocked === true) return
++        // A shared CLI can hold a source title from before a Hub rename.
++        // Reconcile the owned provisional seed before claiming generation.
++        if (metadata.forkTitleSeed && metadata.forkedFrom) {
++            const source = this.sessionCache.refreshSession(metadata.forkedFrom)
++            if (source && source.namespace === this.sessionCache.getSession(sessionId)?.namespace) {
++                await this.sessionCache.seedForkTitle(sessionId, buildForkSessionSummary(source.metadata))
++                metadata = this.sessionCache.getSession(sessionId)?.metadata
++                if (!metadata) return
++            }
++        }
++        // A pre-bound shared child can become ready before the fork RPC returns.
++        // If its source already had a title, wait for seedForkTitle instead of
++        // consuming the one-shot generation claim with an undefined baseline.
++        if (!metadata.forkTitleSeed && metadata.forkedFrom) {
++            const childNamespace = this.sessionCache.getSession(sessionId)?.namespace
++            const sourceMetadata = childNamespace
++                ? this.sessionCache.getSessionByNamespace(metadata.forkedFrom, childNamespace)?.metadata
++                : undefined
++            const forkSummary = buildForkSessionSummary(sourceMetadata)
++            if (forkSummary) {
++                // Native terminal readiness can arrive before a REST fork creates the
++                // owned seed. Bootstrap it here so that one-shot readiness can claim
++                // generation instead of waiting for a later event that never arrives.
++                await this.sessionCache.seedForkTitle(sessionId, forkSummary)
++                metadata = this.sessionCache.getSession(sessionId)?.metadata
++                if (!metadata) return
++            }
++        }
++        const expected = metadata.summary
++        if (expected && (expected.text !== metadata.forkTitleSeed?.text
++            || expected.updatedAt !== metadata.forkTitleSeed?.updatedAt)) return
++        if (!this.sessionCache.claimForkTitleGeneration(sessionId, expected)) return
++        try {
++            const title = await this.titleSuggestionService.suggestTitle(sessionId)
++            if (!this.stopped) await this.sessionCache.updateForkTitle(sessionId, title, expected)
++        } catch {
++            // Keep the seed on failure; manual Generate remains available.
++        }
++    }
++
+     /** Kill an active fork child (if any) then delete the HAPI row. */
+     private async cleanupFailedForkChild(
+         childId: string,
+diff --git a/shared/src/schemas.ts b/shared/src/schemas.ts
+index c34e20900..cfa836c53 100644
+--- a/shared/src/schemas.ts
++++ b/shared/src/schemas.ts
+@@ -66,6 +66,10 @@ export const MetadataSchema = z.object({
+     // launcher recreation or session resume.
+     acpManualTitle: z.boolean().optional(),
+     summary: MetadataSummarySchema.optional(),
++    // Exact provisional title owned by fork initialization, never a manual name.
++    forkTitleSeed: MetadataSummarySchema.optional(),
++    // Claim automatic fork generation once across REST/native readiness/restarts.
++    forkTitleGenerationAttemptedAt: z.number().optional(),
+     // Hub-owned marker: the automatic first-turn title fallback has been
+     // attempted for this session. It prevents silent retries after failures.
+     titleSuggestionAutoAttemptedAt: z.number().int().positive().optional(),
+diff --git a/web/e2e/fork-title-session.spec.ts b/web/e2e/fork-title-session.spec.ts
+new file mode 100644
+index 000000000..f9589e542
+--- /dev/null
++++ b/web/e2e/fork-title-session.spec.ts
+@@ -0,0 +1,230 @@
++import { expect, test, type APIRequestContext } from '@playwright/test'
++import { createServer, type ServerResponse } from 'node:http'
++import { randomUUID } from 'node:crypto'
++import { readFile, readdir } from 'node:fs/promises'
++import { join } from 'node:path'
++import { createRequire } from 'node:module'
++import { installHapiAuth } from './helpers/hapi-live'
++
++// Run against an isolated Full task environment whose Codex and title provider
++// both target this mock endpoint. Never use a default home or production URL.
++test.describe('fork title (real Hub, Runner and installed Codex)', () => {
++    test.skip(process.env.HAPI_FORK_TITLE_LIVE !== '1', 'Requires isolated task configuration')
++    test.describe.configure({ mode: 'serial' })
++    const base = process.env.HAPI_URL?.replace(/\/$/, '') ?? ''
++    const accessToken = process.env.HAPI_ACCESS_TOKEN ?? ''
++    const directory = process.env.HAPI_FORK_TEST_DIRECTORY ?? ''
++    const mockPort = Number(process.env.HAPI_FORK_TITLE_MOCK_PORT)
++    let api: APIRequestContext
++    let sourceId = ''
++    const titleRequests: Array<{ prompt: string; response: ServerResponse }> = []
++    const created: string[] = []
++    let titleMode: 'hold' | 'fail' | 'success' = 'hold'
++    const provider = createServer((request, response) => {
++        const chunks: Buffer[] = []
++        request.on('data', chunk => chunks.push(Buffer.from(chunk)))
++        request.on('end', () => {
++            const body = JSON.parse(Buffer.concat(chunks).toString() || '{}')
++            if (request.url?.endsWith('/chat/completions')) {
++                titleRequests.push({ prompt: JSON.stringify(body.messages), response })
++                if (titleMode === 'fail') response.writeHead(503).end('Test provider failure')
++                if (titleMode === 'success') response.writeHead(200, { 'Content-Type': 'application/json' })
++                    .end(JSON.stringify({ choices: [{ message: { content: 'Generated payment title' } }] }))
++                return
++            }
++            if (request.url?.endsWith('/responses')) {
++                const id = randomUUID()
++                const events = [
++                    { type: 'response.created', response: { id } },
++                    { type: 'response.output_item.done', item: { type: 'message', role: 'assistant', id: `msg_${id}`,
++                        content: [{ type: 'output_text', text: 'Payment optimization test answer.' }] } },
++                    { type: 'response.completed', response: { id, usage: { input_tokens: 12, output_tokens: 3, total_tokens: 15 } } }
++                ]
++                response.writeHead(200, { 'Content-Type': 'text/event-stream' })
++                response.end(events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(''))
++                return
++            }
++            response.writeHead(404).end()
++        })
++    })
++    const detail = async (id: string) => {
++        const response = await api.get(`${base}/api/sessions/${id}`)
++        expect(response.ok()).toBeTruthy()
++        return (await response.json()).session
++    }
++    const fork = async (data: Record<string, unknown> = {}) => {
++        const response = await api.post(`${base}/api/sessions/${sourceId}/fork`, { data, timeout: 90_000 })
++        expect(response.ok(), await response.text()).toBeTruthy()
++        const result = await response.json()
++        expect(result.sessionId).toBeTruthy()
++        created.push(result.sessionId)
++        return result.sessionId as string
++    }
++    const finish = (index: number, title: string) => titleRequests[index]!.response
++        .writeHead(200, { 'Content-Type': 'application/json' })
++        .end(JSON.stringify({ choices: [{ message: { content: title } }] }))
++
++    test.beforeAll(async ({ playwright }) => {
++        expect(base).toMatch(/^https?:\/\/(?:127\.0\.0\.1:\d+|[^/]+\.hapi-test\.techotaku39\.top)$/)
++        expect(base).not.toContain(':3006')
++        expect(directory).toBeTruthy()
++        expect(mockPort).toBeGreaterThan(1024)
++        expect(accessToken).toBeTruthy()
++        await new Promise<void>(resolve => provider.listen(mockPort, '127.0.0.1', resolve))
++        const auth = await playwright.request.newContext()
++        const response = await auth.post(`${base}/api/auth`, { data: { accessToken } })
++        expect(response.ok()).toBeTruthy()
++        const { token } = await response.json()
++        await auth.dispose()
++        api = await playwright.request.newContext({ extraHTTPHeaders: { Authorization: `Bearer ${token}` } })
++        await expect.poll(async () => (await (await api.get(`${base}/api/machines`)).json()).machines.length,
++            { timeout: 60_000 }).toBeGreaterThan(0)
++        const machines = await (await api.get(`${base}/api/machines`)).json()
++        expect(machines.machines.length).toBeGreaterThan(0)
++        const spawn = await api.post(`${base}/api/machines/${machines.machines[0].id}/spawn`, { data: {
++            directory, agent: 'codex', model: 'mock-model', permissionMode: 'read-only', sessionType: 'simple'
++        }, timeout: 90_000 })
++        const result = await spawn.json()
++        expect(result.type, JSON.stringify(result)).toBe('success')
++        sourceId = result.sessionId
++        created.push(sourceId)
++        await expect.poll(async () => (await detail(sourceId)).metadata?.capabilities?.conversationHistory?.forkCurrent,
++            { timeout: 60_000 }).toBe(true)
++        await api.patch(`${base}/api/sessions/${sourceId}`, { data: { name: 'Current payment discussion' } })
++        const send = await api.post(`${base}/api/sessions/${sourceId}/messages`, {
++            data: { text: 'Discuss payment optimization.', localId: randomUUID() }
++        })
++        expect(send.ok()).toBeTruthy()
++        await expect.poll(async () => {
++            const messages = await (await api.get(`${base}/api/sessions/${sourceId}/messages`)).json()
++            return JSON.stringify(messages).includes('Payment optimization test answer.')
++        }, { timeout: 60_000 }).toBe(true)
++        await expect.poll(async () => (await detail(sourceId)).thinking, { timeout: 30_000 }).toBe(false)
++    })
++
++    test.afterAll(async () => {
++        // Archive is best-effort here; the task stop script owns final detached
++        // process cleanup, including a native archive that does not return.
++        const archives = await Promise.allSettled(created.reverse().map(id =>
++            api?.post(`${base}/api/sessions/${id}/archive`, { timeout: 10_000 })))
++        const deferred = archives.filter(result => result.status === 'rejected').length
++        if (deferred) console.info(`${deferred} archive request(s) deferred to task environment cleanup`)
++        for (const request of titleRequests) if (!request.response.writableEnded) request.response.destroy()
++        await api?.dispose()
++        provider.closeAllConnections()
++        await new Promise<void>(resolve => provider.close(() => resolve()))
++    })
++
++    test('shows the seed immediately, then saves provider output without another conversation turn', async ({ page }) => {
++        titleMode = 'hold'
++        const index = titleRequests.length
++        const id = await fork()
++        await expect.poll(() => titleRequests.length).toBe(index + 1)
++        expect((await detail(id)).metadata.summary.text).toBe('Fork: Current payment discussion')
++        expect(titleRequests[index]!.prompt).toContain('Discuss payment optimization.')
++        await installHapiAuth(page, base, accessToken)
++        await page.goto(`${base}/sessions/${id}`, { waitUntil: 'domcontentloaded' })
++        await expect(page.getByText('Fork: Current payment discussion', { exact: true }).first()).toBeVisible()
++        finish(index, 'Payment branch title')
++        await expect.poll(async () => (await detail(id)).metadata.summary.text).toBe('Payment branch title')
++        await expect(page.getByText('Payment branch title', { exact: true }).first()).toBeVisible()
++        expect((await detail(sourceId)).metadata.name).toBe('Current payment discussion')
++    })
++
++    test('preserves an explicit rename made while the provider is waiting', async () => {
++        titleMode = 'hold'
++        const index = titleRequests.length
++        const id = await fork()
++        await expect.poll(() => titleRequests.length).toBe(index + 1)
++        expect((await api.patch(`${base}/api/sessions/${id}`, { data: { name: 'My chosen branch' } })).ok()).toBeTruthy()
++        finish(index, 'Late provider result')
++        await expect.poll(async () => (await detail(id)).metadata.name).toBe('My chosen branch')
++        expect((await detail(id)).metadata.forkTitleSeed).toBeUndefined()
++    })
++
++    test('keeps the seed on provider failure and supports manual Generate and Save in the browser', async ({ page }) => {
++        titleMode = 'fail'
++        const index = titleRequests.length
++        const id = await fork()
++        await expect.poll(() => titleRequests.length).toBe(index + 1)
++        expect((await detail(id)).metadata.summary.text).toBe('Fork: Current payment discussion')
++        titleMode = 'success'
++        await installHapiAuth(page, base, accessToken)
++        await page.goto(`${base}/sessions/${id}`, { waitUntil: 'domcontentloaded' })
++        await page.getByRole('button', { name: /More|更多/ }).click()
++        await page.getByRole('menuitem', { name: /^(Rename|重命名)$/ }).click()
++        const dialog = page.getByRole('dialog')
++        await dialog.getByRole('button', { name: /^(Generate|生成)$/ }).click()
++        await expect(dialog.getByRole('textbox')).toHaveValue('Generated payment title')
++        await dialog.getByRole('button', { name: /^(Save|保存)$/ }).click()
++        await expect.poll(async () => (await detail(id)).metadata.summary.text).toBe('Generated payment title')
++    })
++
++    test('generates from the historical fork prefix and excludes later source conversation', async () => {
++        const boundary = randomUUID()
++        const send = await api.post(`${base}/api/sessions/${sourceId}/messages`, {
++            data: { text: 'LATER INVENTORY TOPIC MUST BE EXCLUDED', localId: boundary }
++        })
++        expect(send.ok()).toBeTruthy()
++        await expect.poll(async () => (await detail(sourceId)).metadata?.conversationHistoryPoints?.[boundary],
++            { timeout: 60_000 }).toBe(true)
++        await expect.poll(async () => (await detail(sourceId)).thinking, { timeout: 30_000 }).toBe(false)
++        titleMode = 'hold'
++        const index = titleRequests.length
++        const id = await fork({ messageLocalId: boundary })
++        await expect.poll(() => titleRequests.length).toBe(index + 1)
++        expect(titleRequests[index]!.prompt).toContain('Discuss payment optimization.')
++        expect(titleRequests[index]!.prompt).not.toContain('LATER INVENTORY TOPIC MUST BE EXCLUDED')
++        finish(index, 'Historical payment branch')
++        await expect.poll(async () => (await detail(id)).metadata.summary.text).toBe('Historical payment branch')
++    })
++
++    test('generates for the native terminal fork gateway without a REST fork request', async () => {
++        const home = process.env.HAPI_FORK_RUNNER_HOME
++        test.skip(!home, 'Requires the isolated task Runner Home')
++        const registry = join(home!, 'codex-runtimes')
++        const records = await Promise.all((await readdir(registry)).filter(name => name.endsWith('.json'))
++            .map(async name => JSON.parse(await readFile(join(registry, name), 'utf8'))))
++        const runtime = records.find(record => record.sessions?.[sourceId]?.active)
++        expect(runtime).toBeTruthy()
++        const WebSocket = createRequire(join(process.cwd(), '../cli/package.json'))('ws')
++        const socket = new WebSocket(runtime.endpoint, { headers: {
++            Host: 'localhost', Authorization: `Bearer ${runtime.token}`
++        } })
++        let nextId = 0
++        const pending = new Map<number, { resolve: (result: any) => void; reject: (error: Error) => void }>()
++        socket.on('message', (raw: Buffer) => {
++            const message = JSON.parse(raw.toString())
++            const request = pending.get(message.id)
++            if (!request || message.method) return
++            pending.delete(message.id)
++            if (message.error) request.reject(new Error(message.error.message))
++            else request.resolve(message.result)
++        })
++        const request = (method: string, params: unknown) => new Promise<any>((resolve, reject) => {
++            const id = ++nextId
++            pending.set(id, { resolve, reject })
++            socket.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }))
++        })
++        try {
++            await new Promise<void>((resolve, reject) => { socket.once('open', resolve); socket.once('error', reject) })
++            await request('initialize', { clientInfo: { name: 'hapi-title-test', title: 'Title test', version: '1' },
++                capabilities: { experimentalApi: true } })
++            socket.send(JSON.stringify({ jsonrpc: '2.0', method: 'initialized' }))
++            titleMode = 'hold'
++            const index = titleRequests.length
++            const result = await request('thread/fork', { threadId: runtime.sessions[sourceId].threadId, cwd: directory })
++            await expect.poll(() => titleRequests.length).toBe(index + 1)
++            const sessions = (await (await api.get(`${base}/api/sessions`)).json()).sessions
++            const child = sessions.find((session: any) => session.metadata?.agentSessionId === result.thread.id)
++            expect(child).toBeTruthy()
++            created.push(child.id)
++            const childDetail = await detail(child.id)
++            expect(childDetail.metadata.codexSessionId).toBe(result.thread.id)
++            expect(childDetail.metadata.summary.text).toBe('Fork: Current payment discussion')
++            finish(index, 'Native terminal branch title')
++            await expect.poll(async () => (await detail(child.id)).metadata.summary.text).toBe('Native terminal branch title')
++            expect(titleRequests.length).toBe(index + 1)
++        } finally { socket.terminate() }
++    })
++})
+diff --git a/web/playwright.live.config.ts b/web/playwright.live.config.ts
+index 20876e789..5f379bc47 100644
+--- a/web/playwright.live.config.ts
++++ b/web/playwright.live.config.ts
+@@ -13,6 +13,7 @@ export default defineConfig({
+         'codex-archived-fork.spec.ts',
+         'codex-session-list-fork.spec.ts',
+         'late-codex-command-session.spec.ts',
++        'fork-title-session.spec.ts',
+         'image-preview-back-session.spec.ts',
+     ],
+     timeout: 120_000,

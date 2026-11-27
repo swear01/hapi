@@ -1,0 +1,99 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Thu, 22 Oct 2026 05:05:35 +0000
+Subject: [PATCH 48/94] carry(upstream): PR #2089 fix(hub): judge liveness by
+ hub receive time, not runner clock (#1986)
+
+---
+ hub/src/sync/aliveEvents.test.ts | 35 ++++++++++++++++++++++++++++++++
+ hub/src/sync/machineCache.ts     |  7 +++----
+ hub/src/sync/sessionCache.ts     |  2 +-
+ 3 files changed, 39 insertions(+), 5 deletions(-)
+
+diff --git a/hub/src/sync/aliveEvents.test.ts b/hub/src/sync/aliveEvents.test.ts
+index aaad878ab..ed1a5246b 100644
+--- a/hub/src/sync/aliveEvents.test.ts
++++ b/hub/src/sync/aliveEvents.test.ts
+@@ -435,4 +435,39 @@ describe('alive incremental events', () => {
+         }
+         expect(update.data).toEqual(expect.objectContaining({ thinking: false }))
+     })
++
++    it('judges liveness by hub receive time when the client clock lags (#1986)', () => {
++        const store = new Store(':memory:')
++        const events: SyncEvent[] = []
++        const machines = new MachineCache(store, createPublisher(events))
++        const sessions = new SessionCache(store, createPublisher(events))
++        const machine = machines.getOrCreateMachine(
++            'machine-clock-skew',
++            { host: 'localhost', platform: 'linux', happyCliVersion: '0.1.0' },
++            null,
++            'default'
++        )
++        const session = sessions.getOrCreateSession(
++            'session-clock-skew',
++            { path: '/tmp/project', host: 'localhost' },
++            { requests: {}, completedRequests: {} },
++            'default'
++        )
++        const heartbeatAt = Date.now() + 60_000
++        const laggingClientTime = heartbeatAt - 41_800
++
++        const originalNow = Date.now
++        Date.now = () => heartbeatAt
++        try {
++            machines.handleMachineAlive({ machineId: machine.id, time: laggingClientTime })
++            sessions.handleSessionAlive({ sid: session.id, time: laggingClientTime, thinking: false })
++        } finally {
++            Date.now = originalNow
++        }
++        machines.expireInactive(heartbeatAt + 5_000)
++        sessions.expireInactive(heartbeatAt + 5_000)
++
++        expect(machines.getMachine(machine.id)?.active).toBe(true)
++        expect(sessions.getSession(session.id)?.active).toBe(true)
++    })
+ })
+diff --git a/hub/src/sync/machineCache.ts b/hub/src/sync/machineCache.ts
+index f70182827..2b8454995 100644
+--- a/hub/src/sync/machineCache.ts
++++ b/hub/src/sync/machineCache.ts
+@@ -196,22 +196,21 @@ export class MachineCache {
+     }
+ 
+     handleMachineAlive(payload: MachineAlivePayload): void {
+-        const t = clampAliveTime(payload.time)
+-        if (!t) return
++        if (!clampAliveTime(payload.time)) return
+ 
+         const machine = this.machines.get(payload.machineId) ?? this.refreshMachine(payload.machineId)
+         if (!machine) return
+ 
+         const wasActive = machine.active
+         const previousHealth = machine.health ?? null
++        const now = Date.now()
+         machine.active = true
+-        machine.activeAt = Math.max(machine.activeAt, t)
++        machine.activeAt = Math.max(machine.activeAt, now)
+ 
+         if (payload.health !== undefined) {
+             machine.health = parseMachineHealth(payload.health)
+         }
+ 
+-        const now = Date.now()
+         const lastBroadcastAt = this.lastBroadcastAtByMachineId.get(machine.id) ?? 0
+         const healthChanged = payload.health !== undefined
+             && healthDisplayChanged(previousHealth, machine.health)
+diff --git a/hub/src/sync/sessionCache.ts b/hub/src/sync/sessionCache.ts
+index 66cfe0160..dc614a1c5 100644
+--- a/hub/src/sync/sessionCache.ts
++++ b/hub/src/sync/sessionCache.ts
+@@ -438,7 +438,7 @@ export class SessionCache {
+             && this.store.messages.getImmediateQueuedLocalMessages(session.id).length > 0
+ 
+         session.active = true
+-        session.activeAt = Math.max(session.activeAt, t)
++        session.activeAt = Math.max(session.activeAt, hubNow)
+         session.thinking = requestedThinking || preserveQueuedThinking
+         session.thinkingAt = t
+         if (!requestedThinking && preserveQueuedThinking && hasUnconsumedPrompt) {

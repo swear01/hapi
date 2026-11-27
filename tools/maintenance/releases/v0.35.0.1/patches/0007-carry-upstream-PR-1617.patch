@@ -1,0 +1,124 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Fri, 13 Nov 2026 03:50:15 +0800
+Subject: [PATCH 07/29] carry(upstream): PR #1617
+
+---
+ web/src/components/SessionActionMenu.test.tsx | 16 ++++++++--------
+ web/src/components/SessionHeader.test.tsx     |  4 ++--
+ web/src/lib/locales/en.ts                     |  4 ++--
+ web/src/lib/locales/zh-CN.ts                  |  4 ++--
+ 4 files changed, 14 insertions(+), 14 deletions(-)
+
+diff --git a/web/src/components/SessionActionMenu.test.tsx b/web/src/components/SessionActionMenu.test.tsx
+index bbf486c98..676a1a153 100644
+--- a/web/src/components/SessionActionMenu.test.tsx
++++ b/web/src/components/SessionActionMenu.test.tsx
+@@ -234,10 +234,10 @@ describe('SessionActionMenu - Reopen action', () => {
+ })
+ 
+ describe('SessionActionMenu - Codex sync action', () => {
+-    it('renders Sync Codex only when a handler is provided', () => {
++    it('renders Sync session only when a Codex handler is provided', () => {
+         const { rerender } = renderMenu({ onSyncCodex: undefined })
+ 
+-        expect(screen.queryByRole('menuitem', { name: /Sync Codex/ })).toBeNull()
++        expect(screen.queryByRole('menuitem', { name: /Sync session/ })).toBeNull()
+ 
+         rerender(
+             <I18nProvider>
+@@ -258,7 +258,7 @@ describe('SessionActionMenu - Codex sync action', () => {
+             </I18nProvider>
+         )
+ 
+-        expect(screen.getByRole('menuitem', { name: /Sync Codex/ })).toBeInTheDocument()
++        expect(screen.getByRole('menuitem', { name: /Sync session/ })).toBeInTheDocument()
+     })
+ 
+     it('fires onSyncCodex and closes the menu when clicked', () => {
+@@ -266,7 +266,7 @@ describe('SessionActionMenu - Codex sync action', () => {
+         const onClose = vi.fn()
+         renderMenu({ onSyncCodex, onClose })
+ 
+-        fireEvent.click(screen.getByRole('menuitem', { name: /Sync Codex/ }))
++        fireEvent.click(screen.getByRole('menuitem', { name: /Sync session/ }))
+ 
+         expect(onSyncCodex).toHaveBeenCalledTimes(1)
+         expect(onClose).toHaveBeenCalledTimes(1)
+@@ -274,20 +274,20 @@ describe('SessionActionMenu - Codex sync action', () => {
+ })
+ 
+ describe('SessionActionMenu - Pi sync action', () => {
+-    it('renders, fires, and closes Sync Pi history when a handler is provided', () => {
++    it('renders, fires, and closes Sync session when a Pi handler is provided', () => {
+         const onSyncPi = vi.fn()
+         const onClose = vi.fn()
+         renderMenu({ onSyncPi, onClose })
+ 
+-        fireEvent.click(screen.getByRole('menuitem', { name: /Sync Pi history/ }))
++        fireEvent.click(screen.getByRole('menuitem', { name: /Sync session/ }))
+ 
+         expect(onSyncPi).toHaveBeenCalledOnce()
+         expect(onClose).toHaveBeenCalledOnce()
+     })
+ 
+-    it('hides Sync Pi history when no handler is provided', () => {
++    it('hides Sync session when no Pi handler is provided', () => {
+         renderMenu({ onSyncPi: undefined })
+-        expect(screen.queryByRole('menuitem', { name: /Sync Pi history/ })).toBeNull()
++        expect(screen.queryByRole('menuitem', { name: /Sync session/ })).toBeNull()
+     })
+ })
+ 
+diff --git a/web/src/components/SessionHeader.test.tsx b/web/src/components/SessionHeader.test.tsx
+index 81669168a..91bf70f72 100644
+--- a/web/src/components/SessionHeader.test.tsx
++++ b/web/src/components/SessionHeader.test.tsx
+@@ -209,7 +209,7 @@ describe('SessionHeader', () => {
+         )
+ 
+         fireEvent.click(screen.getByRole('button', { name: /More/ }))
+-        fireEvent.click(screen.getByRole('menuitem', { name: /Sync Pi history/ }))
++        fireEvent.click(screen.getByRole('menuitem', { name: /Sync session/ }))
+ 
+         await waitFor(() => expect(importPiSessions).toHaveBeenCalledWith({
+             sessionIds: ['pi-native-1'],
+@@ -242,7 +242,7 @@ describe('SessionHeader', () => {
+         )
+ 
+         fireEvent.click(screen.getByRole('button', { name: /More/ }))
+-        expect(screen.queryByRole('menuitem', { name: /Sync Pi history/ })).toBeNull()
++        expect(screen.queryByRole('menuitem', { name: /Sync session/ })).toBeNull()
+     })
+ 
+     it('renders and toggles the agent terminal control', () => {
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index 5e1b42424..71093bafb 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -303,8 +303,8 @@ export default {
+   'sessions.pinnedSection': 'Pinned sessions',
+   'session.action.export': 'Export conversation',
+   'session.action.markUnread': 'Mark as unread',
+-  'session.action.syncCodex': 'Sync Codex',
+-  'session.action.syncPi': 'Sync Pi history',
++  'session.action.syncCodex': 'Sync session',
++  'session.action.syncPi': 'Sync session',
+   'session.action.archive': 'Archive',
+   'session.archived.title': 'Session archived',
+   'session.action.reopen': 'Reopen',
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index 2966fe4ad..1651d8dec 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -303,8 +303,8 @@ export default {
+   'sessions.pinnedSection': '置顶会话',
+   'session.action.export': '导出对话',
+   'session.action.markUnread': '标为未读',
+-  'session.action.syncCodex': '同步 Codex',
+-  'session.action.syncPi': '同步 Pi 历史',
++  'session.action.syncCodex': '同步会话',
++  'session.action.syncPi': '同步会话',
+   'session.action.archive': '归档',
+   'session.archived.title': '会话已归档',
+   'session.action.reopen': '重新打开',

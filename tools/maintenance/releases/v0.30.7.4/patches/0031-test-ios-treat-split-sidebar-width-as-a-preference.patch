@@ -1,0 +1,24 @@
+From e2da5a9589c02ab7b938944b68b10ce29aa42552 Mon Sep 17 00:00:00 2001
+From: swear01 <swear01@users.noreply.github.com>
+Date: Sun, 27 Sep 2026 10:43:45 +0800
+Subject: [PATCH] test(ios): treat split sidebar width as a preference
+
+---
+ ios/HapiTests/SessionSplitPresentationTests.swift | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/ios/HapiTests/SessionSplitPresentationTests.swift b/ios/HapiTests/SessionSplitPresentationTests.swift
+index 3dd7cfdda..2ebda5e91 100644
+--- a/ios/HapiTests/SessionSplitPresentationTests.swift
++++ b/ios/HapiTests/SessionSplitPresentationTests.swift
+@@ -96,7 +96,6 @@ final class SessionSplitPresentationTests: XCTestCase {
+         let identity = try XCTUnwrap(probe.instances["a"])
+         let sidebar = try XCTUnwrap(split.viewController(for: .primary).flatMap { self.findCollection(in: $0.view) })
+         XCTAssertGreaterThanOrEqual(sidebar.bounds.width, 280)
+-        XCTAssertLessThanOrEqual(sidebar.bounds.width, 360)
+ 
+         list.selectMachine("debian")
+         try await settle { list.rows.map(\.id) == ["b"] }
+-- 
+2.54.0 (Apple Git-157)
+

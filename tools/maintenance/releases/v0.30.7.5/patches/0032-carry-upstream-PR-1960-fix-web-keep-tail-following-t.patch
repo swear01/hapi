@@ -1,0 +1,91 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Mon, 19 Oct 2026 15:37:18 +0000
+Subject: [PATCH 32/51] carry(upstream): PR #1960 fix(web): keep tail following
+ through layout-driven scroll
+
+Upstream-head: a3334977c6a0d20c84405c7d539a20d30819fce0
+---
+ .../HappyThread.mobile-scroll.test.tsx        | 40 +++++++++++++++++++
+ .../components/AssistantChat/HappyThread.tsx  | 20 ++++++++++
+ 2 files changed, 60 insertions(+)
+
+diff --git a/web/src/components/AssistantChat/HappyThread.mobile-scroll.test.tsx b/web/src/components/AssistantChat/HappyThread.mobile-scroll.test.tsx
+index 52d4af0fb..e8d2e44bc 100644
+--- a/web/src/components/AssistantChat/HappyThread.mobile-scroll.test.tsx
++++ b/web/src/components/AssistantChat/HappyThread.mobile-scroll.test.tsx
+@@ -354,3 +354,43 @@ describe('explicit tail scrolling', () => {
+         expect(onViewModeChange).not.toHaveBeenCalledWith('history')
+     })
+ })
++
++describe('tail following survives layout-driven movement', () => {
++    it('re-pins to the tail when content grows without a user gesture', () => {
++        const { viewport, onViewModeChange } = renderThread()
++        act(() => {
++            vi.advanceTimersByTime(1_800)
++        })
++        expect(viewport.scrollTop).toBe(702)
++
++        // Streaming assistant output grows the transcript while the viewport
++        // sits still, so distanceFromBottom increases without any scroll input.
++        Object.defineProperty(viewport, 'scrollHeight', { configurable: true, value: 1_400 })
++        fireEvent.scroll(viewport)
++        act(() => {
++            vi.advanceTimersByTime(0)
++        })
++
++        expect(viewport.scrollTop).toBe(870)
++        expect(onViewModeChange).not.toHaveBeenCalledWith('history')
++    })
++
++    it('re-pins to the tail when the mobile keyboard shrinks the viewport', () => {
++        const { viewport, onViewModeChange } = renderThread()
++        act(() => {
++            vi.advanceTimersByTime(1_800)
++        })
++        expect(viewport.scrollTop).toBe(702)
++
++        // Opening the keyboard shortens the visual viewport; the browser
++        // reports a scroll without any upward gesture from the user.
++        Object.defineProperty(viewport, 'clientHeight', { configurable: true, value: 400 })
++        fireEvent.scroll(viewport)
++        act(() => {
++            vi.advanceTimersByTime(0)
++        })
++
++        expect(viewport.scrollTop).toBe(832)
++        expect(onViewModeChange).not.toHaveBeenCalledWith('history')
++    })
++})
+diff --git a/web/src/components/AssistantChat/HappyThread.tsx b/web/src/components/AssistantChat/HappyThread.tsx
+index e7972edbf..775cd2500 100644
+--- a/web/src/components/AssistantChat/HappyThread.tsx
++++ b/web/src/components/AssistantChat/HappyThread.tsx
+@@ -886,6 +886,26 @@ export function HappyThread(props: {
+                 void requestOlderRef.current(explicitUpwardIntent ? 'user' : 'coverage')
+             }
+ 
++            // Content growth and viewport resizes (mobile keyboard) move the
++            // tail without any user gesture. While tail-follow is active, treat
++            // a non-upward scroll as layout churn and re-pin to the newest
++            // message instead of silently dropping out of tail mode.
++            if (
++                autoScrollEnabledRef.current
++                && !intent.isScrollingUp
++                && !tailScrollInProgressRef.current
++                && !pendingScrollRef.current
++            ) {
++                setShowScrollToBottom(false)
++                setAutoScrollMode(true)
++                setAtBottomMode(true)
++                if (!intent.isNearBottom) {
++                    viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'instant' })
++                    lastScrollTopRef.current = viewport.scrollTop
++                }
++                return
++            }
++
+             if (intent.isScrollingUp && intent.distanceFromBottom > MANUAL_SCROLL_EPSILON_PX) {
+                 tailScrollInProgressRef.current = false
+                 setShowScrollToBottom(false)

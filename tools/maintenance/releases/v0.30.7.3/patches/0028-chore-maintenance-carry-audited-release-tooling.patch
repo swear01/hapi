@@ -1,0 +1,1708 @@
+From 2129c809b123b528809ba58d3fb7cb7417cb5575 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 26 Sep 2026 16:36:50 +0800
+Subject: [PATCH] chore(maintenance): carry audited release tooling
+
+---
+ .gitattributes                                |   1 +
+ tools/maintenance/README.md                   | 174 ++++++
+ tools/maintenance/audit-release.sh            | 174 ++++++
+ tools/maintenance/smoke-runner.sh             | 121 ++++
+ tools/maintenance/sync-from-upstream.sh       | 386 +++++++++++++
+ tools/maintenance/tests/test_release_audit.py | 159 +++++
+ .../tests/test_release_workflows.py           |  49 ++
+ .../tests/test_sync_from_upstream.py          | 545 ++++++++++++++++++
+ tools/maintenance/tests/test_web_manifest.py  |  16 +
+ 9 files changed, 1625 insertions(+)
+ create mode 100644 .gitattributes
+ create mode 100644 tools/maintenance/README.md
+ create mode 100755 tools/maintenance/audit-release.sh
+ create mode 100755 tools/maintenance/smoke-runner.sh
+ create mode 100755 tools/maintenance/sync-from-upstream.sh
+ create mode 100644 tools/maintenance/tests/test_release_audit.py
+ create mode 100644 tools/maintenance/tests/test_release_workflows.py
+ create mode 100644 tools/maintenance/tests/test_sync_from_upstream.py
+ create mode 100644 tools/maintenance/tests/test_web_manifest.py
+
+diff --git a/.gitattributes b/.gitattributes
+new file mode 100644
+index 000000000..24e115f5b
+--- /dev/null
++++ b/.gitattributes
+@@ -0,0 +1 @@
++*.patch -whitespace
+diff --git a/tools/maintenance/README.md b/tools/maintenance/README.md
+new file mode 100644
+index 000000000..0ae6ff4b5
+--- /dev/null
++++ b/tools/maintenance/README.md
+@@ -0,0 +1,174 @@
++# Maintained release tools
++
++Use these tools from an isolated worktree under `~/.agent-worktrees/`.
++Maintained releases are upstream-first rebuilds: start at a pinned
++`upstream/main`, then apply only audited fork patches. The previous maintained
++release is a behavior reference, never the new branch base.
++
++## Release record
++
++Create one directory for the new tag:
++
++```text
++tools/maintenance/releases/<tag>/
++├── audit.md
++├── manifest.tsv
++├── pr-audit.tsv
++└── patches/
++```
++
++Do not copy old release queues into a new rebuild. Regenerate patches from the
++resolved integration so rehearsal reproduces the reviewed tree.
++
++## Audit
++
++Generate a fresh snapshot immediately before selection:
++
++```bash
++tools/maintenance/audit-release.sh \
++  --output tools/maintenance/releases/<tag>/audit.md \
++  --pr-audit-output tools/maintenance/releases/<tag>/pr-audit.tsv
++```
++
++The script fetches branches without tags and reads maintained tags through an
++origin-specific ref namespace. A fork tag therefore cannot overwrite a same-name
++upstream or local tag.
++
++`pr-audit.tsv` has eleven tab-separated columns:
++
++```text
++upstream_ref author head_sha decision status maintainer_signal bot_verdict bot_sha scope behavior reason
++```
++
++Record every open pull request. A normal carry requires:
++
++- `decision=carry`
++- `status=ready`
++- `maintainer_signal=clear`
++- `bot_verdict=clean` at `bot_sha=head_sha`
++- `scope=proportional`, or `scope=exception` with evidence
++- `behavior=preserve` or `behavior=accepted-change`
++
++Personal pull requests authored by the owner of `origin` start as carries only
++while they remain open upstream. The release report must still list every
++quality-gate exception. Closed, unmerged upstream PRs are excluded regardless
++of author; officially merged behavior comes from the upstream base and must
++not be replayed. Before the next release, remove the Codex Reopen path check
++from closed PR #847. Review the previous release's carried PRs against their
++current upstream state, then inspect the final source tree: a regenerated
++whole-source overlay can retain closed PR code without a `pr-<number>` row.
++
++## Manifest
++
++`manifest.tsv` has no header. Each non-comment line is:
++
++```text
++patch<TAB>state<TAB>upstream_ref<TAB>source_commits
++```
++
++States:
++
++- `carry`: audited pull-request patch
++- `integrated`: audited pull request already represented by the resolved baseline,
++  a coalesced carry, or authoritative upstream behavior; no duplicate patch
++- `regenerate`: resolved fork or release patch
++- `drop`: historical source commit intentionally omitted
++
++`carry` and `regenerate` rows require a real `git am` patch. Source commits are
++comma-separated full SHAs. `carry` and `integrated` rows record the audited PR
++head, which need not exist in the old fork. Every audit `decision=carry` must
++have one of those mappings. Regenerate rows account for old fork commits and
++must cover the previous `origin/main` delta. Use `-` only when a generated patch
++has no prior fork commit to account for. Header pins (`upstream_sha`,
++`previous_origin_main`, and canonical `expected_source_tree`) are enforced;
++the canonical tree excludes that release's record directory to avoid a
++self-referential hash. Root `.gitattributes` disables
++whitespace diagnostics for `*.patch` artifacts because unified-diff context
++markers are significant; source files remain checked.
++
++Release-manifest detection resolves physical paths so macOS `/var` and
++`/private/var` aliases cannot bypass audit or header-pin enforcement.
++
++## Rehearsal
++
++Pin the audited upstream SHA. That SHA must equal `upstream/main`, or be an
++ancestor of `upstream/main` (latest GitHub Release while main has moved on).
++A pin that is not on the official main line fails:
++
++```bash
++HAPI_UPSTREAM_SHA=<full-upstream-sha> \
++tools/maintenance/sync-from-upstream.sh \
++  --patch-dir tools/maintenance/releases/<tag>/patches \
++  --manifest tools/maintenance/releases/<tag>/manifest.tsv \
++  --pr-audit tools/maintenance/releases/<tag>/pr-audit.tsv
++```
++
++`--upstream-sha <sha>` is equivalent to `HAPI_UPSTREAM_SHA`. Rehearsal
++worktrees live under `${HAPI_WORKTREE_ROOT:-~/.agent-worktrees/hapi-maintenance}`.
++Clean worktrees are removed normally. A dirty or conflicted rehearsal is retained
++and its path is printed for inspection.
++
++The script is rehearsal-only. It never pushes. Publication uses a reviewed exact
++SHA after fork CI passes.
++
++## Build and review gate
++
++Use Bun 1.4.0 from the repository root:
++
++```bash
++bun install --frozen-lockfile
++bun typecheck
++bun run test
++bun run test:e2e -- terminal-wrap-fidelity.spec.ts composer-copy.spec.ts
++bun run test:cli:integration
++python3 -m unittest discover -s tools/maintenance/tests -p 'test_*.py'
++```
++
++Run fixture and native gates when their inputs change:
++
++```bash
++bun run gen:fixtures
++git diff --exit-code -- shared/fixtures
++(cd android && ./gradlew :core:protocol:test :app:assembleDebug)
++```
++
++macOS CI additionally runs the HapiKit tests and simulator build.
++
++Before publication, invoke the shared `pre-push-review` skill and inspect the
++full diff against the pinned `upstream/main`.
++
++## Release metadata
++
++For `<tag>`:
++
++- Set `cli/package.json` and `shared/src/buildInfo.ts` to the same four-part
++  version. Keep platform optional dependencies on the official three-part
++  version.
++- Add `.github/release-notes/<tag>.md` containing both literal headings:
++  `Compared with the previous maintained release` and
++  `Compared with the official release`.
++- Keep the release workflow on Bun 1.4.0 with frozen installs.
++- Do not tag until the exact reviewed release SHA has passed all fork CI and the
++  latest-head review bot.
++
++Open a ready PR against `swear01/hapi:main` for review. After it passes, update
++fork `main` with an explicit lease on the previously audited SHA:
++
++```bash
++git fetch --no-tags origin main
++old_origin_sha=<audited-origin-main-sha>
++test "$(git rev-parse origin/main)" = "$old_origin_sha"
++git push \
++  --force-with-lease="main:$old_origin_sha" \
++  origin <reviewed-release-sha>:refs/heads/main
++```
++
++Wait for checks on that exact `main` SHA, then create and push the four-part tag.
++Verify the curated release assets and `checksums.txt` before deployment.
++
++## Smoke harness
++
++`smoke-runner.sh` uses an isolated `HAPI_HOME` and cleans up its child processes.
++Do not run it on a production runner host. Its default listen address is
++`127.0.0.1`; use an SSH tunnel for remote access. `SKIP_BUILD=1` skips the web
++build only when a separately verified build already exists.
+diff --git a/tools/maintenance/audit-release.sh b/tools/maintenance/audit-release.sh
+new file mode 100755
+index 000000000..876e2013e
+--- /dev/null
++++ b/tools/maintenance/audit-release.sh
+@@ -0,0 +1,174 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++repo=.
++output=
++pr_audit_output=
++upstream_repo="${HAPI_UPSTREAM_REPO:-tiann/hapi}"
++personal_pr_owner="${HAPI_PERSONAL_PR_OWNER:-}"
++
++while [ "$#" -gt 0 ]; do
++    case "$1" in
++        --repo) repo=$2; shift 2 ;;
++        --output) output=$2; shift 2 ;;
++        --pr-audit-output) pr_audit_output=$2; shift 2 ;;
++        --upstream-repo) upstream_repo=$2; shift 2 ;;
++        --personal-pr-owner) personal_pr_owner=$2; shift 2 ;;
++        *) echo "Unknown argument: $1" >&2; exit 2 ;;
++    esac
++done
++
++git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || { echo "Not a git checkout: $repo" >&2; exit 2; }
++[ -n "$output" ] || { echo "--output is required" >&2; exit 2; }
++
++if [ -z "$personal_pr_owner" ]; then
++    origin_url="$(git -C "$repo" remote get-url origin)"
++    personal_pr_owner="$(printf '%s\n' "$origin_url" | sed -nE 's#^(git@github\.com:|https://github\.com/)([^/]+)/.*#\2#p')"
++fi
++[ -n "$personal_pr_owner" ] || personal_pr_owner=unknown
++
++origin_tag_namespace=refs/hapi-maintained-tags/origin
++
++git -C "$repo" fetch --no-tags origin +main:refs/remotes/origin/main
++git -C "$repo" fetch --no-tags upstream main:refs/remotes/upstream/main
++while read -r ref; do
++    git -C "$repo" update-ref -d "$ref"
++done < <(git -C "$repo" for-each-ref --format='%(refname)' "$origin_tag_namespace")
++git -C "$repo" fetch --no-tags origin "+refs/tags/*:${origin_tag_namespace}/*"
++
++previous_tag="$({
++    git -C "$repo" for-each-ref \
++        --sort=-version:refname \
++        --format='%(refname:strip=3)' \
++        "$origin_tag_namespace" \
++        | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' \
++        || true
++    } | while read -r tag; do
++        if git -C "$repo" merge-base --is-ancestor "$origin_tag_namespace/$tag^{commit}" origin/main; then
++            printf '%s\n' "$tag"
++            break
++        fi
++    done)"
++[ -n "$previous_tag" ] || { echo "No maintained four-part tag is reachable from origin/main" >&2; exit 3; }
++
++official_tag="$(gh release view --repo "$upstream_repo" --json tagName | python3 -c 'import json,sys; print(json.load(sys.stdin)["tagName"])')"
++upstream_owner="${upstream_repo%%/*}"
++upstream_name="${upstream_repo#*/}"
++[ "$upstream_owner" != "$upstream_name" ] || { echo "Invalid upstream repository: $upstream_repo" >&2; exit 2; }
++prs="$(gh api graphql --paginate \
++    -F owner="$upstream_owner" \
++    -F repo="$upstream_name" \
++    -F perPage=25 \
++    -f query='query($owner: String!, $repo: String!, $perPage: Int!, $endCursor: String) {
++        repository(owner: $owner, name: $repo) {
++            pullRequests(states: OPEN, first: $perPage, after: $endCursor, orderBy: {field: CREATED_AT, direction: DESC}) {
++                nodes {
++                    number title isDraft mergeStateStatus headRefOid url additions deletions changedFiles
++                    author { login }
++                    commits(last: 1) {
++                        nodes {
++                            commit {
++                                statusCheckRollup {
++                                    contexts(first: 100) {
++                                        nodes {
++                                            __typename
++                                            ... on CheckRun { status conclusion }
++                                            ... on StatusContext { state }
++                                        }
++                                    }
++                                }
++                            }
++                        }
++                    }
++                }
++                pageInfo { hasNextPage endCursor }
++            }
++        }
++    }' \
++    --jq '.data.repository.pullRequests.nodes' \
++    | python3 -c '
++import json, sys
++
++pull_requests = []
++for line in sys.stdin:
++    pull_requests.extend(json.loads(line))
++for pr in pull_requests:
++    commits = pr.pop("commits", {}).get("nodes") or []
++    rollup = commits[0]["commit"].get("statusCheckRollup") if commits else None
++    pr["statusCheckRollup"] = rollup["contexts"]["nodes"] if rollup else []
++json.dump(pull_requests, sys.stdout, separators=(",", ":"))
++')"
++
++mkdir -p "$(dirname "$output")"
++{
++    printf '# HAPI maintained release audit\n\n'
++    printf 'Previous maintained release: %s\n\n' "$previous_tag"
++    printf 'Official release: %s\n\n' "$official_tag"
++    printf 'Personal PR owner: %s\n\n' "$personal_pr_owner"
++    printf 'Origin main: %s\n' "$(git -C "$repo" rev-parse origin/main)"
++    printf 'Upstream main: %s\n\n' "$(git -C "$repo" rev-parse upstream/main)"
++    printf '## Fork-only commits\n\n'
++    git -C "$repo" log --format='- %H %s' upstream/main..origin/main
++    printf '\n## Open upstream pull requests\n\n'
++    printf '%s' "$prs" | python3 -c '
++import json, sys
++for pr in json.load(sys.stdin):
++    state = "draft" if pr["isDraft"] else pr["mergeStateStatus"]
++    print("- #{} [{}] {} @ {} ({})".format(pr["number"], state, pr["title"], pr["headRefOid"], pr["url"]))
++'
++    printf '\n## Required decisions\n\n'
++    printf 'Record every open PR as carry, defer, or drop with its reviewed SHA before rebuilding.\n'
++    printf 'Normal carries require ready CI/merge state, clear maintainer signal, latest-head HAPI Bot no-findings, proportional or evidenced scope, and preserved or accepted behavior.\n'
++    printf 'Personal PRs authored by %s are auto-carry; record and report every failed quality rule after integration.\n' "$personal_pr_owner"
++    printf 'Official upstream is authoritative; upstreamed PRs are accepted and are not replayed.\n'
++} > "$output"
++
++if [ -n "$pr_audit_output" ]; then
++    mkdir -p "$(dirname "$pr_audit_output")"
++    printf '%s' "$prs" | python3 -c '
++import json, sys
++
++owner, output = sys.argv[1:]
++allowed = {"SUCCESS", "NEUTRAL", "SKIPPED"}
++
++def status(pr):
++    if pr["isDraft"]:
++        return "draft"
++    if pr["mergeStateStatus"] != "CLEAN":
++        return "merge-" + pr["mergeStateStatus"].lower()
++    checks = pr.get("statusCheckRollup") or []
++    if not checks:
++        return "checks-missing"
++    if any(
++        check["__typename"] == "CheckRun" and check.get("status") != "COMPLETED"
++        or check["__typename"] == "StatusContext" and check.get("state") in {"EXPECTED", "PENDING"}
++        for check in checks
++    ):
++        return "checks-pending"
++    if any(
++        check["__typename"] == "CheckRun" and check.get("conclusion") not in allowed
++        or check["__typename"] == "StatusContext" and check.get("state") != "SUCCESS"
++        for check in checks
++    ):
++        return "checks-failed"
++    return "ready"
++
++with open(output, "w") as handle:
++    handle.write("upstream_ref\tauthor\thead_sha\tdecision\tstatus\tmaintainer_signal\tbot_verdict\tbot_sha\tscope\tbehavior\treason\n")
++    for pr in json.load(sys.stdin):
++        author = pr["author"]["login"]
++        decision = "carry" if author.lower() == owner.lower() else "review"
++        if pr["additions"] > 3000 or pr["changedFiles"] > 40:
++            scope = "review-huge"
++        elif pr["additions"] > 1000 or pr["changedFiles"] > 20:
++            scope = "review-large"
++        else:
++            scope = "review"
++        reason = "additions={},deletions={},files={}".format(pr["additions"], pr["deletions"], pr["changedFiles"])
++        values = ["pr-{}".format(pr["number"]), author, pr["headRefOid"], decision, status(pr), "review", "review", "-", scope, "review", reason]
++        handle.write("\t".join(values) + "\n")
++' "$personal_pr_owner" "$pr_audit_output"
++    printf 'Wrote %s\n' "$pr_audit_output"
++fi
++
++printf 'Wrote %s\n' "$output"
+diff --git a/tools/maintenance/smoke-runner.sh b/tools/maintenance/smoke-runner.sh
+new file mode 100755
+index 000000000..9406cf3ff
+--- /dev/null
++++ b/tools/maintenance/smoke-runner.sh
+@@ -0,0 +1,121 @@
++#!/usr/bin/env bash
++# tools/maintenance/smoke-runner.sh — isolated dev hub + source runner smoke harness.
++#
++# Runs a throwaway hapi hub + source runner against an isolated HAPI_HOME so a
++# PR can be exercised without touching the production runner or hub. Every
++# process is owned by this script and killed on exit (no setsid, no orphans).
++#
++# Guard: refuses to run on production runner hosts (oracle / swever and the
++# small Linux fleet boxes) because their RAM/CPU cannot absorb build:web + a
++# second runner. Allowed by default: Mac, mazu, and any other machine.
++# Override with HAPI_SMOKE_FORCE=1 (only on machines you know can take it).
++#
++# Usage:
++#   cd <hapi checkout>   # must be the repo root (this script lives under tools/)
++#   ./tools/maintenance/smoke-runner.sh            # 127.0.0.1 only
++#   HAPI_LISTEN_HOST=0.0.0.0 ./tools/maintenance/smoke-runner.sh  # LAN access
++#   SKIP_BUILD=1 ./tools/maintenance/smoke-runner.sh              # skip build:web
++#
++# Ctrl-C (or SIGTERM/SIGHUP) stops the hub and runner and removes $TEST_HOME.
++
++set -euo pipefail
++
++# ── Guard: production hosts where this must not run ────────────────────────
++PROD_HOSTS="oracle swever cthulhu athena valkyrie zeus"
++HOST="$(hostname | cut -d. -f1)"
++if [[ " $PROD_HOSTS " == *" $HOST "* ]]; then
++  if [[ "${HAPI_SMOKE_FORCE:-}" != "1" ]]; then
++    echo "ERROR: host '$HOST' is a production runner host; refusing to run." >&2
++    echo "  Run this on your Mac or on mazu. If you really know what you are" >&2
++    echo "  doing (machine has spare RAM/CPU), set HAPI_SMOKE_FORCE=1." >&2
++    exit 1
++  fi
++  echo "WARNING: running on production host '$HOST' with HAPI_SMOKE_FORCE=1." >&2
++fi
++
++# Processes this harness owns (hub + source runner started via bun).
++SMOKE_PATTERN='bun (hub/src/index[.]ts|cli/src/index[.]ts runner start-sync)'
++
++# Must run from the repo root (script lives under tools/maintenance/).
++REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
++cd "$REPO_ROOT"
++[ -f package.json ] || { echo "ERROR: not a hapi repo root: $REPO_ROOT" >&2; exit 1; }
++
++# ── Stray-process check: refuse if a previous run left hub/runner behind ───
++STRAYS="$(pgrep -f "$SMOKE_PATTERN" || true)"
++if [ -n "$STRAYS" ]; then
++  echo "ERROR: leftover smoke hub/runner processes from a previous run:" >&2
++  ps -o pid,etime,cmd -p $STRAYS >&2
++  echo "  Kill them first (e.g. 'kill $STRAYS') or reboot." >&2
++  exit 1
++fi
++
++# ── Setup ──────────────────────────────────────────────────────────────────
++BUN_BIN="${BUN_BIN:-$(command -v bun || true)}"
++if [ -z "$BUN_BIN" ] && [ -x "$HOME/.bun/bin/bun" ]; then BUN_BIN="$HOME/.bun/bin/bun"; fi
++[ -n "$BUN_BIN" ] || { echo "ERROR: bun not found (install it or set BUN_BIN)" >&2; exit 1; }
++
++TEST_HOME="$(mktemp -d /tmp/hapi-smoke.XXXXXX)"
++TEST_PORT="${HAPI_SMOKE_PORT:-17888}"
++TEST_TOKEN="${HAPI_SMOKE_TOKEN:-$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 18)}"
++HAPI_LISTEN_HOST="${HAPI_LISTEN_HOST:-127.0.0.1}"
++HUB_PID=""
++RUNNER_PID=""
++
++cleanup() {
++  trap - EXIT INT TERM HUP
++  # Graceful first; the source runner may defer SIGTERM while shutting down.
++  kill "$RUNNER_PID" "$HUB_PID" 2>/dev/null || true
++  sleep 2
++  # Hard-kill stragglers so no orphan survives the harness.
++  pkill -KILL -f "$SMOKE_PATTERN" 2>/dev/null || true
++  rm -rf "$TEST_HOME"
++  echo
++  echo "smoke harness stopped; cleaned $TEST_HOME"
++}
++trap cleanup EXIT INT TERM HUP
++
++cat > "$TEST_HOME/env" <<ENV
++HAPI_HOME=$TEST_HOME
++HAPI_LISTEN_HOST=$HAPI_LISTEN_HOST
++HAPI_LISTEN_PORT=$TEST_PORT
++HAPI_PUBLIC_URL=http://$HAPI_LISTEN_HOST:$TEST_PORT
++CORS_ORIGINS=*
++CLI_API_TOKEN=$TEST_TOKEN
++HAPI_API_URL=http://127.0.0.1:$TEST_PORT
++TELEGRAM_NOTIFICATION=false
++ENV
++
++# ── Build web assets (optional; the hub serves the current UI with them) ───
++if [[ "${SKIP_BUILD:-}" != "1" ]]; then
++  echo "== build:web (this is the memory-hungry step) =="
++  npm exec -- bun run build:web
++fi
++
++# ── Start isolated hub ─────────────────────────────────────────────────────
++set -a; source "$TEST_HOME/env"; set +a
++echo "== starting isolated hub on $HAPI_LISTEN_HOST:$TEST_PORT =="
++"$BUN_BIN" hub/src/index.ts > "$TEST_HOME/hub.log" 2>&1 &
++HUB_PID=$!
++for _ in $(seq 1 30); do
++  curl -fsS "http://127.0.0.1:$TEST_PORT/health" >/dev/null 2>&1 && break
++  sleep 1
++done
++curl -fsS "http://127.0.0.1:$TEST_PORT/health" >/dev/null 2>&1 \
++  || { echo "ERROR: hub did not come up; see $TEST_HOME/hub.log" >&2; exit 1; }
++
++# ── Start source runner against that hub ───────────────────────────────────
++echo "== starting source runner (workspace-root: $(pwd)) =="
++"$BUN_BIN" cli/src/index.ts runner start-sync --workspace-root "$REPO_ROOT" \
++  > "$TEST_HOME/runner.log" 2>&1 &
++RUNNER_PID=$!
++sleep 3
++kill -0 "$RUNNER_PID" 2>/dev/null \
++  || { echo "ERROR: runner died; see $TEST_HOME/runner.log" >&2; exit 1; }
++
++echo
++echo "Open: http://$HAPI_LISTEN_HOST:$TEST_PORT/?token=$TEST_TOKEN"
++echo "Hub pid: $HUB_PID   Runner pid: $RUNNER_PID"
++echo "Logs: $TEST_HOME/{hub,runner}.log   Press Ctrl-C to stop everything."
++echo
++wait
+diff --git a/tools/maintenance/sync-from-upstream.sh b/tools/maintenance/sync-from-upstream.sh
+new file mode 100755
+index 000000000..d9b9110c9
+--- /dev/null
++++ b/tools/maintenance/sync-from-upstream.sh
+@@ -0,0 +1,386 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++caller_dir="$PWD"
++repo="${HAPI_REPO:-$PWD}"
++base_dir="$script_dir"
++patch_dir="$base_dir/patches"
++manifest="$base_dir/manifest.tsv"
++pr_audit=
++personal_pr_owner="${HAPI_PERSONAL_PR_OWNER:-}"
++upstream_repo="${HAPI_UPSTREAM_REPO:-}"
++upstream_sha="${HAPI_UPSTREAM_SHA:-}"
++worktree_root="${HAPI_WORKTREE_ROOT:-$HOME/.agent-worktrees/hapi-maintenance}"
++skip_tests=0
++push=0
++bun_dir=
++test_home=
++canonical_index=
++open_pr_file=
++
++while [ "$#" -gt 0 ]; do
++    case "$1" in
++        --repo) repo=$2; shift 2 ;;
++        --patch-dir) patch_dir=$2; shift 2 ;;
++        --manifest) manifest=$2; shift 2 ;;
++        --pr-audit) pr_audit=$2; shift 2 ;;
++        --personal-pr-owner) personal_pr_owner=$2; shift 2 ;;
++        --upstream-sha) upstream_sha=$2; shift 2 ;;
++        --skip-tests) skip_tests=1; shift ;;
++        --push) push=1; shift ;;
++        *) echo "Unknown argument: $1" >&2; exit 2 ;;
++    esac
++done
++
++case "$repo" in /*) ;; *) repo="$caller_dir/$repo" ;; esac
++case "$patch_dir" in /*) ;; *) patch_dir="$caller_dir/$patch_dir" ;; esac
++case "$manifest" in /*) ;; *) manifest="$caller_dir/$manifest" ;; esac
++if [ -n "$pr_audit" ]; then
++    case "$pr_audit" in /*) ;; *) pr_audit="$caller_dir/$pr_audit" ;; esac
++fi
++
++if [ "$push" -eq 1 ]; then
++    echo "sync-from-upstream.sh is rehearsal-only; publish the reviewed release SHA separately" >&2
++    exit 3
++fi
++
++git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || { echo "Not a git checkout: $repo" >&2; exit 4; }
++[ -d "$patch_dir" ] || { echo "Missing patch directory: $patch_dir" >&2; exit 4; }
++[ -f "$manifest" ] || { echo "Missing manifest: $manifest" >&2; exit 4; }
++manifest="$(cd "$(dirname "$manifest")" && pwd -P)/$(basename "$manifest")"
++repo_root=$(cd "$(git -C "$repo" rev-parse --show-toplevel)" && pwd -P)
++release_record_rel=
++case "$manifest" in
++    "$repo_root"/*) release_record_rel=$(dirname "${manifest#"$repo_root"/}") ;;
++esac
++is_release_manifest=
++case "$release_record_rel" in tools/maintenance/releases/*) is_release_manifest=yes ;; esac
++manifest_has_pr_rows=$(awk -F $'\t' '$2 == "carry" || $2 == "integrated" { if ($3 ~ /^pr-[0-9]+$/) { print "yes"; exit } }' "$manifest")
++if { [ -n "$manifest_has_pr_rows" ] || [ -n "$is_release_manifest" ]; } && [ -z "$pr_audit" ]; then
++    echo "--pr-audit is required for pull-request or repository release manifests" >&2
++    exit 4
++fi
++[ -z "$pr_audit" ] || [ -f "$pr_audit" ] || { echo "Missing PR audit: $pr_audit" >&2; exit 4; }
++[ -n "$upstream_sha" ] || { echo "HAPI_UPSTREAM_SHA or --upstream-sha is required" >&2; exit 4; }
++
++if [ -z "$personal_pr_owner" ]; then
++    origin_url="$(git -C "$repo" remote get-url origin)"
++    personal_pr_owner="$(printf '%s\n' "$origin_url" | sed -nE 's#^(git@github\.com:|https://github\.com/)([^/]+)/.*#\2#p')"
++fi
++
++git -C "$repo" fetch --no-tags origin +main:refs/remotes/origin/main
++git -C "$repo" fetch --no-tags upstream +main:refs/remotes/upstream/main
++actual_upstream_sha=$(git -C "$repo" rev-parse upstream/main)
++if [ "$actual_upstream_sha" != "$upstream_sha" ]; then
++    if ! git -C "$repo" merge-base --is-ancestor "$upstream_sha" "$actual_upstream_sha"; then
++        parent_sha=$(git -C "$repo" rev-parse "${upstream_sha}^" 2>/dev/null || true)
++        if [ -n "$parent_sha" ] && git -C "$repo" merge-base --is-ancestor "$parent_sha" "$actual_upstream_sha"; then
++            echo "UPSTREAM_PIN_PARENT_ANCESTOR pin=$upstream_sha parent=$parent_sha tip=$actual_upstream_sha"
++        else
++            echo "UPSTREAM_HEAD_MISMATCH expected=$upstream_sha actual=$actual_upstream_sha" >&2
++            exit 4
++        fi
++    else
++        echo "UPSTREAM_PIN_ANCESTOR pin=$upstream_sha tip=$actual_upstream_sha"
++    fi
++fi
++old_origin_main=$(git -C "$repo" rev-parse origin/main)
++manifest_upstream_sha=$(sed -n 's/^# upstream_sha=//p' "$manifest")
++manifest_origin_sha=$(sed -n 's/^# previous_origin_main=//p' "$manifest")
++expected_source_tree=$(sed -n 's/^# expected_source_tree=//p' "$manifest")
++if [ -n "$manifest_upstream_sha" ] && [ "$manifest_upstream_sha" != "$upstream_sha" ]; then
++    echo "MANIFEST_UPSTREAM_SHA_MISMATCH expected=$manifest_upstream_sha actual=$upstream_sha" >&2
++    exit 4
++fi
++if [ -n "$manifest_origin_sha" ] && [ "$manifest_origin_sha" != "$old_origin_main" ]; then
++    echo "MANIFEST_ORIGIN_SHA_MISMATCH expected=$manifest_origin_sha actual=$old_origin_main" >&2
++    exit 4
++fi
++if [ -n "$is_release_manifest" ]; then
++    [ -n "$manifest_upstream_sha" ] || { echo "MISSING_MANIFEST_PIN: upstream_sha" >&2; exit 4; }
++    [ -n "$manifest_origin_sha" ] || { echo "MISSING_MANIFEST_PIN: previous_origin_main" >&2; exit 4; }
++    [ -n "$expected_source_tree" ] || { echo "MISSING_MANIFEST_PIN: expected_source_tree" >&2; exit 4; }
++fi
++
++allowed_file=$(mktemp)
++required_file=$(mktemp)
++actual_file=$(mktemp)
++mkdir -p "$worktree_root"
++worktree="$worktree_root/rehearsal-$$"
++[ ! -e "$worktree" ] || { echo "Rehearsal worktree path already exists: $worktree" >&2; exit 4; }
++cleanup() {
++    rm -f "$allowed_file" "$required_file" "$actual_file" ${canonical_index:+"$canonical_index"} ${open_pr_file:+"$open_pr_file"}
++    [ -z "$bun_dir" ] || rm -rf "$bun_dir"
++    [ -z "$test_home" ] || rm -rf "$test_home"
++    if [ -f "$worktree/.git" ]; then
++        if [ -n "$(git -C "$worktree" status --porcelain=v1)" ]; then
++            echo "REHEARSAL_WORKTREE_RETAINED=$worktree" >&2
++        elif ! git -C "$repo" worktree remove "$worktree" >/dev/null; then
++            echo "REHEARSAL_WORKTREE_RETAINED=$worktree" >&2
++        fi
++    fi
++}
++trap cleanup EXIT
++
++while IFS=$'\t' read -r patch state upstream_ref source_commits; do
++    [ -n "${patch:-}" ] || continue
++    case "$patch" in \#*) continue ;; esac
++    case "$state" in
++        carry|integrated)
++            if [ "$source_commits" != "-" ]; then
++                printf '%s\n' "$source_commits" | tr ',' '\n' >> "$allowed_file"
++            fi
++            ;;
++        regenerate)
++            if [ "$source_commits" != "-" ]; then
++                printf '%s\n' "$source_commits" | tr ',' '\n' >> "$allowed_file"
++                printf '%s\n' "$source_commits" | tr ',' '\n' >> "$required_file"
++            fi
++            ;;
++        drop)
++            if [ "$source_commits" != "-" ]; then
++                printf '%s\n' "$source_commits" | tr ',' '\n' >> "$allowed_file"
++            fi
++            ;;
++        *) echo "Invalid manifest state for $patch: $state" >&2; exit 6 ;;
++    esac
++done < "$manifest"
++
++if [ -n "$pr_audit" ]; then
++    python3 - "$manifest" "$pr_audit" "$personal_pr_owner" <<'PY'
++import csv
++import sys
++
++manifest_path, audit_path, personal_owner = sys.argv[1:]
++required = {
++    "upstream_ref", "author", "head_sha", "decision", "status",
++    "maintainer_signal", "bot_verdict", "bot_sha", "scope", "behavior", "reason",
++}
++
++with open(audit_path, newline="") as handle:
++    reader = csv.DictReader(handle, delimiter="\t")
++    missing = required - set(reader.fieldnames or [])
++    if missing:
++        sys.exit("INVALID_PR_AUDIT missing columns: " + ",".join(sorted(missing)))
++    rows = {}
++    for row in reader:
++        ref = row["upstream_ref"]
++        if ref in rows:
++            sys.exit("INVALID_PR_AUDIT duplicate: " + ref)
++        rows[ref] = row
++
++failed = False
++manifest_carries = {}
++with open(manifest_path) as handle:
++    for line in handle:
++        if not line.strip() or line.startswith("#"):
++            continue
++        _, state, ref, source = line.rstrip("\n").split("\t")
++        if state not in {"carry", "integrated"} or not ref.startswith("pr-"):
++            continue
++        if ref in manifest_carries:
++            print("DUPLICATE_MANIFEST_CARRY: " + ref, file=sys.stderr)
++            failed = True
++            continue
++        manifest_carries[ref] = source
++        row = rows.get(ref)
++        if row is None:
++            print("MISSING_PR_AUDIT: " + ref, file=sys.stderr)
++            failed = True
++            continue
++
++        if source != row["head_sha"]:
++            print("MANIFEST_SOURCE_HEAD_MISMATCH {}: source={} audited={}".format(
++                ref, source, row["head_sha"]
++            ), file=sys.stderr)
++            failed = True
++            continue
++
++        violations = []
++        if row["decision"] != "carry":
++            violations.append("decision-" + row["decision"])
++        if row["status"] != "ready":
++            violations.append("status-" + row["status"])
++        if row["maintainer_signal"] != "clear":
++            violations.append("maintainer-" + row["maintainer_signal"])
++        if row["bot_verdict"] != "clean":
++            violations.append("bot-" + row["bot_verdict"])
++        elif row["bot_sha"] != row["head_sha"]:
++            violations.append("bot-stale")
++        if row["scope"] not in {"proportional", "exception"}:
++            violations.append("scope-" + row["scope"])
++        elif row["scope"] == "exception" and row["reason"] in {"", "-"}:
++            violations.append("scope-exception-without-evidence")
++        if row["behavior"] not in {"preserve", "accepted-change"}:
++            violations.append("behavior-" + row["behavior"])
++
++        personal = bool(personal_owner) and row["author"].lower() == personal_owner.lower()
++        if personal:
++            if violations:
++                print("PERSONAL_PR_POLICY_EXCEPTION {}: {} | {}".format(ref, ",".join(violations), row["reason"]))
++            else:
++                print("PERSONAL_PR_AUTO_CARRY {}: passes standard gates".format(ref))
++        elif violations:
++            print("PR_QUALITY_GATE_FAILED {}: {}".format(ref, ",".join(violations)), file=sys.stderr)
++            failed = True
++
++for ref, row in rows.items():
++    if row["decision"] == "carry" and ref not in manifest_carries:
++        print("MISSING_MANIFEST_CARRY: " + ref, file=sys.stderr)
++        failed = True
++
++if failed:
++    sys.exit(6)
++PY
++
++    pr_refs=()
++    while IFS=$'\t' read -r upstream_ref _ head_sha _; do
++        case "$upstream_ref" in pr-*) pr_refs+=("refs/pull/${upstream_ref#pr-}/head") ;; esac
++    done < <(tail -n +2 "$pr_audit")
++    if [ "${#pr_refs[@]}" -gt 0 ]; then
++        live_pr_heads="$(git -C "$repo" ls-remote upstream "${pr_refs[@]}")"
++        while IFS=$'\t' read -r upstream_ref _ audited_head _; do
++            case "$upstream_ref" in pr-*) ;; *) continue ;; esac
++            remote_ref="refs/pull/${upstream_ref#pr-}/head"
++            live_head="$(printf '%s\n' "$live_pr_heads" | awk -v ref="$remote_ref" '$2 == ref { print $1 }')"
++            [ -n "$live_head" ] || { echo "PR_HEAD_NOT_FOUND: $upstream_ref" >&2; exit 6; }
++            [ "$live_head" = "$audited_head" ] || {
++                echo "PR_AUDIT_HEAD_STALE $upstream_ref: audited=$audited_head live=$live_head" >&2
++                exit 6
++            }
++        done < <(tail -n +2 "$pr_audit")
++    fi
++
++    if [ -z "$upstream_repo" ]; then
++        upstream_url="$(git -C "$repo" remote get-url upstream)"
++        upstream_repo="$(printf '%s\n' "$upstream_url" | sed -nE 's#^(git@github\.com:|https://github\.com/)([^/]+/[^/]+)$#\2#p')"
++        upstream_repo="${upstream_repo%.git}"
++    fi
++    if [[ "$upstream_repo" =~ ^[^/]+/[^/]+$ ]]; then
++        upstream_owner="${upstream_repo%%/*}"
++        upstream_name="${upstream_repo#*/}"
++        open_pr_file=$(mktemp)
++        gh api graphql --paginate \
++            -F owner="$upstream_owner" \
++            -F repo="$upstream_name" \
++            -F perPage=100 \
++            -f query='query($owner: String!, $repo: String!, $perPage: Int!, $endCursor: String) {
++                repository(owner: $owner, name: $repo) {
++                    pullRequests(states: OPEN, first: $perPage, after: $endCursor) {
++                        nodes { number headRefOid }
++                        pageInfo { hasNextPage endCursor }
++                    }
++                }
++            }' \
++            --jq '.data.repository.pullRequests.nodes' \
++            | python3 -c '
++import json, sys
++for line in sys.stdin:
++    for pr in json.loads(line):
++        print("pr-{}\t{}".format(pr["number"], pr["headRefOid"]))
++' > "$open_pr_file"
++        python3 - "$pr_audit" "$open_pr_file" <<'PY'
++import csv
++import sys
++
++audit_path, live_path = sys.argv[1:]
++with open(audit_path, newline="") as handle:
++    audited = {row["upstream_ref"]: row["head_sha"] for row in csv.DictReader(handle, delimiter="\t")}
++with open(live_path) as handle:
++    live = dict(line.rstrip("\n").split("\t", 1) for line in handle if line.strip())
++if set(audited) != set(live):
++    print("OPEN_PR_AUDIT_SET_MISMATCH missing={} closed={}".format(
++        ",".join(sorted(set(live) - set(audited))),
++        ",".join(sorted(set(audited) - set(live))),
++    ), file=sys.stderr)
++    sys.exit(6)
++for ref in sorted(live):
++    if audited[ref] != live[ref]:
++        print("PR_AUDIT_HEAD_STALE {}: audited={} live={}".format(ref, audited[ref], live[ref]), file=sys.stderr)
++        sys.exit(6)
++PY
++        rm -f "$open_pr_file"
++        open_pr_file=
++    elif [ -n "$is_release_manifest" ]; then
++        echo "INVALID_UPSTREAM_REPO: expected owner/repo, got ${upstream_repo:-empty}" >&2
++        exit 6
++    fi
++fi
++
++sort -u "$allowed_file" -o "$allowed_file"
++sort -u "$required_file" -o "$required_file"
++git -C "$repo" rev-list upstream/main..origin/main | sort -u > "$actual_file"
++
++unknown=$(comm -23 "$actual_file" "$allowed_file" || true)
++if [ -n "$unknown" ]; then
++    printf 'UNRECORDED_FORK_COMMIT: %s\n' "$unknown" >&2
++    exit 5
++fi
++missing=$(comm -13 "$actual_file" "$required_file" || true)
++if [ -n "$missing" ]; then
++    printf 'MANIFEST_COMMIT_NOT_IN_ORIGIN_MAIN: %s\n' "$missing" >&2
++    exit 5
++fi
++
++git -C "$repo" worktree add --detach "$worktree" "$upstream_sha" >/dev/null
++echo "REHEARSAL_WORKTREE=$worktree"
++
++while IFS=$'\t' read -r patch state upstream_ref source_commits; do
++    [ -n "${patch:-}" ] || continue
++    case "$patch" in \#*) continue ;; esac
++    case "$state" in
++        carry|regenerate)
++            [ -f "$patch_dir/$patch" ] || { echo "Missing patch: $patch" >&2; exit 6; }
++            git -C "$worktree" -c user.name=swear01 -c user.email=stanley.yellow1@gmail.com am "$patch_dir/$patch" >/dev/null
++            ;;
++        integrated|drop) ;;
++        *) echo "Invalid manifest state for $patch: $state" >&2; exit 6 ;;
++    esac
++done < "$manifest"
++
++if [ -n "$expected_source_tree" ]; then
++    actual_source_tree=$(git -C "$worktree" rev-parse 'HEAD^{tree}')
++    if [ -n "$release_record_rel" ]; then
++        canonical_index=$(mktemp)
++        GIT_INDEX_FILE="$canonical_index" git -C "$worktree" read-tree HEAD
++        GIT_INDEX_FILE="$canonical_index" git -C "$worktree" rm -r --cached --ignore-unmatch -- "$release_record_rel" >/dev/null
++        actual_source_tree=$(GIT_INDEX_FILE="$canonical_index" git -C "$worktree" write-tree)
++        rm -f "$canonical_index"
++        canonical_index=
++    fi
++    [ "$actual_source_tree" = "$expected_source_tree" ] || {
++        echo "REPLAY_TREE_MISMATCH expected=$expected_source_tree actual=$actual_source_tree" >&2
++        exit 6
++    }
++    echo "REPLAY_TREE_MATCHES=$actual_source_tree"
++fi
++
++if git -C "$worktree" diff --quiet origin/main HEAD; then
++    echo "TREE_MATCHES_ORIGIN_MAIN"
++else
++    echo "TREE_DIFFERS_FROM_ORIGIN_MAIN"
++    git -C "$worktree" diff --stat origin/main HEAD
++fi
++
++if [ "$skip_tests" -eq 0 ]; then
++    bun_bin=${BUN_BIN:-}
++    if [ -z "$bun_bin" ]; then
++        bun_bin=$(command -v bun || true)
++    fi
++    if [ -z "$bun_bin" ] && [ -x /home/ubuntu/.npm/_npx/5c4f1b4a21be27f7/node_modules/bun/bin/bun.exe ]; then
++        bun_bin=/home/ubuntu/.npm/_npx/5c4f1b4a21be27f7/node_modules/bun/bin/bun.exe
++    fi
++    [ -x "$bun_bin" ] || { echo "bun not found" >&2; exit 7; }
++    bun_dir=$(mktemp -d "${TMPDIR:-/tmp}/hapi-bun-path.XXXXXX")
++    ln -s "$bun_bin" "$bun_dir/bun"
++    export PATH="$bun_dir:$PATH"
++    (cd "$worktree" && bun install --frozen-lockfile && bun typecheck)
++    test_home=$(mktemp -d "${TMPDIR:-/tmp}/hapi-test-home.XXXXXX")
++    (cd "$worktree" && env -u HAPI_API_URL -u CLI_API_TOKEN -u HAPI_CLI_EXECUTABLE HAPI_HOME="$test_home" bun run test)
++    rm -rf "$test_home"
++    test_home=
++fi
++
++new_head=$(git -C "$worktree" rev-parse HEAD)
++echo "REHEARSAL_OK old=$old_origin_main new=$new_head"
+diff --git a/tools/maintenance/tests/test_release_audit.py b/tools/maintenance/tests/test_release_audit.py
+new file mode 100644
+index 000000000..c853574a6
+--- /dev/null
++++ b/tools/maintenance/tests/test_release_audit.py
+@@ -0,0 +1,159 @@
++from pathlib import Path
++import json
++import os
++import subprocess
++import tempfile
++import unittest
++
++
++ROOT = Path(__file__).resolve().parents[3]
++SCRIPT = ROOT / "tools" / "maintenance" / "audit-release.sh"
++
++
++class ReleaseAuditTest(unittest.TestCase):
++    def setUp(self):
++        self.tmp = tempfile.TemporaryDirectory()
++        self.root = Path(self.tmp.name)
++        self.upstream = self.root / "upstream.git"
++        self.origin = self.root / "origin.git"
++        self.seed = self.root / "seed"
++        self.repo = self.root / "repo"
++        self.bin = self.root / "bin"
++        self.output = self.root / "audit.md"
++        self.pr_audit = self.root / "pr-audit.tsv"
++        self.bin.mkdir()
++
++        self.command("git", "init", "--bare", str(self.upstream))
++        self.command("git", "init", "--bare", str(self.origin))
++        self.command("git", "init", str(self.seed))
++        self.command("git", "-C", str(self.seed), "config", "user.name", "Test")
++        self.command("git", "-C", str(self.seed), "config", "user.email", "test@example.com")
++        (self.seed / "value.txt").write_text("upstream\n")
++        self.command("git", "-C", str(self.seed), "add", "value.txt")
++        self.command("git", "-C", str(self.seed), "commit", "-m", "upstream")
++        self.command("git", "-C", str(self.seed), "branch", "-M", "main")
++        self.command("git", "-C", str(self.seed), "remote", "add", "upstream", str(self.upstream))
++        self.command("git", "-C", str(self.seed), "remote", "add", "origin", str(self.origin))
++        self.command("git", "-C", str(self.seed), "push", "upstream", "main")
++        self.command("git", "-C", str(self.seed), "push", "origin", "main")
++        self.command("git", "-C", str(self.seed), "tag", "v0.25.1.3")
++        self.command("git", "-C", str(self.seed), "push", "origin", "v0.25.1.3")
++        (self.seed / "fork.txt").write_text("fork\n")
++        self.command("git", "-C", str(self.seed), "add", "fork.txt")
++        self.command("git", "-C", str(self.seed), "commit", "-m", "fork patch")
++        self.fork_commit = self.command("git", "-C", str(self.seed), "rev-parse", "HEAD").stdout.strip()
++        self.command("git", "-C", str(self.seed), "push", "origin", "HEAD:main")
++        self.command("git", "clone", str(self.origin), str(self.repo))
++        self.command("git", "-C", str(self.repo), "remote", "add", "upstream", str(self.upstream))
++        self.gh_log = self.root / "gh.log"
++        pr = '{"number":1315,"title":"Pinned sessions","isDraft":false,"mergeStateStatus":"CLEAN","headRefOid":"abc123","url":"https://example.test/pr/1315","author":{"login":"swear01"},"additions":120,"deletions":10,"changedFiles":4,"commits":{"nodes":[{"commit":{"statusCheckRollup":{"contexts":{"nodes":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"}]}}}}]}}'
++        (self.bin / "gh").write_text(
++            "#!/bin/sh\n"
++            f"printf '%s\\n' \"$*\" >> '{self.gh_log}'\n"
++            "if [ \"$1\" = release ]; then\n"
++            "  printf '%s\\n' '{\"tagName\":\"v0.25.3\"}'\n"
++            "elif [ \"$1\" = api ] && [ \"$2\" = graphql ]; then\n"
++            f"  printf '%s\\n' '[{pr}]'\n"
++            "else\n"
++            "  echo unexpected gh invocation >&2\n"
++            "  exit 99\n"
++            "fi\n"
++        )
++        (self.bin / "gh").chmod(0o755)
++
++    def tearDown(self):
++        self.tmp.cleanup()
++
++    def command(self, *args, env=None):
++        result = subprocess.run(args, text=True, capture_output=True, env=env)
++        if result.returncode != 0:
++            raise AssertionError(result.stdout + result.stderr)
++        return result
++
++    def test_writes_auditable_snapshot_of_releases_fork_commits_and_open_prs(self):
++        self.assertTrue(SCRIPT.is_file(), f"missing workflow command: {SCRIPT}")
++        env = os.environ | {"PATH": f"{self.bin}:{os.environ['PATH']}"}
++        self.command(
++            str(SCRIPT),
++            "--repo", str(self.repo),
++            "--output", str(self.output),
++            "--pr-audit-output", str(self.pr_audit),
++            "--personal-pr-owner", "swear01",
++            env=env,
++        )
++
++        audit = self.output.read_text()
++        self.assertIn("Previous maintained release: v0.25.1.3", audit)
++        self.assertIn("Official release: v0.25.3", audit)
++        self.assertIn(self.fork_commit, audit)
++        self.assertIn("#1315", audit)
++        self.assertIn("CLEAN", audit)
++        self.assertIn("abc123", audit)
++        self.assertIn("Official upstream is authoritative; upstreamed PRs are accepted and are not replayed.", audit)
++        self.assertNotIn("Hard exclusion: PR #1320 (Antigravity)", audit)
++        self.assertIn("Personal PR owner: swear01", audit)
++        gh_log = self.gh_log.read_text()
++        self.assertIn("api graphql --paginate", gh_log)
++        self.assertIn("perPage=25", gh_log)
++        self.assertNotIn("pr list", gh_log)
++
++        rows = self.pr_audit.read_text().splitlines()
++        self.assertEqual(
++            "upstream_ref\tauthor\thead_sha\tdecision\tstatus\tmaintainer_signal\tbot_verdict\tbot_sha\tscope\tbehavior\treason",
++            rows[0],
++        )
++        self.assertEqual(
++            "pr-1315\tswear01\tabc123\tcarry\tready\treview\treview\t-\treview\treview\tadditions=120,deletions=10,files=4",
++            rows[1],
++        )
++
++    def test_does_not_clobber_conflicting_local_tags(self):
++        upstream_base = self.command(
++            "git", "-C", str(self.seed), "rev-parse", "upstream/main"
++        ).stdout.strip()
++        self.command("git", "-C", str(self.seed), "tag", "v0.24.0.1", upstream_base)
++        self.command("git", "-C", str(self.seed), "push", "origin", "v0.24.0.1")
++        self.command("git", "-C", str(self.repo), "tag", "-f", "v0.24.0.1", "origin/main")
++        local_tag = self.command(
++            "git", "-C", str(self.repo), "rev-parse", "v0.24.0.1"
++        ).stdout.strip()
++
++        env = os.environ | {"PATH": f"{self.bin}:{os.environ['PATH']}"}
++        self.command(str(SCRIPT), "--repo", str(self.repo), "--output", str(self.output), env=env)
++
++        self.assertEqual(
++            local_tag,
++            self.command("git", "-C", str(self.repo), "rev-parse", "v0.24.0.1").stdout.strip(),
++        )
++        self.assertIn("Previous maintained release: v0.25.1.3", self.output.read_text())
++
++    def test_refreshes_origin_main_after_force_rewrite(self):
++        self.command("git", "-C", str(self.seed), "reset", "--hard", "upstream/main")
++        (self.seed / "replacement.txt").write_text("replacement\n")
++        self.command("git", "-C", str(self.seed), "add", "replacement.txt")
++        self.command("git", "-C", str(self.seed), "commit", "-m", "replacement")
++        replacement = self.command("git", "-C", str(self.seed), "rev-parse", "HEAD").stdout.strip()
++        self.command("git", "-C", str(self.seed), "push", "--force", "origin", "HEAD:main")
++        env = os.environ | {"PATH": f"{self.bin}:{os.environ['PATH']}"}
++
++        result = subprocess.run(
++            [str(SCRIPT), "--repo", str(self.repo), "--output", str(self.output)],
++            text=True,
++            capture_output=True,
++            env=env,
++        )
++
++        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
++        self.assertIn(f"Origin main: {replacement}", self.output.read_text())
++
++    def test_accepts_an_isolated_git_worktree(self):
++        worktree = self.root / "worktree"
++        self.command("git", "-C", str(self.repo), "worktree", "add", str(worktree), "origin/main")
++        env = os.environ | {"PATH": f"{self.bin}:{os.environ['PATH']}"}
++        self.command(str(SCRIPT), "--repo", str(worktree), "--output", str(self.output), env=env)
++
++        self.assertIn("Previous maintained release: v0.25.1.3", self.output.read_text())
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tools/maintenance/tests/test_release_workflows.py b/tools/maintenance/tests/test_release_workflows.py
+new file mode 100644
+index 000000000..9e2df19fa
+--- /dev/null
++++ b/tools/maintenance/tests/test_release_workflows.py
+@@ -0,0 +1,49 @@
++from pathlib import Path
++import unittest
++
++
++ROOT = Path(__file__).resolve().parents[3]
++
++
++class ReleaseWorkflowTest(unittest.TestCase):
++    def test_validates_cli_and_embedded_app_versions(self):
++        workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text()
++
++        self.assertIn("CLI_VERSION", workflow)
++        self.assertIn("APP_VERSION", workflow)
++        self.assertIn("shared/src/buildInfo.ts", workflow)
++
++    def test_release_tag_must_equal_the_current_main_head(self):
++        workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text()
++
++        self.assertIn('test "$(git rev-parse refs/remotes/origin/main)" = "$GITHUB_SHA"', workflow)
++        self.assertNotIn('merge-base --is-ancestor "$GITHUB_SHA"', workflow)
++
++    def test_uses_bun_1_4_with_frozen_installs(self):
++        workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text()
++
++        self.assertNotIn("bun-version: 1.3.14", workflow)
++        self.assertEqual(3, workflow.count("bun-version: 1.4.0"))
++        self.assertEqual(3, workflow.count("bun install --frozen-lockfile"))
++
++    def test_release_publish_is_fork_guarded_and_least_privilege(self):
++        workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text()
++
++        self.assertIn("permissions:\n    contents: read", workflow)
++        self.assertEqual(5, workflow.count("if: github.repository == 'swear01/hapi'"))
++        self.assertIn("release:\n        if: github.repository == 'swear01/hapi'\n        permissions:\n            contents: write", workflow)
++
++    def test_smoke_runner_guards_every_production_host_and_process(self):
++        script = (ROOT / "tools" / "maintenance" / "smoke-runner.sh").read_text()
++
++        self.assertIn('PROD_HOSTS="oracle swever cthulhu athena valkyrie zeus"', script)
++        self.assertIn("SMOKE_PATTERN='bun (hub/src/index[.]ts|cli/src/index[.]ts runner start-sync)'", script)
++
++    def test_fork_skips_upstream_pages_deployment(self):
++        workflow = (ROOT / ".github" / "workflows" / "webapp.yml").read_text()
++
++        self.assertEqual(2, workflow.count("if: github.repository == 'tiann/hapi'"))
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tools/maintenance/tests/test_sync_from_upstream.py b/tools/maintenance/tests/test_sync_from_upstream.py
+new file mode 100644
+index 000000000..cb1ac0770
+--- /dev/null
++++ b/tools/maintenance/tests/test_sync_from_upstream.py
+@@ -0,0 +1,545 @@
++from pathlib import Path
++import os
++import subprocess
++import tempfile
++import unittest
++
++
++SCRIPT = Path(__file__).resolve().parents[1] / 'sync-from-upstream.sh'
++
++
++def run(*args, cwd=None, env=None, check=True):
++    result = subprocess.run(args, cwd=cwd, env=env, text=True, capture_output=True)
++    if check and result.returncode != 0:
++        raise AssertionError(result.stdout + result.stderr)
++    return result
++
++
++class SyncFromUpstreamTest(unittest.TestCase):
++    def setUp(self):
++        self.assertTrue(SCRIPT.is_file(), f'missing workflow command: {SCRIPT}')
++        self.tmp = tempfile.TemporaryDirectory()
++        root = Path(self.tmp.name)
++        self.upstream = root / 'upstream.git'
++        self.origin = root / 'origin.git'
++        self.seed = root / 'seed'
++        self.repo = root / 'repo'
++        self.patch_dir = root / 'maintenance' / 'patches'
++        self.manifest = root / 'maintenance' / 'manifest.tsv'
++        self.pr_audit = root / 'maintenance' / 'pr-audit.tsv'
++        self.patch_dir.mkdir(parents=True)
++        run('git', 'init', '--bare', str(self.upstream))
++        run('git', 'init', '--bare', str(self.origin))
++        run('git', 'init', str(self.seed))
++        run('git', '-C', str(self.seed), 'config', 'user.name', 'Test')
++        run('git', '-C', str(self.seed), 'config', 'user.email', 'test@example.com')
++        (self.seed / 'value.txt').write_text('upstream\n')
++        run('git', '-C', str(self.seed), 'add', 'value.txt')
++        run('git', '-C', str(self.seed), 'commit', '-m', 'upstream')
++        run('git', '-C', str(self.seed), 'branch', '-M', 'main')
++        run('git', '-C', str(self.seed), 'remote', 'add', 'upstream', str(self.upstream))
++        run('git', '-C', str(self.seed), 'remote', 'add', 'origin', str(self.origin))
++        run('git', '-C', str(self.seed), 'push', 'upstream', 'main')
++        run('git', '-C', str(self.seed), 'push', 'origin', 'main')
++        self.upstream_sha = run(
++            'git', '-C', str(self.seed), 'rev-parse', 'upstream/main'
++        ).stdout.strip()
++        self.previous_upstream_sha = os.environ.get('HAPI_UPSTREAM_SHA')
++        os.environ['HAPI_UPSTREAM_SHA'] = self.upstream_sha
++        (self.seed / 'value.txt').write_text('patched\n')
++        run('git', '-C', str(self.seed), 'commit', '-am', 'fork patch')
++        self.fork_commit = run('git', '-C', str(self.seed), 'rev-parse', 'HEAD').stdout.strip()
++        patch = run('git', '-C', str(self.seed), 'format-patch', '-1', '--stdout').stdout
++        (self.patch_dir / '0001.patch').write_text(patch)
++        run('git', '-C', str(self.seed), 'push', 'upstream', 'HEAD:refs/pull/1315/head')
++        run('git', '-C', str(self.seed), 'push', 'origin', 'HEAD:main')
++        run('git', 'clone', str(self.origin), str(self.repo))
++        run('git', '-C', str(self.repo), 'remote', 'add', 'upstream', str(self.upstream))
++        self.manifest.write_text(f'0001.patch\tcarry\ttest\t{self.fork_commit}\n')
++
++    def tearDown(self):
++        if self.previous_upstream_sha is None:
++            os.environ.pop('HAPI_UPSTREAM_SHA', None)
++        else:
++            os.environ['HAPI_UPSTREAM_SHA'] = self.previous_upstream_sha
++        self.tmp.cleanup()
++
++    def test_rehearses_reset_and_patch_without_pushing(self):
++        before = run('git', '--git-dir', str(self.origin), 'rev-parse', 'main').stdout.strip()
++        result = run(str(SCRIPT), '--repo', str(self.repo), '--patch-dir', str(self.patch_dir), '--manifest', str(self.manifest), '--skip-tests')
++        after = run('git', '--git-dir', str(self.origin), 'rev-parse', 'main').stdout.strip()
++        self.assertEqual(before, after)
++        self.assertIn('TREE_MATCHES_ORIGIN_MAIN', result.stdout)
++        self.assertIn('REHEARSAL_OK', result.stdout)
++
++    def test_does_not_overwrite_checkout_git_identity(self):
++        run('git', '-C', str(self.repo), 'config', 'user.name', 'Original Developer')
++        run('git', '-C', str(self.repo), 'config', 'user.email', 'original@example.com')
++
++        result = run(
++            str(SCRIPT), '--repo', str(self.repo), '--patch-dir', str(self.patch_dir),
++            '--manifest', str(self.manifest), '--skip-tests', check=False,
++        )
++
++        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
++        self.assertEqual('Original Developer', run('git', '-C', str(self.repo), 'config', 'user.name').stdout.strip())
++        self.assertEqual('original@example.com', run('git', '-C', str(self.repo), 'config', 'user.email').stdout.strip())
++
++    def test_uses_configured_agent_worktree_root(self):
++        worktree_root = Path(self.tmp.name) / 'agent-worktrees'
++        env = os.environ | {'HAPI_WORKTREE_ROOT': str(worktree_root)}
++
++        result = run(
++            str(SCRIPT), '--repo', str(self.repo), '--patch-dir', str(self.patch_dir),
++            '--manifest', str(self.manifest), '--skip-tests', env=env,
++        )
++
++        self.assertIn(f'REHEARSAL_WORKTREE={worktree_root}/', result.stdout)
++        self.assertEqual([], list(worktree_root.iterdir()))
++
++    def test_rehearses_from_an_isolated_worktree(self):
++        worktree = Path(self.tmp.name) / 'worktree'
++        run('git', '-C', str(self.repo), 'worktree', 'add', str(worktree), 'origin/main')
++
++        result = run(str(SCRIPT), '--repo', str(worktree), '--patch-dir', str(self.patch_dir), '--manifest', str(self.manifest), '--skip-tests', check=False)
++
++        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
++        self.assertIn('REHEARSAL_OK', result.stdout)
++
++    def test_accepts_release_paths_relative_to_the_checkout(self):
++        maintenance = self.repo / 'maintenance'
++        patch_dir = maintenance / 'patches'
++        patch_dir.mkdir(parents=True)
++        (patch_dir / '0001.patch').write_text((self.patch_dir / '0001.patch').read_text())
++        manifest = maintenance / 'manifest.tsv'
++        manifest.write_text(self.manifest.read_text())
++
++        result = run(
++            str(SCRIPT),
++            '--repo', '.',
++            '--patch-dir', 'maintenance/patches',
++            '--manifest', 'maintenance/manifest.tsv',
++            '--skip-tests',
++            cwd=self.repo,
++            check=False,
++        )
++
++        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
++        self.assertIn('REHEARSAL_OK', result.stdout)
++
++    def test_refreshes_origin_tracking_ref_after_force_rewrite(self):
++        run('git', '-C', str(self.seed), 'reset', '--hard', 'upstream/main')
++        (self.seed / 'replacement.txt').write_text('replacement\n')
++        run('git', '-C', str(self.seed), 'add', 'replacement.txt')
++        run('git', '-C', str(self.seed), 'commit', '-m', 'replacement')
++        replacement_commit = run('git', '-C', str(self.seed), 'rev-parse', 'HEAD').stdout.strip()
++        replacement_patch = run('git', '-C', str(self.seed), 'format-patch', '-1', '--stdout').stdout
++        (self.patch_dir / '0001.patch').write_text(replacement_patch)
++        self.manifest.write_text(f'0001.patch\tcarry\ttest\t{replacement_commit}\n')
++        run('git', '-C', str(self.seed), 'push', '--force', 'origin', 'HEAD:main')
++
++        result = run(str(SCRIPT), '--repo', str(self.repo), '--patch-dir', str(self.patch_dir), '--manifest', str(self.manifest), '--skip-tests', check=False)
++
++        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
++        self.assertIn('REHEARSAL_OK', result.stdout)
++
++    def test_requires_pinned_upstream_head(self):
++        env = {key: value for key, value in os.environ.items() if key != 'HAPI_UPSTREAM_SHA'}
++
++        result = run(
++            str(SCRIPT), '--repo', str(self.repo), '--patch-dir', str(self.patch_dir),
++            '--manifest', str(self.manifest), '--skip-tests', env=env, check=False,
++        )
++
++        self.assertNotEqual(0, result.returncode)
++        self.assertIn('HAPI_UPSTREAM_SHA', result.stderr)
++
++    def test_rejects_unexpected_upstream_head(self):
++        env = os.environ | {'HAPI_UPSTREAM_SHA': '0' * 40}
++
++        result = run(
++            str(SCRIPT), '--repo', str(self.repo), '--patch-dir', str(self.patch_dir),
++            '--manifest', str(self.manifest), '--skip-tests', env=env, check=False,
++        )
++
++        self.assertNotEqual(0, result.returncode)
++        self.assertIn('UPSTREAM_HEAD_MISMATCH', result.stderr)
++
++    def test_accepts_upstream_pin_that_is_ancestor_of_main(self):
++        pin = self.upstream_sha
++        run('git', '-C', str(self.seed), 'reset', '--hard', 'upstream/main')
++        (self.seed / 'later.txt').write_text('later official\n')
++        run('git', '-C', str(self.seed), 'add', 'later.txt')
++        run('git', '-C', str(self.seed), 'commit', '-m', 'later official')
++        run('git', '-C', str(self.seed), 'push', 'upstream', 'HEAD:main')
++
++        env = os.environ | {'HAPI_UPSTREAM_SHA': pin}
++        self.manifest.write_text(
++            f'# upstream_sha={pin}\n'
++            f'0001.patch\tcarry\ttest\t{self.fork_commit}\n'
++        )
++
++        result = run(
++            str(SCRIPT), '--repo', str(self.repo), '--patch-dir', str(self.patch_dir),
++            '--manifest', str(self.manifest), '--skip-tests', env=env, check=False,
++        )
++
++        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
++        self.assertIn('UPSTREAM_PIN_ANCESTOR', result.stdout)
++        self.assertIn('REHEARSAL_OK', result.stdout)
++
++    def test_enforces_manifest_upstream_pin(self):
++        self.manifest.write_text(
++            f'# upstream_sha={"0" * 40}\n'
++            f'0001.patch\tcarry\ttest\t{self.fork_commit}\n'
++        )
++
++        result = run(
++            str(SCRIPT), '--repo', str(self.repo), '--patch-dir', str(self.patch_dir),
++            '--manifest', str(self.manifest), '--skip-tests', check=False,
++        )
++
++        self.assertNotEqual(0, result.returncode)
++        self.assertIn('MANIFEST_UPSTREAM_SHA_MISMATCH', result.stderr)
++
++    def test_enforces_manifest_previous_origin_pin(self):
++        self.manifest.write_text(
++            f'# previous_origin_main={"0" * 40}\n'
++            f'0001.patch\tcarry\ttest\t{self.fork_commit}\n'
++        )
++
++        result = run(
++            str(SCRIPT), '--repo', str(self.repo), '--patch-dir', str(self.patch_dir),
++            '--manifest', str(self.manifest), '--skip-tests', check=False,
++        )
++
++        self.assertNotEqual(0, result.returncode)
++        self.assertIn('MANIFEST_ORIGIN_SHA_MISMATCH', result.stderr)
++
++    def test_rejects_replay_tree_that_misses_manifest_expectation(self):
++        self.manifest.write_text(
++            f'# expected_source_tree={"0" * 40}\n'
++            f'0001.patch\tcarry\ttest\t{self.fork_commit}\n'
++        )
++
++        result = run(
++            str(SCRIPT), '--repo', str(self.repo), '--patch-dir', str(self.patch_dir),
++            '--manifest', str(self.manifest), '--skip-tests', check=False,
++        )
++
++        self.assertNotEqual(0, result.returncode)
++        self.assertIn('REPLAY_TREE_MISMATCH', result.stderr)
++
++    def test_rejects_unrecorded_fork_commit(self):
++        (self.seed / 'unknown.txt').write_text('unknown\n')
++        run('git', '-C', str(self.seed), 'add', 'unknown.txt')
++        run('git', '-C', str(self.seed), 'commit', '-m', 'unknown')
++        run('git', '-C', str(self.seed), 'push', 'origin', 'HEAD:main')
++        result = run(str(SCRIPT), '--repo', str(self.repo), '--patch-dir', str(self.patch_dir), '--manifest', str(self.manifest), '--skip-tests', check=False)
++        self.assertNotEqual(0, result.returncode)
++        self.assertIn('UNRECORDED_FORK_COMMIT', result.stderr)
++
++    def test_allows_historical_drop_commit_absent_from_origin(self):
++        with self.manifest.open('a') as handle:
++            handle.write('-\tdrop\tupstreamed\t0000000000000000000000000000000000000000\n')
++        result = run(str(SCRIPT), '--repo', str(self.repo), '--patch-dir', str(self.patch_dir), '--manifest', str(self.manifest), '--skip-tests', check=False)
++        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
++
++    def test_allows_current_fork_commit_to_be_dropped(self):
++        self.manifest.write_text(f'-\tdrop\tretired\t{self.fork_commit}\n')
++
++        result = run(str(SCRIPT), '--repo', str(self.repo), '--patch-dir', str(self.patch_dir), '--manifest', str(self.manifest), '--skip-tests', check=False)
++
++        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
++        self.assertIn('TREE_DIFFERS_FROM_ORIGIN_MAIN', result.stdout)
++
++    def test_requires_pr_audit_for_repository_release_even_without_carries(self):
++        maintenance = self.repo / 'tools' / 'maintenance' / 'releases' / 'deferred-only'
++        maintenance.mkdir(parents=True)
++        manifest = maintenance / 'manifest.tsv'
++        manifest.write_text(f'-\tdrop\tpr-1315\t{self.fork_commit}\n')
++
++        result = run(
++            str(SCRIPT), '--repo', str(self.repo), '--patch-dir', str(self.patch_dir),
++            '--manifest', str(manifest), '--skip-tests', check=False,
++        )
++
++        self.assertNotEqual(0, result.returncode)
++        self.assertIn('--pr-audit is required', result.stderr)
++
++    def test_rejects_invalid_github_repository_instead_of_skipping_open_set_validation(self):
++        maintenance = self.repo / 'tools' / 'maintenance' / 'releases' / 'invalid-upstream'
++        patch_dir = maintenance / 'patches'
++        patch_dir.mkdir(parents=True)
++        (patch_dir / '0001.patch').write_text((self.patch_dir / '0001.patch').read_text())
++        expected_tree = run('git', '-C', str(self.seed), 'rev-parse', f'{self.fork_commit}^{{tree}}').stdout.strip()
++        manifest = maintenance / 'manifest.tsv'
++        manifest.write_text(
++            f'# upstream_sha={self.upstream_sha}\n'
++            f'# previous_origin_main={self.fork_commit}\n'
++            f'# expected_source_tree={expected_tree}\n'
++            f'0001.patch\tcarry\tpr-1315\t{self.fork_commit}\n'
++        )
++        audit = maintenance / 'pr-audit.tsv'
++        audit.write_text(
++            'upstream_ref\tauthor\thead_sha\tdecision\tstatus\tmaintainer_signal\tbot_verdict\tbot_sha\tscope\tbehavior\treason\n'
++            f'pr-1315\tcontributor\t{self.fork_commit}\tcarry\tready\tclear\tclean\t{self.fork_commit}\tproportional\tpreserve\t-\n'
++        )
++        env = os.environ | {'HAPI_UPSTREAM_REPO': 'invalid'}
++
++        result = run(
++            str(SCRIPT), '--repo', str(self.repo), '--patch-dir', str(patch_dir),
++            '--manifest', str(manifest), '--pr-audit', str(audit), '--skip-tests',
++            env=env, check=False,
++        )
++
++        self.assertNotEqual(0, result.returncode)
++        self.assertIn('INVALID_UPSTREAM_REPO', result.stderr)
++
++    def test_requires_pr_audit_for_pull_request_manifest_rows(self):
++        self.manifest.write_text(f'0001.patch\tcarry\tpr-1315\t{self.fork_commit}\n')
++
++        result = run(
++            str(SCRIPT), '--repo', str(self.repo), '--patch-dir', str(self.patch_dir),
++            '--manifest', str(self.manifest), '--skip-tests', check=False,
++        )
++
++        self.assertNotEqual(0, result.returncode)
++        self.assertIn('--pr-audit is required', result.stderr)
++
++    def test_github_rehearsal_validates_the_complete_open_pr_set(self):
++        script = SCRIPT.read_text()
++
++        self.assertIn('HAPI_UPSTREAM_REPO', script)
++        self.assertIn('pullRequests(states: OPEN', script)
++        self.assertIn('OPEN_PR_AUDIT_SET_MISMATCH', script)
++
++    def test_accepts_upstreamed_antigravity_pr_reference(self):
++        self.manifest.write_text(f'0001.patch\tcarry\tupstreamed-pr-1320\t{self.fork_commit}\n')
++
++        result = run(str(SCRIPT), '--repo', str(self.repo), '--patch-dir', str(self.patch_dir), '--manifest', str(self.manifest), '--skip-tests', check=False)
++
++        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
++        self.assertIn('REHEARSAL_OK', result.stdout)
++
++    def test_requires_header_pins_for_repository_release_manifests(self):
++        maintenance = self.repo / 'tools' / 'maintenance' / 'releases' / 'test'
++        patch_dir = maintenance / 'patches'
++        patch_dir.mkdir(parents=True)
++        (patch_dir / '0001.patch').write_text((self.patch_dir / '0001.patch').read_text())
++        manifest = maintenance / 'manifest.tsv'
++        manifest.write_text(f'0001.patch\tcarry\tpr-1315\t{self.fork_commit}\n')
++        audit = maintenance / 'pr-audit.tsv'
++        audit.write_text(
++            'upstream_ref\tauthor\thead_sha\tdecision\tstatus\tmaintainer_signal\tbot_verdict\tbot_sha\tscope\tbehavior\treason\n'
++            f'pr-1315\tcontributor\t{self.fork_commit}\tcarry\tready\tclear\tclean\t{self.fork_commit}\tproportional\tpreserve\t-\n'
++        )
++
++        result = run(
++            str(SCRIPT), '--repo', str(self.repo), '--patch-dir', str(patch_dir),
++            '--manifest', str(manifest), '--pr-audit', str(audit), '--skip-tests', check=False,
++        )
++
++        self.assertNotEqual(0, result.returncode)
++        self.assertIn('MISSING_MANIFEST_PIN', result.stderr)
++
++    def test_rejects_non_personal_pr_that_fails_quality_gates(self):
++        self.manifest.write_text(f'0001.patch\tcarry\tpr-1315\t{self.fork_commit}\n')
++        self.pr_audit.write_text(
++            'upstream_ref\tauthor\thead_sha\tdecision\tstatus\tmaintainer_signal\tbot_verdict\tbot_sha\tscope\tbehavior\treason\n'
++            f'pr-1315\tcontributor\t{self.fork_commit}\tcarry\tready\tnegative\tfindings\t{self.fork_commit}\tmismatch\tunjustified-change\t-\n'
++        )
++
++        result = run(
++            str(SCRIPT), '--repo', str(self.repo), '--patch-dir', str(self.patch_dir),
++            '--manifest', str(self.manifest), '--pr-audit', str(self.pr_audit),
++            '--personal-pr-owner', 'swear01', '--skip-tests', check=False,
++        )
++
++        self.assertNotEqual(0, result.returncode)
++        self.assertIn('PR_QUALITY_GATE_FAILED pr-1315:', result.stderr)
++        self.assertIn('maintainer-negative', result.stderr)
++        self.assertIn('bot-findings', result.stderr)
++        self.assertIn('scope-mismatch', result.stderr)
++        self.assertIn('behavior-unjustified-change', result.stderr)
++
++    def test_carries_personal_pr_and_reports_every_quality_exception(self):
++        self.manifest.write_text(f'0001.patch\tcarry\tpr-1315\t{self.fork_commit}\n')
++        self.pr_audit.write_text(
++            'upstream_ref\tauthor\thead_sha\tdecision\tstatus\tmaintainer_signal\tbot_verdict\tbot_sha\tscope\tbehavior\treason\n'
++            f'pr-1315\tswear01\t{self.fork_commit}\tcarry\tchecks-failed\tnegative\tfindings\t{self.fork_commit}\tmismatch\tunjustified-change\tpersonal override\n'
++        )
++
++        result = run(
++            str(SCRIPT), '--repo', str(self.repo), '--patch-dir', str(self.patch_dir),
++            '--manifest', str(self.manifest), '--pr-audit', str(self.pr_audit),
++            '--personal-pr-owner', 'swear01', '--skip-tests', check=False,
++        )
++
++        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
++        self.assertIn('PERSONAL_PR_POLICY_EXCEPTION pr-1315:', result.stdout)
++        self.assertIn('status-checks-failed', result.stdout)
++        self.assertIn('maintainer-negative', result.stdout)
++        self.assertIn('bot-findings', result.stdout)
++        self.assertIn('scope-mismatch', result.stdout)
++        self.assertIn('behavior-unjustified-change', result.stdout)
++        self.assertIn('REHEARSAL_OK', result.stdout)
++
++    def test_accepts_clean_latest_head_for_non_personal_pr(self):
++        self.manifest.write_text(f'0001.patch\tcarry\tpr-1315\t{self.fork_commit}\n')
++        self.pr_audit.write_text(
++            'upstream_ref\tauthor\thead_sha\tdecision\tstatus\tmaintainer_signal\tbot_verdict\tbot_sha\tscope\tbehavior\treason\n'
++            f'pr-1315\tcontributor\t{self.fork_commit}\tcarry\tready\tclear\tclean\t{self.fork_commit}\tproportional\tpreserve\t-\n'
++        )
++
++        result = run(
++            str(SCRIPT), '--repo', str(self.repo), '--patch-dir', str(self.patch_dir),
++            '--manifest', str(self.manifest), '--pr-audit', str(self.pr_audit),
++            '--personal-pr-owner', 'swear01', '--skip-tests', check=False,
++        )
++
++        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
++        self.assertNotIn('POLICY_EXCEPTION', result.stdout)
++
++    def test_requires_every_audited_carry_to_have_a_manifest_mapping(self):
++        self.manifest.write_text(f'0001.patch\tcarry\tpr-1315\t{self.fork_commit}\n')
++        self.pr_audit.write_text(
++            'upstream_ref\tauthor\thead_sha\tdecision\tstatus\tmaintainer_signal\tbot_verdict\tbot_sha\tscope\tbehavior\treason\n'
++            f'pr-1315\tcontributor\t{self.fork_commit}\tcarry\tready\tclear\tclean\t{self.fork_commit}\tproportional\tpreserve\t-\n'
++            f'pr-1316\tcontributor\t{self.fork_commit}\tcarry\tready\tclear\tclean\t{self.fork_commit}\tproportional\tpreserve\t-\n'
++        )
++
++        result = run(
++            str(SCRIPT), '--repo', str(self.repo), '--patch-dir', str(self.patch_dir),
++            '--manifest', str(self.manifest), '--pr-audit', str(self.pr_audit),
++            '--personal-pr-owner', 'swear01', '--skip-tests', check=False,
++        )
++
++        self.assertNotEqual(0, result.returncode)
++        self.assertIn('MISSING_MANIFEST_CARRY: pr-1316', result.stderr)
++
++    def test_accepts_semantically_integrated_audited_carry(self):
++        self.manifest.write_text(f'-\tintegrated\tpr-1315\t{self.fork_commit}\n')
++        self.pr_audit.write_text(
++            'upstream_ref\tauthor\thead_sha\tdecision\tstatus\tmaintainer_signal\tbot_verdict\tbot_sha\tscope\tbehavior\treason\n'
++            f'pr-1315\tcontributor\t{self.fork_commit}\tcarry\tready\tclear\tclean\t{self.fork_commit}\tproportional\tpreserve\tsemantic equivalent\n'
++        )
++
++        result = run(
++            str(SCRIPT), '--repo', str(self.repo), '--patch-dir', str(self.patch_dir),
++            '--manifest', str(self.manifest), '--pr-audit', str(self.pr_audit),
++            '--personal-pr-owner', 'swear01', '--skip-tests', check=False,
++        )
++
++        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
++
++    def test_allows_new_carried_pr_head_absent_from_old_origin(self):
++        run('git', '-C', str(self.seed), 'reset', '--hard', 'upstream/main')
++        (self.seed / 'new-carry.txt').write_text('new carry\n')
++        run('git', '-C', str(self.seed), 'add', 'new-carry.txt')
++        run('git', '-C', str(self.seed), 'commit', '-m', 'new carry')
++        new_head = run('git', '-C', str(self.seed), 'rev-parse', 'HEAD').stdout.strip()
++        patch = run('git', '-C', str(self.seed), 'format-patch', '-1', '--stdout').stdout
++        (self.patch_dir / 'new-carry.patch').write_text(patch)
++        run('git', '-C', str(self.seed), 'push', '--force', 'upstream', 'HEAD:refs/pull/1315/head')
++        self.manifest.write_text(
++            f'-\tdrop\tretired\t{self.fork_commit}\n'
++            f'new-carry.patch\tcarry\tpr-1315\t{new_head}\n'
++        )
++        self.pr_audit.write_text(
++            'upstream_ref\tauthor\thead_sha\tdecision\tstatus\tmaintainer_signal\tbot_verdict\tbot_sha\tscope\tbehavior\treason\n'
++            f'pr-1315\tcontributor\t{new_head}\tcarry\tready\tclear\tclean\t{new_head}\tproportional\tpreserve\t-\n'
++        )
++
++        result = run(
++            str(SCRIPT), '--repo', str(self.repo), '--patch-dir', str(self.patch_dir),
++            '--manifest', str(self.manifest), '--pr-audit', str(self.pr_audit),
++            '--personal-pr-owner', 'swear01', '--skip-tests', check=False,
++        )
++
++        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
++        self.assertIn('REHEARSAL_OK', result.stdout)
++
++    def test_rejects_stale_bot_review_for_non_personal_pr(self):
++        self.manifest.write_text(f'0001.patch\tcarry\tpr-1315\t{self.fork_commit}\n')
++        self.pr_audit.write_text(
++            'upstream_ref\tauthor\thead_sha\tdecision\tstatus\tmaintainer_signal\tbot_verdict\tbot_sha\tscope\tbehavior\treason\n'
++            f'pr-1315\tcontributor\t{self.fork_commit}\tcarry\tready\tclear\tclean\told-head\tproportional\tpreserve\t-\n'
++        )
++
++        result = run(
++            str(SCRIPT), '--repo', str(self.repo), '--patch-dir', str(self.patch_dir),
++            '--manifest', str(self.manifest), '--pr-audit', str(self.pr_audit),
++            '--personal-pr-owner', 'swear01', '--skip-tests', check=False,
++        )
++
++        self.assertNotEqual(0, result.returncode)
++        self.assertIn('bot-stale', result.stderr)
++
++    def test_rejects_stale_pr_head_even_for_personal_pr(self):
++        self.manifest.write_text(f'0001.patch\tcarry\tpr-1315\t{"0" * 40}\n')
++        self.pr_audit.write_text(
++            'upstream_ref\tauthor\thead_sha\tdecision\tstatus\tmaintainer_signal\tbot_verdict\tbot_sha\tscope\tbehavior\treason\n'
++            'pr-1315\tswear01\t0000000000000000000000000000000000000000\tcarry\tready\tclear\tclean\t0000000000000000000000000000000000000000\tproportional\tpreserve\t-\n'
++        )
++
++        result = run(
++            str(SCRIPT), '--repo', str(self.repo), '--patch-dir', str(self.patch_dir),
++            '--manifest', str(self.manifest), '--pr-audit', str(self.pr_audit),
++            '--personal-pr-owner', 'swear01', '--skip-tests', check=False,
++        )
++
++        self.assertNotEqual(0, result.returncode)
++        self.assertIn('PR_AUDIT_HEAD_STALE pr-1315:', result.stderr)
++
++    def test_applies_generated_release_patch_without_a_source_commit(self):
++        run('git', '-C', str(self.seed), 'reset', '--hard', 'upstream/main')
++        (self.seed / 'release.txt').write_text('release\n')
++        run('git', '-C', str(self.seed), 'add', 'release.txt')
++        run('git', '-C', str(self.seed), 'commit', '-m', 'release metadata')
++        release_patch = run('git', '-C', str(self.seed), 'format-patch', '-1', '--stdout').stdout
++        (self.patch_dir / 'release.patch').write_text(release_patch)
++        with self.manifest.open('a') as handle:
++            handle.write('release.patch\tregenerate\trelease\t-\n')
++
++        result = run(str(SCRIPT), '--repo', str(self.repo), '--patch-dir', str(self.patch_dir), '--manifest', str(self.manifest), '--skip-tests', check=False)
++
++        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
++        self.assertIn('TREE_DIFFERS_FROM_ORIGIN_MAIN', result.stdout)
++
++    def test_failed_tests_remove_isolated_hapi_home(self):
++        fake_bun = Path(self.tmp.name) / 'fake-bun'
++        fake_bun.write_text(
++            '#!/bin/sh\n'
++            'if [ "$1" = run ] && [ "$2" = test ]; then exit 9; fi\n'
++            'exit 0\n'
++        )
++        fake_bun.chmod(0o755)
++        before = set(Path('/tmp').glob('hapi-test-home.*'))
++
++        result = run(
++            str(SCRIPT), '--repo', str(self.repo), '--patch-dir', str(self.patch_dir),
++            '--manifest', str(self.manifest), env=os.environ | {'BUN_BIN': str(fake_bun)},
++            check=False,
++        )
++        leaked = set(Path('/tmp').glob('hapi-test-home.*')) - before
++        for path in leaked:
++            subprocess.run(['rm', '-rf', str(path)], check=False)
++
++        self.assertNotEqual(0, result.returncode)
++        self.assertEqual(set(), leaked)
++
++    def test_push_is_not_supported(self):
++        env = os.environ | {'HAPI_SYNC_CONFIRM': 'RESET_ORIGIN_MAIN_WITH_FORCE_WITH_LEASE'}
++
++        result = run(
++            str(SCRIPT), '--repo', str(self.repo), '--patch-dir', str(self.patch_dir),
++            '--manifest', str(self.manifest), '--skip-tests', '--push', env=env, check=False,
++        )
++
++        self.assertNotEqual(0, result.returncode)
++        self.assertIn('rehearsal-only', result.stderr)
++
++
++if __name__ == '__main__':
++    unittest.main()
+diff --git a/tools/maintenance/tests/test_web_manifest.py b/tools/maintenance/tests/test_web_manifest.py
+new file mode 100644
+index 000000000..b14a731c5
+--- /dev/null
++++ b/tools/maintenance/tests/test_web_manifest.py
+@@ -0,0 +1,16 @@
++import json
++from pathlib import Path
++import unittest
++
++
++ROOT = Path(__file__).resolve().parents[3]
++
++
++class WebManifestTest(unittest.TestCase):
++    def test_markdown_renderer_dependency_is_direct(self):
++        package = json.loads((ROOT / "web" / "package.json").read_text())
++        self.assertIn("react-markdown", package["dependencies"])
++
++
++if __name__ == "__main__":
++    unittest.main()
+-- 
+2.54.0 (Apple Git-157)
+

@@ -1,0 +1,1595 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Fri, 23 Oct 2026 19:25:27 +0000
+Subject: [PATCH 80/94] carry(upstream): PR #2072 feat(sessions): add explicit
+ per-session title locks
+
+---
+ cli/src/agent/sessionDisplayRename.test.ts    |   7 +
+ cli/src/agent/sessionDisplayRename.ts         |   1 +
+ cli/src/api/apiSession.test.ts                |  30 +++
+ cli/src/api/apiSession.ts                     |  15 +-
+ cli/src/claude/utils/startHappyServer.test.ts |  50 +++++
+ cli/src/claude/utils/startHappyServer.ts      |  15 ++
+ cli/src/codex/shared/projection.title.test.ts |   8 +
+ cli/src/codex/shared/projection.ts            |   2 +-
+ cli/src/pi/titleExtension.test.ts             |   3 +
+ cli/src/pi/titleExtension.ts                  |   3 +-
+ docs/api/client-contract/rest.md              |  15 +-
+ e2e/session-title-lock.spec.ts                |  59 ++++++
+ hub/src/store/sessionStore.ts                 |   2 +-
+ hub/src/store/sessionTitleLock.ts             |  24 +++
+ hub/src/store/sessions.ts                     |  14 +-
+ hub/src/sync/sessionCache.ts                  |  50 +++--
+ hub/src/sync/sessionTitleLock.test.ts         | 173 ++++++++++++++++++
+ hub/src/sync/syncEngine.ts                    |   8 +-
+ hub/src/web/routes/sessions.test.ts           |  43 +++++
+ hub/src/web/routes/sessions.ts                |   6 +-
+ shared/src/apiTypes.ts                        |   8 +-
+ shared/src/schemas.ts                         |   1 +
+ shared/src/sessionSummary.ts                  |   2 +
+ web/README.md                                 |  10 +
+ .../session-title-lock-fixture.html           |  12 ++
+ .../session-title-lock-fixture.tsx            |  50 +++++
+ web/src/api/client.ts                         |   8 +-
+ .../RenameSessionDialog.titleLock.test.tsx    | 108 +++++++++++
+ web/src/components/RenameSessionDialog.tsx    |  99 ++++++----
+ .../SessionDialogTitleAlignment.test.tsx      |   8 +-
+ web/src/components/SessionHeader.tsx          |   2 +
+ .../SessionList.directory-action.test.tsx     |  23 +++
+ web/src/components/SessionList.tsx            |   2 +
+ web/src/hooks/mutations/useSessionActions.ts  |  16 +-
+ web/src/lib/locales/en.ts                     |   3 +
+ web/src/lib/locales/ru.ts                     |   3 +
+ web/src/lib/locales/zh-CN.ts                  |   3 +
+ 37 files changed, 787 insertions(+), 99 deletions(-)
+ create mode 100644 e2e/session-title-lock.spec.ts
+ create mode 100644 hub/src/store/sessionTitleLock.ts
+ create mode 100644 hub/src/sync/sessionTitleLock.test.ts
+ create mode 100644 web/e2e-fixtures/session-title-lock-fixture.html
+ create mode 100644 web/e2e-fixtures/session-title-lock-fixture.tsx
+ create mode 100644 web/src/components/RenameSessionDialog.titleLock.test.tsx
+
+diff --git a/cli/src/agent/sessionDisplayRename.test.ts b/cli/src/agent/sessionDisplayRename.test.ts
+index 263f09a42..5de7252bb 100644
+--- a/cli/src/agent/sessionDisplayRename.test.ts
++++ b/cli/src/agent/sessionDisplayRename.test.ts
+@@ -10,6 +10,13 @@ describe('sessionDisplayRename', () => {
+         expect(normalizeSessionDisplayTitle(null)).toBeNull()
+     })
+ 
++    it('keeps a locked title when a deferred callback runs after the user pins it', () => {
++        const metadata: Metadata = { path: '/repo', host: 'test', name: 'Pinned', titleLocked: true }
++        let updater!: (value: Metadata) => Metadata
++        applySessionDisplayRename({ updateMetadata: fn => { updater = fn } }, 'Agent title')
++        expect(updater(metadata)).toBe(metadata)
++    })
++
+     it('sets metadata.name even when a spawn name already exists', () => {
+         let metadata: Metadata = {
+             path: '/tmp/project',
+diff --git a/cli/src/agent/sessionDisplayRename.ts b/cli/src/agent/sessionDisplayRename.ts
+index 4eba5bd06..93e1be1ff 100644
+--- a/cli/src/agent/sessionDisplayRename.ts
++++ b/cli/src/agent/sessionDisplayRename.ts
+@@ -26,6 +26,7 @@ export function applySessionDisplayRename(
+     }
+ 
+     client.updateMetadata((metadata: Metadata) => {
++        if (metadata.titleLocked) return metadata;
+         if (metadata.name?.trim() === normalized) {
+             return metadata;
+         }
+diff --git a/cli/src/api/apiSession.test.ts b/cli/src/api/apiSession.test.ts
+index 6274ae302..df0c39f36 100644
+--- a/cli/src/api/apiSession.test.ts
++++ b/cli/src/api/apiSession.test.ts
+@@ -1193,3 +1193,33 @@ describe('IncomingMessageFilter (HAPI Bot R3 finding #1)', () => {
+         expect(filter.accept({ id: 'b', seq: 9 })).toBe(true)
+     })
+ })
++
++describe('explicit title action metadata refresh', () => {
++    it('observes user lock changes without rolling back a newer socket metadata version', async () => {
++        const client = new ApiSessionClient('test-token', createSession({
++            metadataVersion: 10, metadata: { path: '/tmp', host: 'test', name: 'Pinned', titleLocked: true }
++        }))
++        try {
++            axiosHarness.get.mockResolvedValue({ data: { session: {
++                metadataVersion: 11, metadata: { path: '/tmp', host: 'test', name: 'Pinned', titleLocked: false }
++            } } })
++            expect(await client.refreshMetadata()).toBe(true)
++            expect(client.getMetadata()?.titleLocked).toBe(false)
++            axiosHarness.get.mockResolvedValue({ data: { session: {
++                metadataVersion: 9, metadata: { path: '/tmp', host: 'test', name: 'Old', titleLocked: true }
++            } } })
++            expect(await client.refreshMetadata()).toBe(true)
++            expect(client.getMetadata()).toMatchObject({ name: 'Pinned', titleLocked: false })
++        } finally { client.close() }
++    })
++
++    it('reports an unavailable or malformed Hub response instead of trusting cached lock state', async () => {
++        const client = new ApiSessionClient('test-token', createSession())
++        try {
++            axiosHarness.get.mockRejectedValue(new Error('Offline'))
++            expect(await client.refreshMetadata()).toBe(false)
++            axiosHarness.get.mockResolvedValue({ data: { session: { metadataVersion: 99, metadata: { titleLocked: true } } } })
++            expect(await client.refreshMetadata()).toBe(false)
++        } finally { client.close() }
++    })
++})
+diff --git a/cli/src/api/apiSession.ts b/cli/src/api/apiSession.ts
+index ed89db1b7..a0cbb6ed1 100644
+--- a/cli/src/api/apiSession.ts
++++ b/cli/src/api/apiSession.ts
+@@ -365,7 +365,7 @@ export class ApiSessionClient extends EventEmitter {
+             // no live update-session). On reconnect, reconcile metadata before
+             // message backfill so hub-archived can stop reconnect immortality (#1910).
+             const afterMeta = isReconnect
+-                ? this.reconcileSessionMetadata()
++                ? this.refreshMetadata()
+                 : Promise.resolve()
+             void afterMeta.finally(() => {
+                 void this.backfillIfNeeded()
+@@ -899,8 +899,8 @@ export class ApiSessionClient extends EventEmitter {
+         this.emit('hub-archived')
+     }
+ 
+-    /** Fetch current hub metadata after reconnect; apply hub-archived if set. */
+-    private async reconcileSessionMetadata(): Promise<void> {
++    /** Refresh Hub-owned metadata before an explicit tool action or after reconnect. */
++    async refreshMetadata(): Promise<boolean> {
+         try {
+             const response = await axios.get(
+                 `${configuration.apiUrl}/cli/sessions/${encodeURIComponent(this.sessionId)}`,
+@@ -913,10 +913,15 @@ export class ApiSessionClient extends EventEmitter {
+                 }
+             )
+             const session = response.data?.session
+-            if (!session || typeof session.metadataVersion !== 'number') return
+-            this.applyRemoteMetadata(session.metadataVersion, session.metadata)
++            if (!session || typeof session.metadataVersion !== 'number') return false
++            if (session.metadata !== null && !MetadataSchema.safeParse(session.metadata).success) return false
++            if (session.metadataVersion >= this.metadataVersion) {
++                this.applyRemoteMetadata(session.metadataVersion, session.metadata)
++            }
++            return true
+         } catch (error) {
+             logger.debug('[API] Session metadata reconcile failed', error)
++            return false
+         }
+     }
+ 
+diff --git a/cli/src/claude/utils/startHappyServer.test.ts b/cli/src/claude/utils/startHappyServer.test.ts
+index cefa8420e..a6ab3eb7c 100644
+--- a/cli/src/claude/utils/startHappyServer.test.ts
++++ b/cli/src/claude/utils/startHappyServer.test.ts
+@@ -300,6 +300,9 @@ describe('startHappyServer change_title', () => {
+         const sendClaudeSessionMessage = vi.fn()
+         const sessionClient = {
+             updateMetadata,
++            refreshMetadata: vi.fn(async () => true),
++            getMetadata: vi.fn(() => null),
++            flushMetadata: vi.fn(async () => true),
+             sendAgentMessage: vi.fn(),
+             sendClaudeSessionMessage
+         } as unknown as ApiSessionClient
+@@ -341,10 +344,54 @@ describe('startHappyServer change_title', () => {
+         expect(sendClaudeSessionMessage).not.toHaveBeenCalled()
+     })
+ 
++    it.each([false, true])('reports a user lock, including one acquired while the title write is pending (%s)', async (inFlight) => {
++        let locked = !inFlight
++        const updateMetadata = vi.fn()
++        const sessionClient = {
++            updateMetadata,
++            refreshMetadata: vi.fn(async () => true),
++            getMetadata: () => ({ path: '/tmp', host: 'localhost', name: 'Pinned', titleLocked: locked }),
++            flushMetadata: vi.fn(async () => { locked = true; return true }),
++            sendAgentMessage: vi.fn()
++        } as unknown as ApiSessionClient
++        const mcp = await connectChangeTitleServer(sessionClient)
++        updateMetadata.mockClear()
++        const result = await mcp.callTool({ name: 'change_title', arguments: { title: 'Agent' } }) as ToolResult
++        expect(result.isError).toBe(true)
++        expect(result.content?.[0]?.text).toContain('locked by the user')
++        expect(updateMetadata).toHaveBeenCalledTimes(inFlight ? 1 : 0)
++    })
++
++    it('refreshes a stale cached lock before allowing an explicit rename', async () => {
++        let locked = true
++        const sessionClient = {
++            updateMetadata: vi.fn(), refreshMetadata: vi.fn(async () => { locked = false; return true }),
++            getMetadata: () => ({ path: '/tmp', host: 'localhost', titleLocked: locked }),
++            flushMetadata: vi.fn(async () => true), sendAgentMessage: vi.fn()
++        } as unknown as ApiSessionClient
++        const mcp = await connectChangeTitleServer(sessionClient)
++        const result = await mcp.callTool({ name: 'change_title', arguments: { title: 'Unlocked' } }) as ToolResult
++        expect(result.isError).toBe(false)
++        expect(sessionClient.refreshMetadata).toHaveBeenCalled()
++    })
++
++    it('fails without mutating when the Hub lock cannot be read', async () => {
++        const updateMetadata = vi.fn()
++        const sessionClient = { updateMetadata, refreshMetadata: vi.fn(async () => false), sendAgentMessage: vi.fn() } as unknown as ApiSessionClient
++        const mcp = await connectChangeTitleServer(sessionClient)
++        updateMetadata.mockClear()
++        const result = await mcp.callTool({ name: 'change_title', arguments: { title: 'Unknown' } }) as ToolResult
++        expect(result.isError).toBe(true)
++        expect(updateMetadata).not.toHaveBeenCalled()
++    })
++
+     it('returns an error for blank titles instead of claiming success', async () => {
+         const updateMetadata = vi.fn()
+         const sessionClient = {
+             updateMetadata,
++            refreshMetadata: vi.fn(async () => true),
++            getMetadata: vi.fn(() => null),
++            flushMetadata: vi.fn(async () => true),
+             sendAgentMessage: vi.fn(),
+             sendClaudeSessionMessage: vi.fn()
+         } as unknown as ApiSessionClient
+@@ -367,6 +414,9 @@ describe('startHappyServer change_title', () => {
+         const sendClaudeSessionMessage = vi.fn()
+         const sessionClient = {
+             updateMetadata,
++            refreshMetadata: vi.fn(async () => true),
++            getMetadata: vi.fn(() => null),
++            flushMetadata: vi.fn(async () => true),
+             sendAgentMessage: vi.fn(),
+             sendClaudeSessionMessage
+         } as unknown as ApiSessionClient
+diff --git a/cli/src/claude/utils/startHappyServer.ts b/cli/src/claude/utils/startHappyServer.ts
+index 9c726a7df..5a8a84c2d 100644
+--- a/cli/src/claude/utils/startHappyServer.ts
++++ b/cli/src/claude/utils/startHappyServer.ts
+@@ -78,6 +78,13 @@ function createHapiMcpServer(
+     const handler = async (title: string) => {
+         logger.debug('[hapiMCP] Changing title to:', title);
+         try {
++            if (!normalizeSessionDisplayTitle(title)) return { success: false, error: 'Title must not be empty' };
++            if (!await client.refreshMetadata()) {
++                return { success: false, error: 'Could not read the current title lock from the Hub.' };
++            }
++            if (client.getMetadata()?.titleLocked) {
++                return { success: false, error: 'Session title is locked by the user. Only the user can unlock it.' };
++            }
+             if (!emitTitleSummary) {
+                 // Codex collab: acknowledge the tool call without writing.
+                 // Parent-thread mcp_tool_call_end applies the rename later.
+@@ -86,6 +93,14 @@ function createHapiMcpServer(
+             if (!applySessionDisplayRename(client, title)) {
+                 return { success: false, error: 'Title must not be empty' };
+             }
++            if (!await client.flushMetadata()) {
++                return { success: false, error: 'Title update could not be confirmed by the Hub.' };
++            }
++            // The user may lock the title while this write is in flight.
++            // The ACK carries the Hub's preserved title and lock.
++            if (client.getMetadata()?.titleLocked) {
++                return { success: false, error: 'Session title is locked by the user. Only the user can unlock it.' };
++            }
+             return { success: true };
+         } catch (error) {
+             return { success: false, error: String(error) };
+diff --git a/cli/src/codex/shared/projection.title.test.ts b/cli/src/codex/shared/projection.title.test.ts
+index fbb4fc6ed..728716c2c 100644
+--- a/cli/src/codex/shared/projection.title.test.ts
++++ b/cli/src/codex/shared/projection.title.test.ts
+@@ -31,6 +31,14 @@ function params(item: unknown, turnId = 'turn') { return { threadId: 'thread', t
+ function history(...items: unknown[]) { return { turns: [{ id: 'turn', status: 'completed', items }] }; }
+ 
+ describe('shared Codex titles', () => {
++    it('keeps a user lock on live tool completions and historical title projection', async () => {
++        const f = fixture()
++        f.update(metadata => ({ ...metadata, titleLocked: true }))
++        await f.projection.notification('item/completed', params(titleItem('locked', 'Agent')))
++        await f.projection.history(history(titleItem('old-locked', 'Historical')))
++        expect(f.metadata()).toMatchObject({ name: 'Manual name', titleLocked: true })
++    })
++
+     it('renames via metadata.name so a spawn name does not hide change_title', async () => {
+         const f = fixture();
+         const item = titleItem('title', ' Remote title ');
+diff --git a/cli/src/codex/shared/projection.ts b/cli/src/codex/shared/projection.ts
+index fa9165b5e..1346e1fd7 100644
+--- a/cli/src/codex/shared/projection.ts
++++ b/cli/src/codex/shared/projection.ts
+@@ -68,7 +68,7 @@ export class SharedCodexProjection {
+ 
+     private applyDisplayRename(title: string, revision: number): void {
+         this.session.updateMetadata(metadata => {
+-            if (revision !== this.titleRevision) return metadata;
++            if (revision !== this.titleRevision || metadata.titleLocked) return metadata;
+             const normalized = normalizeSessionDisplayTitle(title);
+             if (!normalized || metadata.name?.trim() === normalized) return metadata;
+             return { ...metadata, name: normalized };
+diff --git a/cli/src/pi/titleExtension.test.ts b/cli/src/pi/titleExtension.test.ts
+index 28d6b4a15..995392c5c 100644
+--- a/cli/src/pi/titleExtension.test.ts
++++ b/cli/src/pi/titleExtension.test.ts
+@@ -103,6 +103,9 @@ describe('materializePiTitleExtension', () => {
+         });
+         expect(setTitle).toHaveBeenCalledWith('Fix login bug');
+         expect(result.content[0].text).toContain('Fix login bug');
++        expect(result.content[0].text).toContain('Title update requested');
++        expect(result.content[0].text).toContain('locked');
++        expect(result.content[0].text).not.toContain('Session title set');
+ 
+         // Legacy Pi call order (id, params, onUpdate, ctx, signal) with RPC
+         // reporting hasUI: false — the context must still be normalized and
+diff --git a/cli/src/pi/titleExtension.ts b/cli/src/pi/titleExtension.ts
+index 7c05f99e8..16706421b 100644
+--- a/cli/src/pi/titleExtension.ts
++++ b/cli/src/pi/titleExtension.ts
+@@ -60,7 +60,8 @@ export default function hapiTitleExtension(pi) {
+             // ctx.hasUI, which older RPC releases report as false even though
+             // ctx.ui.setTitle() emits the extension UI event.
+             if (ctx && ctx.ui) ctx.ui.setTitle(title);
+-            return { content: [{ type: 'text', text: 'Session title set: ' + title }], details: {} };
++            // Pi's setTitle RPC is one-way: do not claim Hub persistence.
++            return { content: [{ type: 'text', text: 'Title update requested: ' + title + '. HAPI keeps the current title if the user has locked it.' }], details: {} };
+         }
+     });
+ 
+diff --git a/docs/api/client-contract/rest.md b/docs/api/client-contract/rest.md
+index 10dff0fb4..de253eb54 100644
+--- a/docs/api/client-contract/rest.md
++++ b/docs/api/client-contract/rest.md
+@@ -79,8 +79,8 @@ Source: `hub/src/web/routes/sessions.ts`; request schemas in `shared/src/apiType
+ | `POST /api/sessions/:id/stop` | `{}` | `{ok: true, alreadyStopped: boolean}`; stops the process without archiving; shared Codex returns 409 before RPC because its runtime cannot stop one session without archiving |
+ | `POST /api/sessions/:id/archive` | `{}` | `{ok: true}` or `{ok: true, alreadyArchived: true}`; inactive rows without an archived or live (`running`/`idle`) lifecycle return 409 `{error: 'Session is inactive'}` |
+ | `DELETE /api/sessions/:id` | — | `{ok: true}` after runner exit confirmation; 409 while active (archive first); failed confirmation preserves the record |
+-| `PATCH /api/sessions/:id` | `{name}` (1–255 chars) | `{ok: true}` (rename) |
+-| `PATCH /api/sessions/:id/summary` | `{text}` (1–255 chars) | `{ok: true}` |
++| `PATCH /api/sessions/:id` | `{name?, titleLocked?}` (at least one; name: 1–255 chars; lock: boolean) | `{ok: true}` (rename) |
++| `PATCH /api/sessions/:id/summary` | `{text, titleLocked?}` (text: 1–255 chars; lock: boolean) | `{ok: true}` |
+ | `PUT /api/sessions/:id/pin` | `{mode: 'none'\|'project'\|'global'}` | `{ok: true}` |
+ | `POST /api/sessions/:id/switch` | `{}` | `{ok: true}` — hands terminal-controlled session over to remote control |
+ | `POST /api/sessions/:id/clear` | `{}` | `{sessionId}` — shared sessions only; resume inactive sessions through the Runner first, then create a new root; navigate only the initiating view |
+@@ -355,3 +355,14 @@ internal and must never be used by clients.
+ | Cursor maintenance | `/api/sessions/:id/migrate-to-acp`, `/cursor-chat-store` | Desktop store migration |
+ | Session export | `GET /api/sessions/:id/export` | Whole-session export through the web; separate from Android's full-text reader file export |
+ | **CLI plane** | `/cli/*` (`hub/src/web/routes/cli.ts`) | **Forbidden for clients** — internal CLI↔hub surface; authenticates with the raw access token instead of a JWT and bypasses the client middleware. Never call it from a client, and never send the access token as a bearer anywhere except `POST /api/auth`'s JSON body |
++
++### Session title protection
++
++`metadata.titleLocked` is an optional, Hub-owned boolean exposed in session detail,
++list summaries and metadata events. Missing means unlocked. The two user title
++PATCH routes above accept `titleLocked` and save it atomically with the title;
++omitting it preserves the existing lock. A lock-only PATCH omits `name` and
++preserves the existing name/summary fields. A manual rename alone does not lock a
++session. Agent metadata writes cannot set or clear this flag. While locked, the
++Hub preserves both `name` and `summary` across agent writes; user title saves
++remain allowed. Unlocking preserves the current title until a future update.
+diff --git a/e2e/session-title-lock.spec.ts b/e2e/session-title-lock.spec.ts
+new file mode 100644
+index 000000000..2532cd67e
+--- /dev/null
++++ b/e2e/session-title-lock.spec.ts
+@@ -0,0 +1,59 @@
++import { expect, test } from '@playwright/test'
++
++for (const width of [320, 390, 1280]) {
++    for (const locale of ['en', 'zh-CN']) {
++        test(`title lock draft, persistence and layout at ${width}px ${locale}`, async ({ page }, testInfo) => {
++            await page.setViewportSize({ width, height: 900 })
++            await page.addInitScript((language) => {
++                localStorage.setItem('hapi-lang', language)
++                document.documentElement.style.setProperty('--app-font-scale', '1.3')
++            }, locale)
++            await page.goto('/e2e-fixtures/session-title-lock-fixture.html')
++            await page.getByRole('button', { name: 'Rename 1', exact: true }).click()
++            const dialog = page.getByRole('dialog')
++            const lock = dialog.getByRole('button', { name: locale === 'en' ? 'Lock title against agent updates' : '锁定标题，阻止 AI 更新' })
++            const save = dialog.getByRole('button', { name: locale === 'en' ? 'Save' : '保存', exact: true })
++            const cancel = dialog.getByRole('button', { name: locale === 'en' ? 'Cancel' : '取消', exact: true })
++            await expect(lock).toHaveAttribute('aria-pressed', 'false')
++            await lock.click()
++            await expect(page.getByTestId('session-0')).toContainText('"locked":false')
++            await cancel.click()
++            await expect(dialog).not.toBeVisible()
++            await page.getByRole('button', { name: 'Rename 1', exact: true }).click()
++            await expect(lock).toHaveAttribute('aria-pressed', 'false')
++            await dialog.getByRole('textbox').fill('A deliberately long user title 测试标题')
++            await lock.click()
++            const bounds = await dialog.boundingBox()
++            expect(bounds!.x).toBeGreaterThanOrEqual(0)
++            expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width)
++            const inputBounds = await dialog.getByRole('textbox').boundingBox()
++            const lockBounds = await lock.boundingBox()
++            expect(lockBounds!.width).toBeGreaterThanOrEqual(40)
++            expect(lockBounds!.x + lockBounds!.width).toBeLessThanOrEqual(inputBounds!.x + inputBounds!.width + 1)
++            await page.screenshot({ path: testInfo.outputPath(`title-lock-${width}-${locale}.png`) })
++            await save.click()
++            await expect(dialog).not.toBeVisible()
++            await expect(page.getByTestId('session-0')).toContainText('"locked":true')
++            // Exercise the second production entry point, not just the isolated dialog.
++            await page.getByRole('button', { name: 'Show session list' }).click()
++            await page.getByRole('button', { name: /A deliberately long user title/ }).click({ button: 'right' })
++            await page.getByRole('menuitem', { name: locale === 'en' ? 'Rename' : '重命名', exact: true }).click()
++            await expect(lock).toHaveAttribute('aria-pressed', 'true')
++            await dialog.getByRole('textbox').fill('Human edit while locked')
++            await save.click()
++            await expect(dialog).not.toBeVisible()
++            await expect(page.getByTestId('session-0')).toContainText('Human edit while locked')
++            await expect(page.getByTestId('session-0')).toContainText('"locked":true')
++            await page.getByRole('button', { name: 'Rename 2', exact: true }).click()
++            await expect(lock).toHaveAttribute('aria-pressed', 'false')
++            await cancel.click()
++            await page.getByRole('button', { name: 'Rename 1', exact: true }).click()
++            await expect(lock).toHaveAttribute('aria-pressed', 'true')
++            await lock.press('Space')
++            await expect(lock).toHaveAttribute('aria-pressed', 'false')
++            await save.click()
++            await expect(page.getByTestId('session-0')).toContainText('"locked":false')
++            await expect(page.getByTestId('session-0')).toContainText('Human edit while locked')
++        })
++    }
++}
+diff --git a/hub/src/store/sessionStore.ts b/hub/src/store/sessionStore.ts
+index ac0ab82d6..72bf06b54 100644
+--- a/hub/src/store/sessionStore.ts
++++ b/hub/src/store/sessionStore.ts
+@@ -66,7 +66,7 @@ export class SessionStore {
+         metadata: unknown,
+         expectedVersion: number,
+         namespace: string,
+-        options?: { touchUpdatedAt?: boolean; allowUnarchive?: boolean }
++        options?: { touchUpdatedAt?: boolean; allowUnarchive?: boolean; allowTitleUpdate?: boolean; titleLocked?: boolean; inheritTitleLockFrom?: string }
+     ): VersionedUpdateResult<unknown | null> {
+         return updateSessionMetadata(this.db, id, metadata, expectedVersion, namespace, options)
+     }
+diff --git a/hub/src/store/sessionTitleLock.ts b/hub/src/store/sessionTitleLock.ts
+new file mode 100644
+index 000000000..9aa6336e1
+--- /dev/null
++++ b/hub/src/store/sessionTitleLock.ts
+@@ -0,0 +1,24 @@
++type TitleWriteOptions = { allowTitleUpdate?: boolean; titleLocked?: boolean }
++
++const record = (value: unknown): Record<string, unknown> | null =>
++    value !== null && typeof value === 'object' && !Array.isArray(value)
++        ? value as Record<string, unknown> : null
++
++/** Only a user title save may change the lock; enforce against the raw persisted row. */
++export function preserveSessionTitle(prior: unknown, incoming: unknown, options?: TitleWriteOptions): unknown {
++    const previous = record(prior)
++    const locked = options?.titleLocked ?? (previous?.titleLocked === true)
++    const protectTitle = previous?.titleLocked === true && !options?.allowTitleUpdate
++    const next = record(incoming)
++    if (!next && !locked && !protectTitle) return incoming
++    const result = { ...(next ?? previous ?? {}) }
++    delete result.titleLocked
++    if (protectTitle) {
++        for (const key of ['name', 'summary'] as const) {
++            if (Object.prototype.hasOwnProperty.call(previous, key)) result[key] = previous![key]
++            else delete result[key]
++        }
++    }
++    if (locked) result.titleLocked = true
++    return result
++}
+diff --git a/hub/src/store/sessions.ts b/hub/src/store/sessions.ts
+index b323d7273..7aacd5261 100644
+--- a/hub/src/store/sessions.ts
++++ b/hub/src/store/sessions.ts
+@@ -3,6 +3,7 @@ import { prepareCached } from './statementCache'
+ import { bumpSessionDeletionEpoch } from './sessionInvalidation'
+ import { randomUUID } from 'node:crypto'
+ import { isDeepStrictEqual } from 'node:util'
++import { preserveSessionTitle } from './sessionTitleLock'
+ 
+ import type { StoredSession, VersionedUpdateResult } from './types'
+ import { safeJsonParse } from './json'
+@@ -224,7 +225,7 @@ export function getOrCreateSession(
+         }
+     }
+ 
+-    const metadataJson = JSON.stringify(metadata)
++    const metadataJson = JSON.stringify(preserveSessionTitle(null, metadata))
+     const agentStateJson = agentState === null || agentState === undefined ? null : JSON.stringify(agentState)
+ 
+     prepareCached(db, `
+@@ -365,7 +366,7 @@ export function adoptPreallocatedSession(
+         }
+ 
+         const now = Date.now()
+-        const metadataJson = JSON.stringify(metadata)
++        const metadataJson = JSON.stringify(preserveSessionTitle(existing.metadata, mergeSessionMetadata(existing.metadata, metadata)))
+         const agentStateJson = agentState === null || agentState === undefined ? null : JSON.stringify(agentState)
+         const stubTag = machineSpawnPreallocTag(id)
+ 
+@@ -425,7 +426,7 @@ export function updateSessionMetadata(
+     metadata: unknown,
+     expectedVersion: number,
+     namespace: string,
+-    options?: { touchUpdatedAt?: boolean; allowUnarchive?: boolean }
++    options?: { touchUpdatedAt?: boolean; allowUnarchive?: boolean; allowTitleUpdate?: boolean; titleLocked?: boolean; inheritTitleLockFrom?: string }
+ ): VersionedUpdateResult<unknown | null> {
+     const now = Date.now()
+     const allowUnarchive = options?.allowUnarchive === true
+@@ -438,7 +439,11 @@ export function updateSessionMetadata(
+             }
+ 
+             const prior = existing.metadata
+-            let merged = mergeSessionMetadata(prior, metadata)
++            const sourceTitle = options?.inheritTitleLockFrom
++                ? getSessionByNamespace(db, options.inheritTitleLockFrom, namespace)?.metadata : null
++            const titleOwner = isPlainObject(prior) && prior.titleLocked === true ? prior
++                : isPlainObject(sourceTitle) && sourceTitle.titleLocked === true ? sourceTitle : prior
++            let merged = preserveSessionTitle(titleOwner, mergeSessionMetadata(prior, metadata), options)
+ 
+             // #1911 M1: unauthorized un-archive of hub-archived rows.
+             // Return success + merge-preserved archive fields — NOT version-mismatch
+@@ -491,6 +496,7 @@ export function updateSessionMetadata(
+             // that is refuse-in-place, not live adopt (#1911 M1).
+             if (
+                 result.result === 'success'
++                && !options?.allowTitleUpdate
+                 && isMachineSpawnPreallocatedStub(existing)
+                 && !isHubArchivedSessionMetadata(merged)
+             ) {
+diff --git a/hub/src/sync/sessionCache.ts b/hub/src/sync/sessionCache.ts
+index 003b50ecf..ddbb02791 100644
+--- a/hub/src/sync/sessionCache.ts
++++ b/hub/src/sync/sessionCache.ts
+@@ -1037,7 +1037,7 @@ export class SessionCache {
+         throw new Error('Session was modified concurrently while archiving from hub')
+     }
+ 
+-    async renameSession(sessionId: string, name: string): Promise<void> {
++    async renameSession(sessionId: string, name: string | undefined, titleLocked?: boolean): Promise<void> {
+         // tiann/hapi#919: retry-with-refresh on version-mismatch instead of
+         // throwing on the first contention. Mirrors the good pattern in
+         // mergeSessions (~L780) and in syncEngine's metadata helpers. Without
+@@ -1050,14 +1050,14 @@ export class SessionCache {
+             }
+ 
+             const currentMetadata = session.metadata ?? { path: '', host: '' }
+-            const newMetadata = { ...currentMetadata, name }
++            const newMetadata = name === undefined ? { ...currentMetadata } : { ...currentMetadata, name }
+ 
+             const result = this.store.sessions.updateSessionMetadata(
+                 sessionId,
+                 newMetadata,
+                 session.metadataVersion,
+                 session.namespace,
+-                { touchUpdatedAt: false }
++                { touchUpdatedAt: false, allowTitleUpdate: true, titleLocked }
+             )
+ 
+             if (result.result === 'error') {
+@@ -1075,7 +1075,7 @@ export class SessionCache {
+         throw new Error('Session was modified concurrently. Please try again.')
+     }
+ 
+-    async updateSessionSummary(sessionId: string, text: string): Promise<void> {
++    async updateSessionSummary(sessionId: string, text: string, titleLocked?: boolean): Promise<void> {
+         // Keep the generated/native title separate from metadata.name. A
+         // manually chosen name must continue to win in the Web title helper,
+         // while the summary remains available as the agent-authored fallback.
+@@ -1099,7 +1099,7 @@ export class SessionCache {
+                 newMetadata,
+                 session.metadataVersion,
+                 session.namespace,
+-                { touchUpdatedAt: false }
++                { touchUpdatedAt: false, allowTitleUpdate: true, titleLocked }
+             )
+ 
+             if (result.result === 'error') {
+@@ -1373,6 +1373,25 @@ export class SessionCache {
+             throw new Error('Session not found for merge')
+         }
+ 
++        // A resume/dedup may replace the row. Transfer title ownership before
++        // moving data, preserving fresh source/destination metadata on retries.
++        let metadataTransferred = false
++        for (let attempt = 0; attempt < METADATA_RETRY_ATTEMPTS; attempt += 1) {
++            const source = this.store.sessions.getSessionByNamespace(oldSessionId, namespace)
++            const latest = this.store.sessions.getSessionByNamespace(newSessionId, namespace)
++            if (!source || !latest) break
++            const result = this.store.sessions.updateSessionMetadata(
++                newSessionId,
++                this.mergeSessionMetadata(source.metadata, latest.metadata),
++                latest.metadataVersion,
++                namespace,
++                { touchUpdatedAt: false, inheritTitleLockFrom: options.deleteOldSession ? oldSessionId : undefined }
++            )
++            if (result.result === 'success') { metadataTransferred = true; break }
++            if (result.result === 'error') break
++        }
++        if (!metadataTransferred) throw new Error('Failed to preserve session metadata during merge')
++
+         const movedMessages = this.store.messages.mergeSessionMessages(oldSessionId, newSessionId)
+         // mergeSessions deletes the source. mergeSessionHistory keeps it alive
+         // with the original socket, so its notify chain must stay on that id.
+@@ -1438,27 +1457,6 @@ export class SessionCache {
+             this.emitScratchlistChanged(oldSessionId)
+         }
+ 
+-        const mergedMetadata = this.mergeSessionMetadata(oldStored.metadata, newStored.metadata)
+-        if (mergedMetadata !== null && mergedMetadata !== newStored.metadata) {
+-            for (let attempt = 0; attempt < 2; attempt += 1) {
+-                const latest = this.store.sessions.getSessionByNamespace(newSessionId, namespace)
+-                if (!latest) break
+-                const result = this.store.sessions.updateSessionMetadata(
+-                    newSessionId,
+-                    mergedMetadata,
+-                    latest.metadataVersion,
+-                    namespace,
+-                    { touchUpdatedAt: false }
+-                )
+-                if (result.result === 'success') {
+-                    break
+-                }
+-                if (result.result === 'error') {
+-                    break
+-                }
+-            }
+-        }
+-
+         if (newStored.model === null && oldStored.model !== null) {
+             const updated = this.store.sessions.setSessionModel(newSessionId, oldStored.model, namespace, {
+                 touchUpdatedAt: false
+diff --git a/hub/src/sync/sessionTitleLock.test.ts b/hub/src/sync/sessionTitleLock.test.ts
+new file mode 100644
+index 000000000..0a9f8b097
+--- /dev/null
++++ b/hub/src/sync/sessionTitleLock.test.ts
+@@ -0,0 +1,173 @@
++import { describe, expect, it } from 'bun:test'
++import { Store } from '../store'
++import { mkdtempSync, rmSync } from 'node:fs'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import { machineSpawnPreallocTag } from '../store/sessions'
++import { SessionCache } from './sessionCache'
++import type { EventPublisher } from './eventPublisher'
++
++function setup() {
++    const store = new Store(':memory:')
++    const cache = new SessionCache(store, { emit() {} } as unknown as EventPublisher)
++    const create = (tag: string) => cache.getOrCreateSession(tag, {
++        path: '/project', host: 'localhost', name: 'Original',
++        summary: { text: 'Original summary', updatedAt: 1 }
++    }, null, 'default')
++    const write = (id: string, metadata: unknown) => {
++        const current = store.sessions.getSession(id)!
++        return store.sessions.updateSessionMetadata(id, metadata, current.metadataVersion, 'default')
++    }
++    return { store, cache, create, write }
++}
++
++describe('explicit per-session title lock', () => {
++    it('preserves summary-only titles through lock-only saves and native updates after unlock', async () => {
++        const { store, cache, write } = setup()
++        try {
++            const session = cache.getOrCreateSession('summary-only', {
++                path: '/project', host: 'localhost', summary: { text: 'Native title', updatedAt: 1 }
++            }, null, 'default')
++            await cache.renameSession(session.id, undefined, true)
++            write(session.id, { summary: { text: 'Blocked native title', updatedAt: 2 } })
++            expect(store.sessions.getSession(session.id)?.metadata).toMatchObject({ titleLocked: true, summary: { text: 'Native title' } })
++            cache.refreshSession(session.id)
++            await cache.renameSession(session.id, undefined, false)
++            write(session.id, { summary: { text: 'New native title', updatedAt: 3 } })
++            expect(store.sessions.getSession(session.id)?.metadata).toMatchObject({ summary: { text: 'New native title' } })
++            expect(store.sessions.getSession(session.id)?.metadata).not.toHaveProperty('name')
++        } finally { store.close() }
++    })
++
++    it('allows agent renames after a manual rename unless explicitly locked', async () => {
++        const { store, cache, create, write } = setup()
++        try {
++            const session = create('unlocked')
++            await cache.renameSession(session.id, 'User title')
++            write(session.id, { name: 'Agent title' })
++            expect(store.sessions.getSession(session.id)?.metadata).toMatchObject({ name: 'Agent title' })
++        } finally { store.close() }
++    })
++
++    it('protects both title fields against sparse, null, forged, and stale agent snapshots', async () => {
++        const { store, cache, create, write } = setup()
++        try {
++            const session = create('locked')
++            await cache.renameSession(session.id, 'User title', true)
++            for (const metadata of [
++                { name: 'Agent', titleLocked: false, summary: { text: 'New', updatedAt: 2 } },
++                { titleLocked: null }, null, { lifecycleState: 'running' }
++            ]) {
++                expect(write(session.id, metadata).result).toBe('success')
++                expect(store.sessions.getSession(session.id)?.metadata).toMatchObject({
++                    name: 'User title', titleLocked: true, summary: { text: 'Original summary' }
++                })
++            }
++            cache.refreshSession(session.id)
++            await cache.clearSessionArchiveMetadata(session.id)
++            expect(store.sessions.getSession(session.id)?.metadata).toMatchObject({ titleLocked: true, name: 'User title' })
++        } finally { store.close() }
++    })
++
++    it('keeps sessions independent, permits user edits, and unlocks only on explicit user save', async () => {
++        const { store, cache, create, write } = setup()
++        try {
++            const first = create('first'), second = create('second')
++            await cache.renameSession(first.id, 'Pinned', true)
++            write(second.id, { name: 'Other agent title', titleLocked: true })
++            expect(store.sessions.getSession(second.id)?.metadata).not.toHaveProperty('titleLocked', true)
++            cache.refreshSession(first.id)
++            await cache.renameSession(first.id, 'User edit')
++            write(first.id, { name: 'Blocked' })
++            expect(store.sessions.getSession(first.id)?.metadata).toMatchObject({ name: 'User edit', titleLocked: true })
++            cache.refreshSession(first.id)
++            await cache.renameSession(first.id, 'User edit', false)
++            write(first.id, { name: 'Agent after unlock' })
++            expect(store.sessions.getSession(first.id)?.metadata).toMatchObject({ name: 'Agent after unlock' })
++        } finally { store.close() }
++    })
++
++    it('lets a user save a generated title and lock atomically', async () => {
++        const { store, cache, create, write } = setup()
++        try {
++            const session = create('generated')
++            await cache.updateSessionSummary(session.id, 'User generated', true)
++            write(session.id, { name: 'Agent', summary: { text: 'Agent summary' } })
++            expect(store.sessions.getSession(session.id)?.metadata).toMatchObject({
++                titleLocked: true, name: 'Original', summary: { text: 'User generated' }
++            })
++        } finally { store.close() }
++    })
++})
++
++it('persists a lock through a real database close and reopen', () => {
++    const directory = mkdtempSync(join(tmpdir(), 'hapi-title-lock-'))
++    try {
++        // Separate processes guarantee an actual restart and release SQLite
++        // prepared-statement handles before cleanup on Windows.
++        const dbPath = join(directory, 'hapi.db')
++        const imports = `import { Store } from './hub/src/store'; import { SessionCache } from './hub/src/sync/sessionCache';`
++        const create = Bun.spawnSync([process.execPath, '-e', imports + `
++            const store = new Store(process.argv[1]);
++            const cache = new SessionCache(store, { emit() {} });
++            const session = cache.getOrCreateSession('persist', { path: '/project', host: 'localhost' }, null, 'default');
++            await cache.renameSession(session.id, 'Pinned', true); store.close();
++        `, dbPath], { cwd: join(import.meta.dir, '../../..') })
++        expect(create.exitCode).toBe(0)
++        const reopen = Bun.spawnSync([process.execPath, '-e', imports + `
++            const store = new Store(process.argv[1]); const current = store.sessions.getSessions()[0];
++            store.sessions.updateSessionMetadata(current.id, { name: 'After restart' }, current.metadataVersion, 'default');
++            console.log(JSON.stringify(store.sessions.getSession(current.id).metadata)); store.close();
++        `, dbPath], { cwd: join(import.meta.dir, '../../..') })
++        expect(reopen.exitCode).toBe(0)
++        expect(JSON.parse(reopen.stdout.toString())).toMatchObject({ titleLocked: true, name: 'Pinned' })
++    } finally { rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }) }
++})
++
++it('preserves a preallocated lock at adoption and rejects forged bootstrap locks', async () => {
++    const { store, cache } = setup()
++    try {
++        const stub = store.sessions.getOrCreateSession(machineSpawnPreallocTag('stub-lock'), {
++            path: '/project', host: 'localhost', titleLocked: true
++        }, null, 'default', undefined, undefined, undefined, 'stub-lock')
++        expect(stub.metadata).not.toHaveProperty('titleLocked', true)
++        await cache.renameSession(stub.id, 'Pinned before bootstrap', true)
++        const adopted = store.sessions.adoptPreallocatedSession(stub.id, 'real-agent', {
++            path: '/new', host: 'localhost', name: 'Agent', titleLocked: false
++        }, null, 'default')
++        expect(adopted.metadata).toMatchObject({ titleLocked: true, name: 'Pinned before bootstrap' })
++    } finally { store.close() }
++})
++
++it('retains the destination lock, transfers a resumed lock, and keeps history imports independent', async () => {
++    const { store, cache, create, write } = setup()
++    try {
++        const source = create('source'), destination = create('destination')
++        await cache.renameSession(source.id, 'Source pinned', true)
++        await cache.mergeSessions(source.id, destination.id, 'default')
++        write(destination.id, { name: 'After resume' })
++        expect(store.sessions.getSession(destination.id)?.metadata).toMatchObject({ titleLocked: true, name: 'Source pinned' })
++        const other = create('other')
++        await cache.renameSession(other.id, 'Destination pinned', true)
++        await cache.mergeSessions(destination.id, other.id, 'default')
++        expect(store.sessions.getSession(other.id)?.metadata).toMatchObject({ titleLocked: true, name: 'Destination pinned' })
++        const independent = create('independent')
++        await cache.mergeSessionHistory(other.id, independent.id, 'default')
++        expect(store.sessions.getSession(independent.id)?.metadata).not.toHaveProperty('titleLocked', true)
++    } finally { store.close() }
++})
++
++it('does not move history when title transfer fails', async () => {
++    const { store, cache, create } = setup()
++    try {
++        const source = create('failed-source'), destination = create('failed-destination')
++        await cache.renameSession(source.id, 'Pinned', true)
++        store.messages.addMessage(source.id, { text: 'Keep history' })
++        const update = store.sessions.updateSessionMetadata.bind(store.sessions)
++        store.sessions.updateSessionMetadata = (...args) => args[4]?.inheritTitleLockFrom ? { result: 'error' } : update(...args)
++        await expect(cache.mergeSessions(source.id, destination.id, 'default')).rejects.toThrow('preserve session metadata')
++        expect(store.messages.getAllMessages(source.id)).toHaveLength(1)
++        expect(store.messages.getAllMessages(destination.id)).toHaveLength(0)
++        expect(store.sessions.getSession(source.id)?.metadata).toMatchObject({ titleLocked: true })
++    } finally { store.close() }
++})
+diff --git a/hub/src/sync/syncEngine.ts b/hub/src/sync/syncEngine.ts
+index 2f4150c54..e48c1b3e2 100644
+--- a/hub/src/sync/syncEngine.ts
++++ b/hub/src/sync/syncEngine.ts
+@@ -2284,16 +2284,16 @@ export class SyncEngine {
+         await this.rpcGateway.switchSession(sessionId, to)
+     }
+ 
+-    async renameSession(sessionId: string, name: string): Promise<void> {
+-        await this.sessionCache.renameSession(sessionId, name)
++    async renameSession(sessionId: string, name: string | undefined, titleLocked?: boolean): Promise<void> {
++        await this.sessionCache.renameSession(sessionId, name, titleLocked)
+     }
+ 
+     async suggestSessionTitle(sessionId: string): Promise<string> {
+         return await this.titleSuggestionService.suggestTitle(sessionId)
+     }
+ 
+-    async updateSessionSummary(sessionId: string, text: string): Promise<void> {
+-        await this.sessionCache.updateSessionSummary(sessionId, text)
++    async updateSessionSummary(sessionId: string, text: string, titleLocked?: boolean): Promise<void> {
++        await this.sessionCache.updateSessionSummary(sessionId, text, titleLocked)
+     }
+ 
+     async deleteSession(sessionId: string): Promise<void> {
+diff --git a/hub/src/web/routes/sessions.test.ts b/hub/src/web/routes/sessions.test.ts
+index 6942826e4..9880dea10 100644
+--- a/hub/src/web/routes/sessions.test.ts
++++ b/hub/src/web/routes/sessions.test.ts
+@@ -76,6 +76,7 @@ function createApp(session: Session, opts?: {
+     implementCodexPlan?: SyncEngine['implementCodexPlan']
+     rewindConversation?: SyncEngine['rewindConversation']
+     suggestSessionTitle?: SyncEngine['suggestSessionTitle']
++    renameSession?: SyncEngine['renameSession']
+     updateSessionSummary?: SyncEngine['updateSessionSummary']
+     setSessionPinned?: (sessionId: string, pinned: boolean) => void
+     setSessionPinMode?: (sessionId: string, mode: 'none' | 'project' | 'global') => void
+@@ -199,6 +200,7 @@ function createApp(session: Session, opts?: {
+         implementCodexPlan: opts?.implementCodexPlan,
+         rewindConversation: opts?.rewindConversation ?? (async () => ({ type: 'success' })),
+         suggestSessionTitle: opts?.suggestSessionTitle ?? (async () => 'Generated title'),
++        renameSession: opts?.renameSession ?? (async () => {}),
+         updateSessionSummary: opts?.updateSessionSummary ?? (async () => {})
+     } as Partial<SyncEngine>
+ 
+@@ -291,6 +293,47 @@ describe('sessions routes', () => {
+         expect(await response.json()).toEqual({ error: 'No Runner online', code: 'no_machine_online' })
+         expect(clears).toBe(0)
+     })
++    it('accepts a lock-only save without converting a generated title to a manual name', async () => {
++        const calls: unknown[] = []
++        const { app } = createApp(createSession(), { renameSession: async (...args) => { calls.push(args) } })
++        const response = await app.request('/api/sessions/session-1', {
++            method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ titleLocked: true })
++        })
++        expect(response.status).toBe(200)
++        expect(calls).toEqual([['session-1', undefined, true]])
++    })
++
++    it.each([true, false])('passes explicit title lock %s atomically through both user title routes', async (titleLocked) => {
++        const calls: unknown[] = []
++        const { app } = createApp(createSession(), {
++            renameSession: async (...args) => { calls.push(args) },
++            updateSessionSummary: async (...args) => { calls.push(args) }
++        })
++        for (const [suffix, field] of [['', 'name'], ['/summary', 'text']]) {
++            const response = await app.request(`/api/sessions/session-1${suffix}`, {
++                method: 'PATCH', headers: { 'Content-Type': 'application/json' },
++                body: JSON.stringify({ [field]: 'Chosen', titleLocked })
++            })
++            expect(response.status).toBe(200)
++        }
++        expect(calls).toEqual([['session-1', 'Chosen', titleLocked], ['session-1', 'Chosen', titleLocked]])
++    })
++
++    it('rejects invalid lock values and missing-session title saves', async () => {
++        const { app } = createApp(createSession())
++        for (const suffix of ['', '/summary']) {
++            expect((await app.request(`/api/sessions/session-1${suffix}`, {
++                method: 'PATCH', headers: { 'Content-Type': 'application/json' },
++                body: JSON.stringify({ name: 'Title', text: 'Title', titleLocked: 'true' })
++            })).status).toBe(400)
++        }
++        const other = createApp(createSession(), { sessionExists: false }).app
++        expect((await other.request('/api/sessions/session-1', {
++            method: 'PATCH', headers: { 'Content-Type': 'application/json' },
++            body: JSON.stringify({ name: 'Title', titleLocked: false })
++        })).status).toBe(404)
++    })
++
+     it('generates a title suggestion without changing session metadata', async () => {
+         const suggest = async (sessionId: string) => {
+             expect(sessionId).toBe('session-1')
+diff --git a/hub/src/web/routes/sessions.ts b/hub/src/web/routes/sessions.ts
+index 0d128311a..6d4aef209 100644
+--- a/hub/src/web/routes/sessions.ts
++++ b/hub/src/web/routes/sessions.ts
+@@ -877,11 +877,11 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
+         const body = await c.req.json().catch(() => null)
+         const parsed = RenameSessionRequestSchema.safeParse(body)
+         if (!parsed.success) {
+-            return c.json({ error: 'Invalid body: name is required' }, 400)
++            return c.json({ error: 'Invalid body: name or titleLocked is required' }, 400)
+         }
+ 
+         try {
+-            await engine.renameSession(sessionResult.sessionId, parsed.data.name)
++            await engine.renameSession(sessionResult.sessionId, parsed.data.name, parsed.data.titleLocked)
+             return c.json({ ok: true })
+         } catch (error) {
+             const message = error instanceof Error ? error.message : 'Failed to rename session'
+@@ -933,7 +933,7 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
+         }
+ 
+         try {
+-            await engine.updateSessionSummary(sessionResult.sessionId, parsed.data.text)
++            await engine.updateSessionSummary(sessionResult.sessionId, parsed.data.text, parsed.data.titleLocked)
+             return c.json({ ok: true })
+         } catch (error) {
+             const message = error instanceof Error ? error.message : 'Failed to update session summary'
+diff --git a/shared/src/apiTypes.ts b/shared/src/apiTypes.ts
+index 3e1c755fe..0d4ab0fde 100644
+--- a/shared/src/apiTypes.ts
++++ b/shared/src/apiTypes.ts
+@@ -340,13 +340,17 @@ export type SessionServiceTierRequest = z.infer<typeof SessionServiceTierRequest
+ export const SESSION_NAME_MAX_LENGTH = 255
+ 
+ export const RenameSessionRequestSchema = z.object({
+-    name: z.string().min(1).max(SESSION_NAME_MAX_LENGTH)
++    name: z.string().min(1).max(SESSION_NAME_MAX_LENGTH).optional(),
++    titleLocked: z.boolean().optional()
++}).refine(value => value.name !== undefined || value.titleLocked !== undefined, {
++    message: 'name or titleLocked is required'
+ })
+ 
+ export type RenameSessionRequest = z.infer<typeof RenameSessionRequestSchema>
+ 
+ export const UpdateSessionSummaryRequestSchema = z.object({
+-    text: z.string().trim().min(1).max(255)
++    text: z.string().trim().min(1).max(255),
++    titleLocked: z.boolean().optional()
+ })
+ 
+ export type UpdateSessionSummaryRequest = z.infer<typeof UpdateSessionSummaryRequestSchema>
+diff --git a/shared/src/schemas.ts b/shared/src/schemas.ts
+index 0915a097a..ab2af8b17 100644
+--- a/shared/src/schemas.ts
++++ b/shared/src/schemas.ts
+@@ -71,6 +71,7 @@ export const MetadataSchema = z.object({
+     host: z.string(),
+     version: z.string().optional(),
+     name: z.string().optional(),
++    titleLocked: z.boolean().optional(),
+     os: z.string().optional(),
+     summary: MetadataSummarySchema.optional(),
+     machineId: z.string().optional(),
+diff --git a/shared/src/sessionSummary.ts b/shared/src/sessionSummary.ts
+index f2d787e6b..5f60688e1 100644
+--- a/shared/src/sessionSummary.ts
++++ b/shared/src/sessionSummary.ts
+@@ -34,6 +34,7 @@ function classifyKind(tool: string): PendingRequestKind {
+ 
+ export type SessionSummaryMetadata = {
+     name?: string
++    titleLocked?: boolean
+     path: string
+     machineId?: string
+     summary?: { text: string }
+@@ -192,6 +193,7 @@ export function toSessionSummaryMetadata(metadata: Metadata | null | undefined):
+     }
+     return {
+         name: metadata.name,
++        titleLocked: metadata.titleLocked,
+         path: metadata.path,
+         machineId: metadata.machineId ?? undefined,
+         summary: metadata.summary ? { text: metadata.summary.text } : undefined,
+diff --git a/web/README.md b/web/README.md
+index 74da4e38c..e209e7432 100644
+--- a/web/README.md
++++ b/web/README.md
+@@ -78,6 +78,16 @@ See `src/router.tsx` for route definitions.
+ - Pending permission request count.
+ - Agent name and model display.
+ 
++### Session title lock
++
++The rename dialog has a per-session lock beside the title input. New and existing
++sessions are unlocked by default. Saving a manual name does not automatically lock
++it: agents may still rename an unlocked session. Locking prevents agent title
++updates; users can still edit or generate a title and save it while locked.
++Save applies the title and lock together; Cancel discards both changes. Unlocking
++allows future agent title updates without immediately changing the current title.
++The Hub persists and enforces the lock across clients, restarts, and resume.
++
+ ### Chat interface (`src/components/SessionChat.tsx`)
+ 
+ - Message thread with infinite scroll.
+diff --git a/web/e2e-fixtures/session-title-lock-fixture.html b/web/e2e-fixtures/session-title-lock-fixture.html
+new file mode 100644
+index 000000000..8342a83a5
+--- /dev/null
++++ b/web/e2e-fixtures/session-title-lock-fixture.html
+@@ -0,0 +1,12 @@
++<!doctype html>
++<html lang="en">
++    <head>
++        <meta charset="UTF-8" />
++        <meta name="viewport" content="width=device-width, initial-scale=1" />
++        <title>Session title lock fixture</title>
++    </head>
++    <body>
++        <div id="root"></div>
++        <script type="module" src="./session-title-lock-fixture.tsx"></script>
++    </body>
++</html>
+diff --git a/web/e2e-fixtures/session-title-lock-fixture.tsx b/web/e2e-fixtures/session-title-lock-fixture.tsx
+new file mode 100644
+index 000000000..335bff4de
+--- /dev/null
++++ b/web/e2e-fixtures/session-title-lock-fixture.tsx
+@@ -0,0 +1,50 @@
++import React, { useState } from 'react'
++import { createRoot } from 'react-dom/client'
++import '../src/index.css'
++import { I18nProvider } from '../src/lib/i18n-context'
++import { RenameSessionDialog } from '../src/components/RenameSessionDialog'
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
++import { ToastProvider } from '../src/lib/toast-context'
++import { SessionList } from '../src/components/SessionList'
++import type { SessionSummary } from '../src/types/api'
++import type { ApiClient } from '../src/api/client'
++
++const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
++
++function Fixture() {
++    const [sessions, setSessions] = useState([{ name: 'First session', locked: false }, { name: 'Second session', locked: false }])
++    const [selected, setSelected] = useState(0)
++    const [open, setOpen] = useState(false)
++    const [showList, setShowList] = useState(false)
++    const save = async (name: string | undefined, titleLocked?: boolean) => {
++        setSessions(current => current.map((session, index) => index === selected ? { name: name ?? session.name, locked: !!titleLocked } : session))
++    }
++    return <>
++        <button onClick={() => setShowList(true)}>Show session list</button>
++        {sessions.map((session, index) => <div key={index}>
++            <output data-testid={`session-${index}`}>{JSON.stringify(session)}</output>
++            <button onClick={() => { setSelected(index); setOpen(true) }}>Rename {index + 1}</button>
++        </div>)}
++        <RenameSessionDialog isOpen={open} onClose={() => setOpen(false)} sessionId={String(selected)}
++            currentName={sessions[selected].name} currentTitleLocked={sessions[selected].locked}
++            onRename={save} onUpdateSummary={save} onSuggestTitle={async () => 'Generated title'} isPending={false} />
++        {showList ? <SessionList
++            sessions={sessions.map((session, index) => ({
++                id: String(index), active: false, hasConversationContent: true, thinking: false,
++                updatedAt: 1, activeAt: 1, pendingRequestsCount: 0, pendingRequestKinds: [],
++                pendingRequests: [], backgroundTaskCount: 0, futureScheduledMessageCount: 0,
++                metadata: { name: session.name, titleLocked: session.locked, path: '/fixture', flavor: 'codex' }
++            } as SessionSummary))}
++            selectedSessionId="0" onSelect={() => {}} onNewSession={() => {}} onRefresh={() => {}}
++            isLoading={false} renderHeader={false}
++            api={{ renameSession: async (id: string, name: string | undefined, titleLocked?: boolean) => {
++                setSessions(current => current.map((session, index) => String(index) === id
++                    ? { name: name ?? session.name, locked: titleLocked ?? session.locked } : session))
++            } } as unknown as ApiClient}
++        /> : null}
++    </>
++}
++
++createRoot(document.getElementById('root')!).render(
++    <QueryClientProvider client={queryClient}><I18nProvider><ToastProvider><Fixture /></ToastProvider></I18nProvider></QueryClientProvider>
++)
+diff --git a/web/src/api/client.ts b/web/src/api/client.ts
+index 5085ae80c..b6302745b 100644
+--- a/web/src/api/client.ts
++++ b/web/src/api/client.ts
+@@ -1033,10 +1033,10 @@ export class ApiClient {
+         )
+     }
+ 
+-    async renameSession(sessionId: string, name: string): Promise<void> {
++    async renameSession(sessionId: string, name: string | undefined, titleLocked?: boolean): Promise<void> {
+         await this.request(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+             method: 'PATCH',
+-            body: JSON.stringify({ name })
++            body: JSON.stringify({ name, titleLocked })
+         })
+     }
+ 
+@@ -1047,10 +1047,10 @@ export class ApiClient {
+         )
+     }
+ 
+-    async updateSessionSummary(sessionId: string, text: string): Promise<void> {
++    async updateSessionSummary(sessionId: string, text: string, titleLocked?: boolean): Promise<void> {
+         await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/summary`, {
+             method: 'PATCH',
+-            body: JSON.stringify({ text })
++            body: JSON.stringify({ text, titleLocked })
+         })
+     }
+ 
+diff --git a/web/src/components/RenameSessionDialog.titleLock.test.tsx b/web/src/components/RenameSessionDialog.titleLock.test.tsx
+new file mode 100644
+index 000000000..d39321591
+--- /dev/null
++++ b/web/src/components/RenameSessionDialog.titleLock.test.tsx
+@@ -0,0 +1,108 @@
++import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import { I18nProvider } from '@/lib/i18n-context'
++import { RenameSessionDialog } from './RenameSessionDialog'
++
++afterEach(cleanup)
++const label = 'Lock title against agent updates'
++function fixture(locked = false) {
++    const onRename = vi.fn(async (_name: string | undefined, _locked?: boolean) => {})
++    const onUpdateSummary = vi.fn(async (_text: string, _locked?: boolean) => {})
++    const onClose = vi.fn()
++    const props = { isOpen: true, currentName: 'Session', currentTitleLocked: locked, sessionId: 'first',
++        onRename, onClose, onUpdateSummary, onSuggestTitle: async () => 'Generated', isPending: false }
++    const view = render(<I18nProvider><RenameSessionDialog {...props} /></I18nProvider>)
++    const update = (changes: Partial<typeof props>) => view.rerender(
++        <I18nProvider><RenameSessionDialog {...props} {...changes} /></I18nProvider>)
++    return { ...props, update }
++}
++
++describe('title lock draft', () => {
++    it('saves only the lock when the title draft is untouched', async () => {
++        const f = fixture()
++        fireEvent.click(screen.getByRole('button', { name: label }))
++        fireEvent.click(screen.getByRole('button', { name: 'Save' }))
++        await waitFor(() => expect(f.onRename).toHaveBeenCalledWith(undefined, true))
++    })
++
++    it('does not pin a stale displayed title when an agent update arrives during a lock-only draft', async () => {
++        const f = fixture()
++        fireEvent.click(screen.getByRole('button', { name: label }))
++        f.update({ currentName: 'New native title' })
++        fireEvent.click(screen.getByRole('button', { name: 'Save' }))
++        await waitFor(() => expect(f.onRename).toHaveBeenCalledWith(undefined, true))
++    })
++
++    it('defaults unlocked, never locks on manual rename, and saves both values together', async () => {
++        const f = fixture()
++        expect(screen.getByRole('button', { name: label })).toHaveAttribute('aria-pressed', 'false')
++        fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Manual' } })
++        fireEvent.click(screen.getByRole('button', { name: 'Save' }))
++        await waitFor(() => expect(f.onRename).toHaveBeenCalledWith('Manual', false))
++    })
++
++    it('saves a lock-only change and permits a manual rename while locked', async () => {
++        const f = fixture()
++        fireEvent.click(screen.getByRole('button', { name: label }))
++        expect(f.onRename).not.toHaveBeenCalled()
++        fireEvent.click(screen.getByRole('button', { name: 'Save' }))
++        await waitFor(() => expect(f.onRename).toHaveBeenCalledWith(undefined, true))
++        f.update({ isOpen: false })
++        f.update({ currentTitleLocked: true })
++        fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Another manual title' } })
++        fireEvent.click(screen.getByRole('button', { name: 'Save' }))
++        await waitFor(() => expect(f.onRename).toHaveBeenCalledWith('Another manual title', true))
++    })
++
++    it('unlocks without replacing the title, and saves a generated title with its lock', async () => {
++        const f = fixture(true)
++        fireEvent.click(screen.getByRole('button', { name: label }))
++        fireEvent.click(screen.getByRole('button', { name: 'Save' }))
++        await waitFor(() => expect(f.onRename).toHaveBeenCalledWith(undefined, false))
++        f.update({ isOpen: false })
++        f.update({ currentTitleLocked: false })
++        fireEvent.click(screen.getByRole('button', { name: 'Generate' }))
++        await waitFor(() => expect(screen.getByRole('textbox')).toHaveValue('Generated'))
++        fireEvent.click(screen.getByRole('button', { name: label }))
++        fireEvent.click(screen.getByRole('button', { name: 'Save' }))
++        await waitFor(() => expect(f.onUpdateSummary).toHaveBeenCalledWith('Generated', true))
++    })
++
++    it('discards cancel/escape drafts and does not leak a lock into another session', () => {
++        const f = fixture()
++        fireEvent.click(screen.getByRole('button', { name: label }))
++        fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
++        expect(f.onRename).not.toHaveBeenCalled()
++        f.update({ isOpen: false })
++        f.update({ sessionId: 'second', currentName: 'Other' })
++        expect(screen.getByRole('button', { name: label })).toHaveAttribute('aria-pressed', 'false')
++        fireEvent.click(screen.getByRole('button', { name: label }))
++        fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Escape' })
++        expect(f.onClose).toHaveBeenCalled()
++        expect(f.onRename).not.toHaveBeenCalled()
++    })
++
++    it('keeps an open draft through incoming agent title updates', () => {
++        const f = fixture()
++        fireEvent.change(screen.getByRole('textbox'), { target: { value: 'My draft' } })
++        fireEvent.click(screen.getByRole('button', { name: label }))
++        f.update({ currentName: 'Incoming agent title' })
++        expect(screen.getByRole('textbox')).toHaveValue('My draft')
++        expect(screen.getByRole('button', { name: label })).toHaveAttribute('aria-pressed', 'true')
++    })
++
++    it('retains the draft on failure and disables duplicate submissions until save finishes', async () => {
++        const f = fixture()
++        let rejectSave!: (error: Error) => void
++        f.onRename.mockImplementation(() => new Promise<void>((_resolve, reject) => { rejectSave = reject }))
++        fireEvent.click(screen.getByRole('button', { name: label }))
++        fireEvent.click(screen.getByRole('button', { name: 'Save' }))
++        expect(screen.getByRole('button', { name: label })).toBeDisabled()
++        fireEvent.submit(screen.getByRole('textbox').closest('form')!)
++        expect(f.onRename).toHaveBeenCalledTimes(1)
++        rejectSave(new Error('Offline'))
++        await waitFor(() => expect(screen.getByText('Failed to rename. Please try again.')).toBeInTheDocument())
++        expect(f.onClose).not.toHaveBeenCalled()
++        expect(screen.getByRole('button', { name: label })).toHaveAttribute('aria-pressed', 'true')
++    })
++})
+diff --git a/web/src/components/RenameSessionDialog.tsx b/web/src/components/RenameSessionDialog.tsx
+index 4c2e649f5..8f26ec49c 100644
+--- a/web/src/components/RenameSessionDialog.tsx
++++ b/web/src/components/RenameSessionDialog.tsx
+@@ -12,23 +12,28 @@ type RenameSessionDialogProps = {
+     isOpen: boolean
+     onClose: () => void
+     currentName: string
+-    onRename: (newName: string) => Promise<void>
++    currentTitleLocked?: boolean
++    sessionId?: string
++    onRename: (newName: string | undefined, titleLocked?: boolean) => Promise<void>
+     onSuggestTitle?: () => Promise<string>
+-    onUpdateSummary?: (text: string) => Promise<void>
++    onUpdateSummary?: (text: string, titleLocked?: boolean) => Promise<void>
+     isPending: boolean
+ }
+ 
+ export function RenameSessionDialog(props: RenameSessionDialogProps) {
+     const { t } = useTranslation()
+-    const { isOpen, onClose, currentName, onRename, onSuggestTitle, onUpdateSummary, isPending } = props
++    const { isOpen, onClose, currentName, currentTitleLocked = false, sessionId, onRename, onSuggestTitle, onUpdateSummary, isPending } = props
+     const [name, setName] = useState(currentName)
++    const [titleLocked, setTitleLocked] = useState(currentTitleLocked)
+     const [error, setError] = useState<string | null>(null)
+     const [draftSource, setDraftSource] = useState<'manual' | 'generated'>('manual')
+     const [draftEdited, setDraftEdited] = useState(false)
+     const [isGenerating, setIsGenerating] = useState(false)
+-    const inputRef = useRef<HTMLInputElement>(null)
++    const [isSaving, setIsSaving] = useState(false)
+     const generationRef = useRef(0)
+-    const busy = isPending || isGenerating
++    const busy = isPending || isGenerating || isSaving
++    const openedRef = useRef(false)
++    const sessionRef = useRef(sessionId)
+ 
+     const handleClose = () => {
+         generationRef.current += 1
+@@ -37,24 +42,25 @@ export function RenameSessionDialog(props: RenameSessionDialogProps) {
+     }
+ 
+     useEffect(() => {
+-        generationRef.current += 1
+         if (!isOpen) {
++            generationRef.current += 1
++            openedRef.current = false
+             setIsGenerating(false)
+             return
+         }
+-
+-        if (isOpen) {
++        // Incoming agent/SSE changes must not reset an open user draft.
++        if (!openedRef.current || sessionRef.current !== sessionId) {
++            generationRef.current += 1
++            openedRef.current = true
++            sessionRef.current = sessionId
+             setName(currentName)
++            setTitleLocked(currentTitleLocked)
+             setError(null)
+             setDraftSource('manual')
+             setDraftEdited(false)
+             setIsGenerating(false)
+-            setTimeout(() => {
+-                inputRef.current?.focus()
+-                inputRef.current?.select()
+-            }, 100)
+         }
+-    }, [isOpen, currentName])
++    }, [isOpen, currentName, currentTitleLocked, sessionId])
+ 
+     const handleGenerate = async () => {
+         if (!onSuggestTitle) return
+@@ -81,21 +87,31 @@ export function RenameSessionDialog(props: RenameSessionDialogProps) {
+ 
+     const handleSubmit = async (e: React.FormEvent) => {
+         e.preventDefault()
++        if (busy) return
+         const trimmed = name.trim()
+-        if (!trimmed || (!draftEdited && draftSource === 'manual' && trimmed === currentName)) {
++        const lockChanged = titleLocked !== currentTitleLocked
++        const untouchedTitle = !draftEdited && draftSource === 'manual'
++        if (!trimmed || (untouchedTitle && !lockChanged)) {
+             handleClose()
+             return
+         }
+         setError(null)
++        setIsSaving(true)
++        const saveGeneration = generationRef.current
+         try {
+-            if (draftSource === 'generated' && onUpdateSummary) {
+-                await onUpdateSummary(trimmed)
++            if (untouchedTitle && lockChanged) {
++                // Preserve summary/name ownership when only the lock changes.
++                await onRename(undefined, titleLocked)
++            } else if (draftSource === 'generated' && onUpdateSummary) {
++                await onUpdateSummary(trimmed, titleLocked)
+             } else {
+-                await onRename(trimmed)
++                await onRename(trimmed, titleLocked)
+             }
+-            handleClose()
++            if (saveGeneration === generationRef.current) handleClose()
+         } catch {
+-            setError(t('dialog.rename.error'))
++            if (saveGeneration === generationRef.current) setError(t('dialog.rename.error'))
++        } finally {
++            setIsSaving(false)
+         }
+     }
+ 
+@@ -114,21 +130,36 @@ export function RenameSessionDialog(props: RenameSessionDialogProps) {
+                     </DialogTitle>
+                 </DialogHeader>
+                 <form onSubmit={handleSubmit} className="mt-4 flex flex-col gap-4">
+-                    <input
+-                        ref={inputRef}
+-                        type="text"
+-                        value={name}
+-                        onChange={(e) => {
+-                            setName(e.target.value)
+-                            setDraftSource('manual')
+-                            setDraftEdited(true)
+-                        }}
+-                        onKeyDown={handleKeyDown}
+-                        placeholder={t('dialog.rename.placeholder')}
+-                        className="w-full px-3 py-2.5 rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] text-[var(--app-fg)] placeholder:text-[var(--app-hint)] focus:outline-none focus:ring-2 focus:ring-[var(--app-button)] focus:border-transparent"
+-                        disabled={busy}
+-                        maxLength={255}
+-                    />
++                    <div className="relative">
++                        <input
++                            type="text"
++                            value={name}
++                            onChange={(e) => {
++                                setName(e.target.value)
++                                setDraftSource('manual')
++                                setDraftEdited(true)
++                            }}
++                            onKeyDown={handleKeyDown}
++                            placeholder={t('dialog.rename.placeholder')}
++                            className="w-full pl-3 pr-12 py-2.5 rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] text-[var(--app-fg)] placeholder:text-[var(--app-hint)] focus:outline-none focus:ring-2 focus:ring-[var(--app-button)] focus:border-transparent"
++                            disabled={busy}
++                            maxLength={255}
++                        />
++                        <button
++                            type="button"
++                            aria-label={t('dialog.rename.titleLock')}
++                            aria-pressed={titleLocked}
++                            title={t(titleLocked ? 'dialog.rename.unlockTitle' : 'dialog.rename.lockTitle')}
++                            onClick={() => setTitleLocked(!titleLocked)}
++                            disabled={busy}
++                            className="absolute right-0 top-0 flex h-full w-11 items-center justify-center rounded-r-lg text-[var(--app-hint)] hover:text-[var(--app-fg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-button)] disabled:opacity-50"
++                        >
++                            <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
++                                <rect x="4" y="11" width="16" height="10" rx="2" />
++                                {titleLocked ? <path d="M8 11V7a4 4 0 0 1 8 0v4" /> : <path d="M8 11V7a4 4 0 0 1 7.8-1" />}
++                            </svg>
++                        </button>
++                    </div>
+ 
+                     {error ? (
+                         <div className="rounded-md bg-red-50 p-3 text-sm text-red-600 dark:bg-red-900/20 dark:text-red-400">
+diff --git a/web/src/components/SessionDialogTitleAlignment.test.tsx b/web/src/components/SessionDialogTitleAlignment.test.tsx
+index 98550f671..b2cf848d9 100644
+--- a/web/src/components/SessionDialogTitleAlignment.test.tsx
++++ b/web/src/components/SessionDialogTitleAlignment.test.tsx
+@@ -60,7 +60,7 @@ describe('session dialog title alignment', () => {
+         await waitFor(() => expect(screen.getByRole('textbox')).toHaveValue('Generated title'))
+         fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+ 
+-        await waitFor(() => expect(onUpdateSummary).toHaveBeenCalledWith('Generated title'))
++        await waitFor(() => expect(onUpdateSummary).toHaveBeenCalledWith('Generated title', false))
+         expect(onRename).not.toHaveBeenCalled()
+     })
+ 
+@@ -85,7 +85,7 @@ describe('session dialog title alignment', () => {
+         fireEvent.change(screen.getByRole('textbox'), { target: { value: 'My own title' } })
+         fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+ 
+-        await waitFor(() => expect(onRename).toHaveBeenCalledWith('My own title'))
++        await waitFor(() => expect(onRename).toHaveBeenCalledWith('My own title', false))
+         expect(onUpdateSummary).not.toHaveBeenCalled()
+     })
+ 
+@@ -111,7 +111,7 @@ describe('session dialog title alignment', () => {
+         fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Session' } })
+         fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+ 
+-        await waitFor(() => expect(onRename).toHaveBeenCalledWith('Session'))
++        await waitFor(() => expect(onRename).toHaveBeenCalledWith('Session', false))
+         expect(onUpdateSummary).not.toHaveBeenCalled()
+     })
+ 
+@@ -191,7 +191,7 @@ describe('session dialog title alignment', () => {
+ 
+         fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Manual title' } })
+         fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+-        await waitFor(() => expect(onRename).toHaveBeenCalledWith('Manual title'))
++        await waitFor(() => expect(onRename).toHaveBeenCalledWith('Manual title', false))
+         expect(onUpdateSummary).not.toHaveBeenCalled()
+ 
+         rerender(
+diff --git a/web/src/components/SessionHeader.tsx b/web/src/components/SessionHeader.tsx
+index 9f838367b..1f6ba1adf 100644
+--- a/web/src/components/SessionHeader.tsx
++++ b/web/src/components/SessionHeader.tsx
+@@ -598,6 +598,8 @@ export function SessionHeader(props: {
+                 isOpen={renameOpen}
+                 onClose={() => setRenameOpen(false)}
+                 currentName={title}
++                currentTitleLocked={session.metadata?.titleLocked === true}
++                sessionId={session.id}
+                 onRename={renameSession}
+                 onSuggestTitle={api && props.titleSuggestionAvailable ? suggestSessionTitle : undefined}
+                 onUpdateSummary={api && props.titleSuggestionAvailable ? updateSessionSummary : undefined}
+diff --git a/web/src/components/SessionList.directory-action.test.tsx b/web/src/components/SessionList.directory-action.test.tsx
+index 10b080448..c5aaa55f6 100644
+--- a/web/src/components/SessionList.directory-action.test.tsx
++++ b/web/src/components/SessionList.directory-action.test.tsx
+@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+ import type { ReactNode } from 'react'
+ import type { SessionSummary } from '@/types/api'
++import type { ApiClient } from '@/api/client'
+ import { I18nProvider } from '@/lib/i18n-context'
+ import { ToastProvider } from '@/lib/toast-context'
+ import { SessionList } from './SessionList'
+@@ -112,6 +113,28 @@ describe('SessionList directory action', () => {
+         expect(onNewSessionInDirectory).toHaveBeenCalledOnce()
+     })
+ 
++    it('reopens a locked list session and preserves its lock through a user rename', async () => {
++        const renameSession = vi.fn(async () => {})
++        const session = makeSession({ id: 'list-locked', updatedAt: Date.now(), metadata: {
++            path: '/work/locked', name: 'Locked list title', titleLocked: true, flavor: 'codex'
++        } })
++        renderWithProviders(<SessionList sessions={[session]} selectedSessionId={session.id} onSelect={vi.fn()}
++            onNewSession={vi.fn()} onRefresh={vi.fn()} isLoading={false} renderHeader={false}
++            api={{ renameSession } as unknown as ApiClient} />)
++        const open = () => {
++            fireEvent.contextMenu(screen.getByRole('button', { name: /Locked list title/ }))
++            fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
++        }
++        open()
++        expect(screen.getByRole('button', { name: 'Lock title against agent updates' })).toHaveAttribute('aria-pressed', 'true')
++        fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
++        open()
++        expect(screen.getByRole('button', { name: 'Lock title against agent updates' })).toHaveAttribute('aria-pressed', 'true')
++        fireEvent.change(screen.getByRole('textbox'), { target: { value: 'New human title' } })
++        fireEvent.click(screen.getByRole('button', { name: 'Save' }))
++        await waitFor(() => expect(renameSession).toHaveBeenCalledWith('list-locked', 'New human title', true))
++    })
++
+     it('starts a new session with the project machine and directory', () => {
+         const onNewSessionInDirectory = vi.fn()
+         const session = makeSession({
+diff --git a/web/src/components/SessionList.tsx b/web/src/components/SessionList.tsx
+index f47da7179..397c6404c 100644
+--- a/web/src/components/SessionList.tsx
++++ b/web/src/components/SessionList.tsx
+@@ -1551,6 +1551,8 @@ function SessionItem(props: {
+                     isOpen={true}
+                     onClose={() => setRenameOpen(false)}
+                     currentName={sessionName}
++                    currentTitleLocked={s.metadata?.titleLocked === true}
++                    sessionId={s.id}
+                     onRename={renameSession}
+                     onSuggestTitle={api && titleSuggestionAvailable ? suggestSessionTitle : undefined}
+                     onUpdateSummary={api && titleSuggestionAvailable ? updateSessionSummary : undefined}
+diff --git a/web/src/hooks/mutations/useSessionActions.ts b/web/src/hooks/mutations/useSessionActions.ts
+index 2afa35c9e..d79552c97 100644
+--- a/web/src/hooks/mutations/useSessionActions.ts
++++ b/web/src/hooks/mutations/useSessionActions.ts
+@@ -29,9 +29,9 @@ export function useSessionActions(
+     setModelReasoningEffort: (modelReasoningEffort: string | null) => Promise<void>
+     setEffort: (effort: string | null) => Promise<void>
+     setServiceTier: (serviceTier: string | null) => Promise<void>
+-    renameSession: (name: string) => Promise<void>
++    renameSession: (name: string | undefined, titleLocked?: boolean) => Promise<void>
+     suggestSessionTitle: () => Promise<string>
+-    updateSessionSummary: (text: string) => Promise<void>
++    updateSessionSummary: (text: string, titleLocked?: boolean) => Promise<void>
+     setPinMode: (mode: 'none' | 'project' | 'global') => Promise<void>
+     deleteSession: () => Promise<void>
+     isArchiving: boolean
+@@ -236,11 +236,11 @@ export function useSessionActions(
+     })
+ 
+     const renameMutation = useMutation({
+-        mutationFn: async (name: string) => {
++        mutationFn: async ({ name, titleLocked }: { name: string | undefined; titleLocked?: boolean }) => {
+             if (!api || !sessionId) {
+                 throw new Error('Session unavailable')
+             }
+-            await api.renameSession(sessionId, name)
++            await api.renameSession(sessionId, name, titleLocked)
+         },
+         onSuccess: () => void invalidateSession(),
+     })
+@@ -256,11 +256,11 @@ export function useSessionActions(
+     })
+ 
+     const summaryMutation = useMutation({
+-        mutationFn: async (text: string) => {
++        mutationFn: async ({ text, titleLocked }: { text: string; titleLocked?: boolean }) => {
+             if (!api || !sessionId) {
+                 throw new Error('Session unavailable')
+             }
+-            await api.updateSessionSummary(sessionId, text)
++            await api.updateSessionSummary(sessionId, text, titleLocked)
+         },
+         onSuccess: () => void invalidateSession(),
+     })
+@@ -302,9 +302,9 @@ export function useSessionActions(
+         setModelReasoningEffort: modelReasoningEffortMutation.mutateAsync,
+         setEffort: effortMutation.mutateAsync,
+         setServiceTier: serviceTierMutation.mutateAsync,
+-        renameSession: renameMutation.mutateAsync,
++        renameSession: (name: string | undefined, titleLocked?: boolean) => renameMutation.mutateAsync({ name, titleLocked }),
+         suggestSessionTitle: titleSuggestionMutation.mutateAsync,
+-        updateSessionSummary: summaryMutation.mutateAsync,
++        updateSessionSummary: (text: string, titleLocked?: boolean) => summaryMutation.mutateAsync({ text, titleLocked }),
+         setPinMode: pinMutation.mutateAsync,
+         deleteSession: deleteMutation.mutateAsync,
+         isArchiving,
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index 30c44b32d..f7e78e428 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -309,6 +309,9 @@ export default {
+   'dialog.rename.save': 'Save',
+   'dialog.rename.saving': 'Saving…',
+   'dialog.rename.error': 'Failed to rename. Please try again.',
++  'dialog.rename.titleLock': 'Lock title against agent updates',
++  'dialog.rename.lockTitle': 'Lock title: prevent agent updates',
++  'dialog.rename.unlockTitle': 'Unlock title: allow agent updates',
+   'dialog.rename.generate': 'Generate',
+   'dialog.rename.generating': 'Generating…',
+   'dialog.rename.generateError': 'Failed to generate a title. Please try again.',
+diff --git a/web/src/lib/locales/ru.ts b/web/src/lib/locales/ru.ts
+index cfcad4d3f..30b538ac7 100644
+--- a/web/src/lib/locales/ru.ts
++++ b/web/src/lib/locales/ru.ts
+@@ -292,6 +292,9 @@ export default {
+   'dialog.rename.save': 'Сохранить',
+   'dialog.rename.saving': 'Сохранение…',
+   'dialog.rename.error': 'Не удалось переименовать. Попробуйте ещё раз.',
++  'dialog.rename.titleLock': 'Защитить название от изменений агентом',
++  'dialog.rename.lockTitle': 'Заблокировать название: запретить изменения агентом',
++  'dialog.rename.unlockTitle': 'Разблокировать название: разрешить изменения агентом',
+   'dialog.rename.generate': 'Сгенерировать',
+   'dialog.rename.generating': 'Генерация…',
+   'dialog.rename.generateError': 'Не удалось сгенерировать название. Попробуйте ещё раз.',
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index d140b2b5b..77142e3ae 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -309,6 +309,9 @@ export default {
+   'dialog.rename.save': '保存',
+   'dialog.rename.saving': '保存中…',
+   'dialog.rename.error': '重命名失败，请重试。',
++  'dialog.rename.titleLock': '锁定标题，阻止 AI 更新',
++  'dialog.rename.lockTitle': '锁定标题：阻止 AI 更新',
++  'dialog.rename.unlockTitle': '解锁标题：允许 AI 更新',
+   'dialog.rename.generate': '生成',
+   'dialog.rename.generating': '生成中…',
+   'dialog.rename.generateError': '标题生成失败，请重试。',

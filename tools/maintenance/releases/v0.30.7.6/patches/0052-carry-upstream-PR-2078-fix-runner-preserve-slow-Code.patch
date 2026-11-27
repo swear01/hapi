@@ -1,0 +1,361 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Thu, 22 Oct 2026 05:08:22 +0000
+Subject: [PATCH 52/95] carry(upstream): PR #2078 fix(runner): preserve slow
+ Codex sessions across startup deadlines
+
+---
+ cli/README.md                         |   7 ++
+ cli/src/runner/run.ts                 |  51 ++++++++----
+ cli/src/runner/sessionStartup.test.ts | 115 ++++++++++++++++++++++++++
+ cli/src/runner/sessionStartup.ts      |  54 ++++++++++++
+ hub/src/sync/rpcGateway.test.ts       |   7 ++
+ hub/src/sync/rpcGateway.ts            |   5 +-
+ 6 files changed, 224 insertions(+), 15 deletions(-)
+ create mode 100644 cli/src/runner/sessionStartup.test.ts
+ create mode 100644 cli/src/runner/sessionStartup.ts
+
+diff --git a/cli/README.md b/cli/README.md
+index 8a16bbb07..b2707fefa 100644
+--- a/cli/README.md
++++ b/cli/README.md
+@@ -273,6 +273,13 @@ bun scripts/tooling/hapi-display-image.mjs /absolute/path/to/image.png "optional
+ 
+ ## Session lifecycle invariants
+ 
++- Runner waits up to 30 seconds for Codex startup (15 seconds for other agents),
++  overridable with `HAPI_RUNNER_WEBHOOK_TIMEOUT_MS`. A Codex startup deadline
++  returns an unconfirmed result and keeps its process tracked; a late webhook
++  completes the same session. Wait for that row or explicitly stop it rather
++  than creating duplicates. Process exit and explicit stop still clean up the
++  child. The Hub gives Codex spawn RPCs 60 seconds for preflight plus startup.
++
+ When changing agent bootstrap, handoff, or shared-session plumbing:
+ 
+ - Handoff-capable integrations use `local` (terminal) and `remote` (web-controlled) ownership modes. Codex instead supports concurrent clients without ownership switching; see [Codex shared sessions](../docs/guide/codex-shared-sessions.md).
+diff --git a/cli/src/runner/run.ts b/cli/src/runner/run.ts
+index fc59d5566..916228953 100644
+--- a/cli/src/runner/run.ts
++++ b/cli/src/runner/run.ts
+@@ -17,6 +17,7 @@ import { getCliArgs } from '@/utils/cliArgs';
+ import { getProcessStartMarker, isProcessAlive, isWindows, killProcess, killProcessByChildProcess, killProcessTreeByPid } from '@/utils/process';
+ import { findStopSessionOrphanTargets, listWindowsProcessesWithCommandLine, reapRunnerSpawnedOrphans } from '@/runner/orphanReap';
+ import { decideUntrackedRunnerWebhook } from '@/runner/lateRunnerWebhook';
++import { cleanupFailedStartupAfterExit, sessionStartupTimeout, waitForRecoverableStartup } from './sessionStartup';
+ import {
+     decideKeepWrapperArchive,
+     decideRawPidStop,
+@@ -75,7 +76,7 @@ export function createSpawnDeduplicator(
+   const childState = new Map<string, 'alive' | 'stopping'>();
+ 
+   const dedupe = async (options: SpawnSessionOptions): Promise<SpawnSessionResult> => {
+-    const key = options.existingSessionId;
++    const key = options.existingSessionId ?? options.reservedSessionId;
+     if (!key) {
+       return await spawnOnce(options);
+     }
+@@ -433,18 +434,6 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+     }
+     persistResumeProcesses();
+ 
+-    // Webhook timeout tolerance. Opus 1M + --resume can legitimately take
+-    // longer than the default 15s to reach the "Session started" webhook
+-    // (observed real-world durations of 30s – 60min under rate-limit /
+-    // heavy session restore). Allow advanced users to raise this ceiling
+-    // so that slow starts no longer leave orphaned child processes which
+-    // later report back as ghost sessions.
+-    const envWebhookTimeout = Number(process.env.HAPI_RUNNER_WEBHOOK_TIMEOUT_MS);
+-    const webhookTimeoutMs =
+-      Number.isFinite(envWebhookTimeout) && envWebhookTimeout > 0
+-        ? envWebhookTimeout
+-        : 15_000;
+-
+     // Session spawning awaiter system
+     const pidToAwaiter = new Map<number, (session: TrackedSession) => void>();
+     const pidToErrorAwaiter = new Map<number, (errorMessage: string) => void>();
+@@ -500,6 +489,8 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+         existingSession.sharedSessions[sessionId] = sessionMetadata;
+         invalidateVerifiedExit(sessionId);
+         // Native /new or /fork cannot replace the primary spawn confirmation.
++        if (pidToAwaiter.has(pid) && existingSession.requestedHappySessionId
++          && existingSession.requestedHappySessionId !== sessionId) return;
+         if (existingSession.happySessionId && existingSession.happySessionId !== sessionId) return;
+       }
+ 
+@@ -947,6 +938,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+         logger.debug(`[RUNNER RUN] Spawned process with PID ${pid}`);
+         let observedExitCode: number | null = null;
+         let observedExitSignal: NodeJS.Signals | null = null;
++        const webhookTimeoutMs = sessionStartupTimeout(options.agent, process.env.HAPI_RUNNER_WEBHOOK_TIMEOUT_MS);
+         const buildWebhookFailureMessage = (reason: 'timeout' | 'exit-before-webhook' | 'process-error-before-webhook'): string => {
+           let message = '';
+           if (reason === 'exit-before-webhook') {
+@@ -1034,7 +1026,37 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+         // Wait for webhook to populate session with happySessionId
+         logger.debug(`[RUNNER RUN] Waiting for session webhook for PID ${pid}`);
+ 
+-        const spawnResult = await new Promise<SpawnSessionResult>((resolve) => {
++        const recoverableStartup = options.agent === 'codex' ? waitForRecoverableStartup<TrackedSession>({
++          timeoutMs: webhookTimeoutMs,
++          timeoutMessage: `Codex startup is still unconfirmed for PID ${pid}; the process remains tracked. Wait for the existing session instead of creating another, or stop it explicitly.`,
++          sessionId: session => session.happySessionId!,
++          onLateReady: session => {
++            if (trackHubId) spawnSession.recoverChild(trackHubId, { type: 'success', sessionId: session.happySessionId! });
++            reportSpawnOutcomeToHub?.({ type: 'success' });
++            logger.debug(`[RUNNER RUN] Late startup confirmed for PID ${pid}`);
++          },
++          onLateFailure: message => {
++            reportSpawnOutcomeToHub?.({ type: 'error', details: { message, pid } });
++            if (worktreeInfo && happyProcess) cleanupFailedStartupAfterExit(
++              happyProcess,
++              () => !trackedSession.happySessionId,
++              () => { void cleanupWorktree().catch(error => logger.debug('[RUNNER RUN] Late startup worktree cleanup failed', error)); },
++            );
++          },
++        }) : null;
++        if (recoverableStartup) {
++          // Keep both callbacks and all PID bindings after the caller deadline.
++          // A shared wrapper can already own roots; expiry is not exit evidence.
++          pidToAwaiter.set(pid, session => {
++            pidToAwaiter.delete(pid); pidToErrorAwaiter.delete(pid);
++            recoverableStartup.confirm(session);
++          });
++          pidToErrorAwaiter.set(pid, message => {
++            pidToAwaiter.delete(pid); pidToErrorAwaiter.delete(pid);
++            recoverableStartup.fail(message);
++          });
++        }
++        const spawnResult = recoverableStartup ? await recoverableStartup.result : await new Promise<SpawnSessionResult>((resolve) => {
+           // Set timeout for webhook. Default is 15s but can be raised via
+           // HAPI_RUNNER_WEBHOOK_TIMEOUT_MS for users on slow models
+           // (e.g. opus[1m] --resume).
+@@ -1698,6 +1720,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+ 
+     // Handle child process exit
+     const onChildExited = (pid: number) => {
++      pidToErrorAwaiter.get(pid)?.(`Session process PID ${pid} exited before startup was confirmed`);
+       const session = pidToTrackedSession.get(pid);
+       for (const id of Object.keys(session?.sharedSessions ?? {})) rememberVerifiedExit(id);
+       const requestedSessionId = session?.requestedHappySessionId ?? pidToRequestedSessionId.get(pid);
+diff --git a/cli/src/runner/sessionStartup.test.ts b/cli/src/runner/sessionStartup.test.ts
+new file mode 100644
+index 000000000..34100e12c
+--- /dev/null
++++ b/cli/src/runner/sessionStartup.test.ts
+@@ -0,0 +1,115 @@
++import { afterEach, describe, expect, it, vi } from 'vitest';
++import { cleanupFailedStartupAfterExit, sessionStartupTimeout, waitForRecoverableStartup } from './sessionStartup';
++import { EventEmitter } from 'node:events';
++import { createSpawnDeduplicator } from './run';
++
++afterEach(() => vi.useRealTimers());
++describe('failed startup worktree cleanup', () => {
++    const child = () => Object.assign(new EventEmitter(), { exitCode: null as number | null, signalCode: null as NodeJS.Signals | null });
++    it('waits for confirmed exit after an unconfirmed startup failure and cleans only once', async () => {
++        vi.useFakeTimers();
++        const process = child(); const cleanup = vi.fn();
++        const startup = waitForRecoverableStartup<string>({ timeoutMs: 30_000, timeoutMessage: 'Still starting', sessionId: id => id, onLateReady: vi.fn(),
++            onLateFailure: () => cleanupFailedStartupAfterExit(process, () => true, cleanup) });
++        await vi.advanceTimersByTimeAsync(30_000); await startup.result;
++        startup.fail('Process error'); startup.fail('Duplicate error');
++        expect(cleanup).not.toHaveBeenCalled();
++        process.exitCode = 1; process.emit('exit', 1); process.emit('exit', 1);
++        expect(cleanup).toHaveBeenCalledTimes(1);
++    });
++    it.each(['exit', 'signal'])('cleans immediately when %s already proved the child dead', proof => {
++        const process = child(); const cleanup = vi.fn();
++        if (proof === 'exit') process.exitCode = 1; else process.signalCode = 'SIGTERM';
++        cleanupFailedStartupAfterExit(process, () => true, cleanup);
++        expect(cleanup).toHaveBeenCalledTimes(1);
++        expect(process.listenerCount('exit')).toBe(0);
++    });
++    it('preserves the worktree if the process later reports a successful startup before exit', () => {
++        const process = child(); const cleanup = vi.fn(); let confirmed = false;
++        cleanupFailedStartupAfterExit(process, () => !confirmed, cleanup);
++        confirmed = true; process.emit('exit', 0);
++        expect(cleanup).not.toHaveBeenCalled();
++    });
++});
++describe('recoverable Codex startup', () => {
++    const setup = () => {
++        vi.useFakeTimers();
++        const onLateReady = vi.fn();
++        return { onLateReady, startup: waitForRecoverableStartup<string>({ timeoutMs: 30_000, timeoutMessage: 'Still starting', sessionId: id => id, onLateReady }) };
++    };
++    it('accepts fresh Codex startup after the former 15 second cutoff', async () => {
++        const { startup, onLateReady } = setup();
++        await vi.advanceTimersByTimeAsync(23_324);
++        startup.confirm('requested');
++        await expect(startup.result).resolves.toEqual({ type: 'success', sessionId: 'requested' });
++        expect(onLateReady).not.toHaveBeenCalled();
++    });
++    it('returns an unconfirmed result at the deadline and accepts exactly one late confirmation', async () => {
++        const { startup, onLateReady } = setup();
++        await vi.advanceTimersByTimeAsync(30_000);
++        await expect(startup.result).resolves.toEqual({ type: 'error', errorMessage: 'Still starting' });
++        startup.confirm('requested'); startup.confirm('duplicate'); startup.fail('later close');
++        expect(onLateReady).toHaveBeenCalledExactlyOnceWith('requested');
++    });
++    it.each([false, true])('does not recover a child that exited, including after timeout=%s', async expired => {
++        const { startup, onLateReady } = setup();
++        if (expired) await vi.advanceTimersByTimeAsync(30_000);
++        startup.fail('Child exited'); startup.confirm('late');
++        if (!expired) await expect(startup.result).resolves.toEqual({ type: 'error', errorMessage: 'Child exited' });
++        expect(onLateReady).not.toHaveBeenCalled();
++        expect(vi.getTimerCount()).toBe(0);
++    });
++    it('replaces an unconfirmed diagnostic with the eventual process failure exactly once', async () => {
++        vi.useFakeTimers();
++        const onLateFailure = vi.fn();
++        const startup = waitForRecoverableStartup<string>({ timeoutMs: 30_000, timeoutMessage: 'Still starting', sessionId: id => id, onLateReady: vi.fn(), onLateFailure });
++        await vi.advanceTimersByTimeAsync(30_000); await startup.result;
++        startup.fail('Process exited with code 1'); startup.fail('Duplicate exit');
++        expect(onLateFailure).toHaveBeenCalledExactlyOnceWith('Process exited with code 1');
++    });
++    it('keeps the live-child dedupe until late readiness, then permits a new child only after exit', async () => {
++        vi.useFakeTimers();
++        let calls = 0;
++        let startup!: ReturnType<typeof waitForRecoverableStartup<string>>;
++        const dedupe = createSpawnDeduplicator(async options => {
++            calls++; dedupe.markChildAlive(options.existingSessionId!);
++            startup = waitForRecoverableStartup<string>({ timeoutMs: 30_000, timeoutMessage: 'Still starting', sessionId: id => id,
++                onLateReady: id => dedupe.recoverChild(id, { type: 'success', sessionId: id }) });
++            return startup.result;
++        });
++        const input = { directory: '/tmp', existingSessionId: 'requested' };
++        const first = dedupe(input);
++        await vi.advanceTimersByTimeAsync(30_000);
++        expect((await first).type).toBe('error');
++        expect((await dedupe(input)).type).toBe('error'); expect(calls).toBe(1);
++        startup.confirm('requested');
++        await expect(dedupe(input)).resolves.toEqual({ type: 'success', sessionId: 'requested' });
++        dedupe.onChildExited('requested');
++        const second = dedupe(input); startup.fail('exit'); await second;
++        expect(calls).toBe(2);
++    });
++});
++describe('startup deadlines', () => {
++    it('deduplicates a reserved fresh row against a concurrent existing-row retry', async () => {
++        let complete!: (value: { type: 'success'; sessionId: string }) => void;
++        const spawn = vi.fn(() => new Promise<{ type: 'success'; sessionId: string }>(resolve => { complete = resolve; }));
++        const dedupe = createSpawnDeduplicator(spawn);
++        const fresh = dedupe({ directory: '/tmp', reservedSessionId: 'reserved' });
++        const retry = dedupe({ directory: '/tmp', existingSessionId: 'reserved' });
++        expect(spawn).toHaveBeenCalledTimes(1);
++        complete({ type: 'success', sessionId: 'reserved' });
++        await expect(fresh).resolves.toEqual(await retry);
++    });
++    it('gives fresh and resumed Codex the same 30 second budget and other agents 15 seconds', () => {
++        expect(sessionStartupTimeout('codex')).toBe(30_000);
++        expect(sessionStartupTimeout('claude')).toBe(15_000);
++        expect(sessionStartupTimeout(undefined)).toBe(15_000);
++    });
++    it.each(['', 'bad', '0', '-1', 'Infinity'])('ignores invalid override %s', value => {
++        expect(sessionStartupTimeout('codex', value)).toBe(30_000);
++    });
++    it('honors a positive configured deadline for either agent', () => {
++        expect(sessionStartupTimeout('codex', '1234')).toBe(1234);
++        expect(sessionStartupTimeout('claude', '1234')).toBe(1234);
++    });
++});
+diff --git a/cli/src/runner/sessionStartup.ts b/cli/src/runner/sessionStartup.ts
+new file mode 100644
+index 000000000..2f2a6c897
+--- /dev/null
++++ b/cli/src/runner/sessionStartup.ts
+@@ -0,0 +1,54 @@
++import type { SpawnSessionResult } from '@/modules/common/rpcTypes';
++import type { ChildProcess } from 'node:child_process';
++
++/** A failed startup may still own a live process using its working directory. */
++export function cleanupFailedStartupAfterExit(
++    child: Pick<ChildProcess, 'exitCode' | 'signalCode'> & { once(event: 'exit', listener: () => void): unknown },
++    shouldCleanup: () => boolean,
++    cleanup: () => void,
++): void {
++    const onExit = () => { if (shouldCleanup()) cleanup(); };
++    if (child.exitCode !== null || child.signalCode !== null) onExit();
++    else child.once('exit', onExit);
++}
++
++export function sessionStartupTimeout(agent: string | undefined, configured?: string): number {
++    const explicit = Number(configured);
++    if (Number.isFinite(explicit) && explicit > 0) return explicit;
++    return agent === 'codex' ? 30_000 : 15_000;
++}
++
++/** A caller's deadline does not prove that a shared execution failed to start. */
++export function waitForRecoverableStartup<T>(options: {
++    timeoutMs: number;
++    timeoutMessage: string;
++    sessionId: (session: T) => string;
++    onLateReady: (session: T) => void;
++    onLateFailure?: (errorMessage: string) => void;
++}) {
++    let phase: 'waiting' | 'unconfirmed' | 'finished' = 'waiting';
++    let resolve!: (result: SpawnSessionResult) => void;
++    const result = new Promise<SpawnSessionResult>(done => { resolve = done; });
++    const timer = setTimeout(() => {
++        if (phase !== 'waiting') return;
++        phase = 'unconfirmed';
++        resolve({ type: 'error', errorMessage: options.timeoutMessage });
++    }, options.timeoutMs);
++    return {
++        result,
++        confirm(session: T): void {
++            if (phase === 'finished') return;
++            const late = phase === 'unconfirmed';
++            phase = 'finished'; clearTimeout(timer);
++            if (late) options.onLateReady(session);
++            resolve({ type: 'success', sessionId: options.sessionId(session) });
++        },
++        fail(errorMessage: string): void {
++            if (phase === 'finished') return;
++            const late = phase === 'unconfirmed';
++            phase = 'finished'; clearTimeout(timer);
++            if (late) options.onLateFailure?.(errorMessage);
++            resolve({ type: 'error', errorMessage });
++        },
++    };
++}
+diff --git a/hub/src/sync/rpcGateway.test.ts b/hub/src/sync/rpcGateway.test.ts
+index 39093c34b..d9f1dfa7e 100644
+--- a/hub/src/sync/rpcGateway.test.ts
++++ b/hub/src/sync/rpcGateway.test.ts
+@@ -64,6 +64,13 @@ describe('RpcGateway RPC timeouts', () => {
+         await expect(gateway.stopSessionProcess('session-1')).rejects.toThrow(/non-archiving stop/)
+     })
+ 
++    it('allows Codex startup and preflight to finish before the outer RPC expires', async () => {
++        const { gateway, timeouts } = createGateway()
++        await gateway.spawnSession('machine-1', 'C:\\workspace', 'codex')
++        await gateway.spawnSession('machine-1', 'C:\\workspace', 'claude')
++        expect(timeouts).toEqual([60_000, 30_000])
++    })
++
+     it('uses the default RPC timeout for regular machine RPCs', async () => {
+         const { gateway, timeouts } = createGateway()
+ 
+diff --git a/hub/src/sync/rpcGateway.ts b/hub/src/sync/rpcGateway.ts
+index ad702f45d..3095c1abe 100644
+--- a/hub/src/sync/rpcGateway.ts
++++ b/hub/src/sync/rpcGateway.ts
+@@ -45,6 +45,8 @@ import type { RpcRegistry } from '../socket/rpcRegistry'
+ 
+ const DEFAULT_RPC_TIMEOUT_MS = 30_000
+ const MODEL_LIST_RPC_TIMEOUT_MS = 120_000
++// Codex can spend 30s awaiting startup after preflight and process creation.
++const CODEX_SPAWN_RPC_TIMEOUT_MS = 60_000
+ 
+ /**
+  * tiann/hapi#916: thrown by {@link RpcGateway.rpcCall} when the target CLI is
+@@ -284,7 +286,8 @@ export class RpcGateway {
+                     copilotAgentMode,
+                     startingMode,
+                     forkSession: forkSession === true
+-                }
++                },
++                agent === 'codex' ? CODEX_SPAWN_RPC_TIMEOUT_MS : DEFAULT_RPC_TIMEOUT_MS
+             )
+             if (result && typeof result === 'object') {
+                 const obj = result as Record<string, unknown>

@@ -1,0 +1,400 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Fri, 23 Oct 2026 18:22:42 +0000
+Subject: [PATCH 68/94] carry(upstream): PR #1849 fix(cli): let agent titles
+ replace Fork seed summaries
+
+---
+ cli/src/agent/sessionTitlePolicy.ts           | 45 +++++++++++++++++++
+ cli/src/claude/claudeLocalLauncher.test.ts    | 32 +++++++++++++
+ cli/src/claude/claudeLocalLauncher.ts         |  4 +-
+ cli/src/claude/claudeRemoteLauncher.test.ts   | 35 ++++++++++++++-
+ .../claude/utils/sessionTitleFallback.test.ts | 39 ++++++++++++++++
+ cli/src/claude/utils/sessionTitleFallback.ts  | 17 ++-----
+ cli/src/codex/shared/projection.title.test.ts | 34 ++++++++++++--
+ cli/src/codex/shared/projection.ts            | 11 +++--
+ 8 files changed, 192 insertions(+), 25 deletions(-)
+ create mode 100644 cli/src/agent/sessionTitlePolicy.ts
+
+diff --git a/cli/src/agent/sessionTitlePolicy.ts b/cli/src/agent/sessionTitlePolicy.ts
+new file mode 100644
+index 000000000..379663d26
+--- /dev/null
++++ b/cli/src/agent/sessionTitlePolicy.ts
+@@ -0,0 +1,45 @@
++import type { ApiSessionClient } from '@/api/apiSession'
++import type { Metadata } from '@/api/types'
++
++type SessionTitleClient = Pick<ApiSessionClient, 'updateMetadata'>
++
++export type SessionTitleSummaryOptions = {
++    allowForkSeedReplacement?: boolean
++}
++
++/** A Fork seed is a provisional title until the child agent names itself. */
++export function isForkSeedSummary(metadata: Readonly<Metadata> | null | undefined): boolean {
++    const summary = metadata?.summary?.text.trim()
++    return Boolean(metadata?.forkedFrom?.trim() && summary?.startsWith('Fork: '))
++}
++
++/**
++ * Apply an agent-generated title without replacing a user-owned or settled
++ * title. Callers must explicitly opt in before replacing a Fork seed, because
++ * some fallback inputs are ordinary user messages rather than titles.
++ */
++export function applySessionTitleSummary(
++    client: SessionTitleClient,
++    title: string,
++    options: SessionTitleSummaryOptions = {}
++): boolean {
++    const normalizedTitle = title.trim()
++    if (!normalizedTitle) return false
++
++    client.updateMetadata((metadata) => {
++        if (metadata.name?.trim()) return metadata
++
++        const summary = metadata.summary?.text.trim()
++        const canReplaceForkSeed = options.allowForkSeedReplacement === true && isForkSeedSummary(metadata)
++        if (summary && !canReplaceForkSeed) return metadata
++
++        return {
++            ...metadata,
++            summary: {
++                text: normalizedTitle,
++                updatedAt: Date.now()
++            }
++        }
++    })
++    return true
++}
+diff --git a/cli/src/claude/claudeLocalLauncher.test.ts b/cli/src/claude/claudeLocalLauncher.test.ts
+index c8b40606d..c844ef91f 100644
+--- a/cli/src/claude/claudeLocalLauncher.test.ts
++++ b/cli/src/claude/claudeLocalLauncher.test.ts
+@@ -135,6 +135,38 @@ describe('claudeLocalLauncher message filtering', () => {
+         expect(getMetadata().summary?.text).toBe('Existing title')
+     })
+ 
++    it('replaces a provisional Fork title with Claude Code ai-title metadata', async () => {
++        const { session, sentMessages, getMetadata, setMetadata } = createSessionStub()
++        setMetadata({
++            path: '/tmp/test',
++            host: 'localhost',
++            forkedFrom: 'parent-session',
++            summary: { text: 'Fork: Parent title', updatedAt: 1 }
++        })
++        await claudeLocalLauncher(session as never)
++
++        harness.scannerOnMessage!({ type: 'ai-title', aiTitle: 'Native child title' })
++
++        expect(sentMessages).toHaveLength(0)
++        expect(getMetadata().summary?.text).toBe('Native child title')
++    })
++
++    it('replaces a provisional Fork title with Claude Code summary metadata', async () => {
++        const { session, sentMessages, getMetadata, setMetadata } = createSessionStub()
++        setMetadata({
++            path: '/tmp/test',
++            host: 'localhost',
++            forkedFrom: 'parent-session',
++            summary: { text: 'Fork: Parent title', updatedAt: 1 }
++        })
++        await claudeLocalLauncher(session as never)
++
++        harness.scannerOnMessage!({ type: 'summary', summary: 'Native child summary', leafUuid: '1' })
++
++        expect(sentMessages).toHaveLength(0)
++        expect(getMetadata().summary?.text).toBe('Native child summary')
++    })
++
+     it('filters out invisible system messages', async () => {
+         const { session, sentMessages } = createSessionStub()
+         await claudeLocalLauncher(session as never)
+diff --git a/cli/src/claude/claudeLocalLauncher.ts b/cli/src/claude/claudeLocalLauncher.ts
+index 9a6cbc5cd..13e99cd55 100644
+--- a/cli/src/claude/claudeLocalLauncher.ts
++++ b/cli/src/claude/claudeLocalLauncher.ts
+@@ -30,13 +30,13 @@ export async function claudeLocalLauncher(session: Session): Promise<'switch' |
+             // Preserve the AI-generated title emitted by Claude Code's native
+             // interactive CLI. It is metadata, not a visible chat message.
+             if (message.type === 'ai-title') {
+-                applySessionTitleFallback(session.client, message.aiTitle)
++                applySessionTitleFallback(session.client, message.aiTitle, { allowForkSeedReplacement: true })
+                 return
+             }
+             // Claude Code writes its native session title as a summary. Use it as
+             // a fallback for older transcript formats.
+             if (message.type === 'summary') {
+-                applySessionTitleFallback(session.client, message.summary)
++                applySessionTitleFallback(session.client, message.summary, { allowForkSeedReplacement: true })
+                 return
+             }
+             // Filter out internal meta messages (e.g. skill injections) and
+diff --git a/cli/src/claude/claudeRemoteLauncher.test.ts b/cli/src/claude/claudeRemoteLauncher.test.ts
+index ec8f6417f..b9b192fdc 100644
+--- a/cli/src/claude/claudeRemoteLauncher.test.ts
++++ b/cli/src/claude/claudeRemoteLauncher.test.ts
+@@ -12,6 +12,7 @@ const harness = vi.hoisted(() => ({
+     callCount: 0,
+     claudeArgsPerCall: [] as (string[] | undefined)[],
+     initialMessages: [] as string[],
++    emitFirstResult: false,
+     triggerSwitch: null as (() => void) | null,
+     switchAfterCall: 2
+ }))
+@@ -44,6 +45,9 @@ vi.mock('./claudeRemote', () => ({
+         // Mirrors a launch that actually spawns Claude and observes the
+         // session id via the SDK's system/init message.
+         opts.onSessionFound('captured-session-id')
++        if (harness.emitFirstResult) {
++            opts.onFirstResult?.(initial.message)
++        }
+ 
+         if (harness.callCount === harness.switchAfterCall && harness.triggerSwitch) {
+             // Stop the runMainLoop() while-loop so the test doesn't hang
+@@ -89,8 +93,9 @@ vi.mock('./utils/OutgoingMessageQueue', () => ({
+ import { claudeRemoteLauncher } from './claudeRemoteLauncher'
+ import { Session } from './session'
+ 
+-function createClientStub() {
++function createClientStub(initialMetadata: Record<string, unknown> = {}) {
+     const rpcHandlers = new Map<string, () => void | Promise<void>>()
++    let metadata = initialMetadata
+     return {
+         rpcHandlerManager: {
+             registerHandler: (method: string, handler: () => void | Promise<void>) => {
+@@ -99,7 +104,8 @@ function createClientStub() {
+         },
+         rpcHandlers,
+         keepAlive: () => {},
+-        updateMetadata: (mutator: (metadata: any) => any) => { mutator({}) },
++        getMetadata: () => metadata,
++        updateMetadata: (mutator: (metadata: any) => any) => { metadata = mutator(metadata) },
+         emitMessagesConsumed: () => {},
+         sendClaudeSessionMessage: () => {},
+         sendSessionEvent: () => {},
+@@ -145,6 +151,7 @@ describe('claudeRemoteLauncher resume anchor', () => {
+         harness.callCount = 0
+         harness.claudeArgsPerCall = []
+         harness.initialMessages = []
++        harness.emitFirstResult = false
+         harness.triggerSwitch = null
+         harness.switchAfterCall = 2
+         vi.clearAllMocks()
+@@ -256,6 +263,30 @@ describe('claudeRemoteLauncher resume anchor', () => {
+         }
+     })
+ 
++    it('keeps a Fork seed for the remote first-message fallback', async () => {
++        const client = createClientStub({
++            forkedFrom: 'parent-session',
++            summary: { text: 'Fork: Parent title', updatedAt: 1 }
++        })
++        const { session, queue } = createSession(client, undefined)
++        harness.emitFirstResult = true
++        harness.switchAfterCall = 1
++        harness.triggerSwitch = () => {
++            client.rpcHandlers.get(RPC_METHODS.Switch)?.()
++        }
++
++        try {
++            queue.push('continue', { permissionMode: 'default' }, 'local-1')
++            await claudeRemoteLauncher(session as any)
++
++            expect(client.getMetadata()).toMatchObject({
++                summary: { text: 'Fork: Parent title', updatedAt: 1 }
++            })
++        } finally {
++            session.stopKeepAlive()
++        }
++    })
++
+     it('sends an advertised $skill through Claude native slash invocation', async () => {
+         const client = createClientStub()
+         const { session, queue } = createSession(client, undefined)
+diff --git a/cli/src/claude/utils/sessionTitleFallback.test.ts b/cli/src/claude/utils/sessionTitleFallback.test.ts
+index e059170b9..db03d1c23 100644
+--- a/cli/src/claude/utils/sessionTitleFallback.test.ts
++++ b/cli/src/claude/utils/sessionTitleFallback.test.ts
+@@ -35,4 +35,43 @@ describe('Claude session title fallback', () => {
+         expect(updateMetadata).toHaveBeenCalledTimes(1)
+         expect(updateMetadata).toHaveReturnedWith(manualMetadata)
+     })
++
++    it('replaces a provisional Fork summary with the native title', () => {
++        const forkMetadata = {
++            forkedFrom: 'parent-session',
++            summary: { text: 'Fork: Parent title', updatedAt: 1 }
++        }
++        const updateMetadata = vi.fn((handler) => handler(forkMetadata))
++
++        expect(applySessionTitleFallback({ updateMetadata }, 'Native title', {
++            allowForkSeedReplacement: true
++        })).toBe(true)
++
++        expect(updateMetadata).toHaveReturnedWith(expect.objectContaining({
++            summary: expect.objectContaining({ text: 'Native title' })
++        }))
++    })
++
++    it('keeps a manual name authoritative on a forked session', () => {
++        const forkMetadata = {
++            name: 'Manual child title',
++            forkedFrom: 'parent-session',
++            summary: { text: 'Fork: Parent title', updatedAt: 1 }
++        }
++        const updateMetadata = vi.fn((handler) => handler(forkMetadata))
++
++        expect(applySessionTitleFallback({ updateMetadata }, 'Native title')).toBe(true)
++        expect(updateMetadata).toHaveReturnedWith(forkMetadata)
++    })
++
++    it('keeps the Fork seed for a first-message fallback', () => {
++        const forkMetadata = {
++            forkedFrom: 'parent-session',
++            summary: { text: 'Fork: Parent title', updatedAt: 1 }
++        }
++        const updateMetadata = vi.fn((handler) => handler(forkMetadata))
++
++        expect(applySessionTitleFallback({ updateMetadata }, 'continue')).toBe(true)
++        expect(updateMetadata).toHaveReturnedWith(forkMetadata)
++    })
+ })
+diff --git a/cli/src/claude/utils/sessionTitleFallback.ts b/cli/src/claude/utils/sessionTitleFallback.ts
+index e5ef81f39..546fab881 100644
+--- a/cli/src/claude/utils/sessionTitleFallback.ts
++++ b/cli/src/claude/utils/sessionTitleFallback.ts
+@@ -1,4 +1,5 @@
+ import type { ApiSessionClient } from '@/api/apiSession'
++import { applySessionTitleSummary, type SessionTitleSummaryOptions } from '@/agent/sessionTitlePolicy'
+ 
+ const MAX_FALLBACK_TITLE_LENGTH = 80
+ 
+@@ -12,21 +13,11 @@ export function createSessionTitleFallback(message: string): string | null {
+ 
+ export function applySessionTitleFallback(
+     client: Pick<ApiSessionClient, 'updateMetadata'>,
+-    message: string
++    message: string,
++    options: SessionTitleSummaryOptions = {}
+ ): boolean {
+     const title = createSessionTitleFallback(message)
+     if (!title) return false
+ 
+-    client.updateMetadata((metadata) => {
+-        if (metadata.name?.trim() || metadata.summary?.text.trim()) return metadata
+-
+-        return {
+-            ...metadata,
+-            summary: {
+-                text: title,
+-                updatedAt: Date.now()
+-            }
+-        }
+-    })
+-    return true
++    return applySessionTitleSummary(client, title, options)
+ }
+diff --git a/cli/src/codex/shared/projection.title.test.ts b/cli/src/codex/shared/projection.title.test.ts
+index 3c010b2b4..fbb4fc6ed 100644
+--- a/cli/src/codex/shared/projection.title.test.ts
++++ b/cli/src/codex/shared/projection.title.test.ts
+@@ -3,8 +3,8 @@ import type { ApiSessionClient } from '@/api/apiSession';
+ import type { Metadata } from '@/api/types';
+ import { SharedCodexProjection } from './projection';
+ 
+-function fixture(parentThreadId?: string, deferWrites = false) {
+-    let metadata: Metadata = { path: '/repo', host: 'test', flavor: 'codex', name: 'Manual name' };
++function fixture(parentThreadId?: string, deferWrites = false, metadataOverrides: Partial<Metadata> = {}) {
++    let metadata: Metadata = { path: '/repo', host: 'test', flavor: 'codex', name: 'Manual name', ...metadataOverrides };
+     const queued: Array<(value: Metadata) => Metadata> = [];
+     const update = vi.fn((fn: (value: Metadata) => Metadata) => {
+         if (deferWrites) queued.push(fn);
+@@ -49,6 +49,17 @@ describe('shared Codex titles', () => {
+         expect(f.update).toHaveBeenCalledTimes(1);
+     });
+ 
++    it('replaces a provisional Fork summary during a live root title notification', async () => {
++        const f = fixture(undefined, false, {
++            name: undefined,
++            forkedFrom: 'parent-session',
++            summary: { text: 'Fork: Parent title', updatedAt: 1 }
++        });
++        await f.projection.notification('item/completed', params(titleItem('title', 'Codex child title')));
++        expect(f.metadata().name).toBe('Codex child title');
++        expect(f.metadata().summary?.text).toBe('Fork: Parent title');
++    });
++
+     it('handles a complete item without a start and orders successive titles across deferred writes', async () => {
+         const f = fixture(undefined, true);
+         // Start without a spawn name so successive renames are visible on name.
+@@ -122,18 +133,33 @@ describe('shared Codex titles', () => {
+         expect(f.send).not.toHaveBeenCalled();
+     });
+ 
+-    it('never overwrites an existing display title during a cold history replay', async () => {
++    it('never overwrites an existing summary during a cold history replay', async () => {
+         const f = fixture();
+         f.update(metadata => ({ ...metadata, summary: { text: 'Existing', updatedAt: 123 } }));
+         f.update.mockClear();
+         await f.projection.history(history(titleItem('old', 'Old')));
+         expect(f.update).not.toHaveBeenCalled();
+-        expect(f.metadata().name).toBe('Manual name');
+         expect(f.metadata().summary).toEqual({ text: 'Existing', updatedAt: 123 });
+     });
+ 
++    it('replaces a provisional Fork summary during a cold history replay', async () => {
++        const f = fixture(undefined, false, {
++            name: undefined,
++            forkedFrom: 'parent-session',
++            summary: { text: 'Fork: Parent title', updatedAt: 1 }
++        });
++        await f.projection.history(history(titleItem('title', 'Codex child title')));
++        expect(f.metadata().name).toBe('Codex child title');
++        expect(f.metadata().summary?.text).toBe('Fork: Parent title');
++    });
++
+     it('keeps pending inputs from an active snapshot for a later argument-less completion', async () => {
+         const f = fixture();
++        f.update(metadata => {
++            const { name: _ignored, ...rest } = metadata;
++            return rest as Metadata;
++        });
++        f.update.mockClear();
+         const item = { ...titleItem('title', 'Resumed'), status: 'inProgress', result: null };
+         await f.projection.history({ turns: [{ id: 'turn', status: 'inProgress', items: [item] }] });
+         expect(f.update).not.toHaveBeenCalled();
+diff --git a/cli/src/codex/shared/projection.ts b/cli/src/codex/shared/projection.ts
+index 7d2dfab27..fa9165b5e 100644
+--- a/cli/src/codex/shared/projection.ts
++++ b/cli/src/codex/shared/projection.ts
+@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
+ import type { ApiSessionClient } from '@/api/apiSession';
+ import { normalizeSessionDisplayTitle } from '@/agent/sessionDisplayRename';
+ import { registerGeneratedImageFromPath } from '@/modules/common/generatedImages';
++import { isForkSeedSummary } from '@/agent/sessionTitlePolicy';
+ import { AppServerEventConverter } from '../utils/appServerEventConverter';
+ import { record, string } from './gateway';
+ import { codexPlanProposalId } from './plan';
+@@ -266,15 +267,17 @@ export class SharedCodexProjection {
+         // Repair sessions created while remote title projection was missing.
+         // Recheck inside the metadata lock: live updates may still be queued,
+         // and a replay must never replace an existing or newer display title.
+-        if (latestTitle && titleRevision === this.titleRevision && !metadataHasDisplayTitle(this.session.getMetadata())) {
++        const currentMetadata = this.session.getMetadata();
++        if (latestTitle && titleRevision === this.titleRevision
++            && (!metadataHasDisplayTitle(currentMetadata) || isForkSeedSummary(currentMetadata))) {
+             const title = latestTitle;
+             this.session.updateMetadata(metadata => {
+-                if (titleRevision !== this.titleRevision || metadataHasDisplayTitle(metadata)) {
++                if (titleRevision !== this.titleRevision || metadata.name?.trim()
++                    || (metadata.summary?.text?.trim() && !isForkSeedSummary(metadata))) {
+                     return metadata;
+                 }
+                 const normalized = normalizeSessionDisplayTitle(title);
+-                if (!normalized) return metadata;
+-                return { ...metadata, name: normalized };
++                return normalized ? { ...metadata, name: normalized } : metadata;
+             });
+         }
+     }

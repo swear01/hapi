@@ -1,0 +1,295 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Thu, 22 Oct 2026 05:15:44 +0000
+Subject: [PATCH 55/95] fix(claude): keep mid-turn steers recoverable until
+ Claude takes them
+
+Addresses the open HAPI Bot findings on upstream PR #2008 (head 4c22ab47):
+
+- Treat command_lifecycle support as unknown until Claude reports one or
+  a turn ends without any, so steers sent during startup stay tracked.
+- Stop the Claude process before restoring unstarted steers on an early
+  tool-abort return, so the old process cannot run them a second time.
+- Discard the prompt echo marker only when cancellation removes the row.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ cli/src/claude/claudeRemote.steer.test.ts | 72 ++++++++++++++++++++---
+ cli/src/claude/claudeRemote.ts            | 34 +++++++++--
+ cli/src/claude/claudeRemoteLauncher.ts    |  9 ++-
+ cli/src/claude/runClaude.ts               |  5 +-
+ cli/src/claude/sdk/query.ts               |  5 ++
+ 5 files changed, 106 insertions(+), 19 deletions(-)
+
+diff --git a/cli/src/claude/claudeRemote.steer.test.ts b/cli/src/claude/claudeRemote.steer.test.ts
+index ad2414794..e65b9ad2c 100644
+--- a/cli/src/claude/claudeRemote.steer.test.ts
++++ b/cli/src/claude/claudeRemote.steer.test.ts
+@@ -47,13 +47,20 @@ async function waitFor(condition: () => boolean, timeoutMs = 1000): Promise<void
+ function startFakeClaude(initialMessage: string) {
+     const prompts: SDKUserMessage[] = [];
+     const output = new PushableAsyncIterable<SDKMessage>();
+-    const querySpy = vi.spyOn(claudeSdk, 'query').mockImplementation((({ prompt }: { prompt: AsyncIterable<SDKUserMessage> }) => {
++    // Outcome of each steer, and process exits awaited, in the order they happened.
++    const outcomes: string[] = [];
++    const abortedTools = new Set<string>();
++    let processSignal: AbortSignal | undefined;
++    const querySpy = vi.spyOn(claudeSdk, 'query').mockImplementation((({ prompt, options }: { prompt: AsyncIterable<SDKUserMessage>, options: { abort?: AbortSignal } }) => {
++        processSignal = options.abort;
+         void (async () => {
+             for await (const message of prompt) {
+                 prompts.push(message);
+             }
+         })();
+-        return output;
++        return Object.assign(output, {
++            waitForExit: async () => { outcomes.push(`exit:${processSignal?.aborted ? 'killed' : 'running'}`); }
++        });
+     }) as unknown as typeof claudeSdk.query);
+ 
+     let nextCallCount = 0;
+@@ -61,8 +68,6 @@ function startFakeClaude(initialMessage: string) {
+     const readyEvents: number[] = [];
+     const thinking: boolean[] = [];
+     const steerable: boolean[] = [];
+-    // Outcome of each steer, in the order they were reported.
+-    const outcomes: string[] = [];
+     let steer: SteerFunction | null = null;
+ 
+     const run = claudeRemote({
+@@ -82,7 +87,7 @@ function startFakeClaude(initialMessage: string) {
+             return await new Promise((resolve) => { releaseNext = resolve; });
+         },
+         onReady: () => { readyEvents.push(Date.now()); },
+-        isAborted: () => false,
++        isAborted: (toolUseId) => abortedTools.has(toolUseId),
+         onSessionFound: () => {},
+         onThinkingChange: (value) => { thinking.push(value); },
+         onMessage: () => {},
+@@ -106,6 +111,13 @@ function startFakeClaude(initialMessage: string) {
+             onDropped: () => { outcomes.push(`dropped:${message}`); }
+         }) ?? false,
+         emit: (message: SDKMessage) => output.push(message),
++        /** The user denies a running tool, which makes claudeRemote return on its own. */
++        async abortTool(toolUseId: string) {
++            abortedTools.add(toolUseId);
++            output.push({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUseId }] } } as unknown as SDKMessage);
++            await run;
++            querySpy.mockRestore();
++        },
+         /** Emit messages and let claudeRemote process them. */
+         async play(...messages: SDKMessage[]) {
+             for (const message of messages) {
+@@ -249,17 +261,18 @@ describe('claudeRemote mid-turn steering', () => {
+ 
+         await claude.crash();
+ 
+-        expect(claude.outcomes).toEqual(['started:Taken', 'dropped:Still queued']);
++        expect(claude.outcomes).toEqual(['started:Taken', 'exit:killed', 'dropped:Still queued']);
+         expect(claude.getSteer()).toBeNull();
+     });
+ 
+-    it('treats a steer as taken at once when Claude reports no command lifecycle', async () => {
++    it('treats a steer as taken once a turn ends without any command lifecycle', async () => {
+         const claude = startFakeClaude('Run the three steps');
+         await waitFor(() => claude.prompts.length === 1);
+ 
+         expect(claude.steer('Skip step three')).toBe(true);
+-        expect(claude.outcomes).toEqual(['started:Skip step three']);
++        expect(claude.outcomes).toEqual([]);
+         await claude.play(result);
++        expect(claude.outcomes).toEqual(['started:Skip step three']);
+ 
+         expect(claude.readyEvents).toHaveLength(1);
+         expect(claude.getSteer()).toBeNull();
+@@ -267,6 +280,49 @@ describe('claudeRemote mid-turn steering', () => {
+         await claude.finish();
+     });
+ 
++    it('keeps a steer sent before the first lifecycle report and drops it if the process fails', async () => {
++        const claude = startFakeClaude('Write an essay');
++        await waitFor(() => claude.prompts.length === 1);
++
++        expect(claude.steer('Early follow-up')).toBe(true);
++        await waitFor(() => claude.prompts.length === 2);
++        expect(claude.outcomes).toEqual([]);
++
++        await claude.crash();
++        expect(claude.outcomes).toEqual(['exit:killed', 'dropped:Early follow-up']);
++    });
++
++    it('stays busy for a steer sent before the first lifecycle report that runs as a follow-up turn', async () => {
++        const claude = startFakeClaude('Write an essay');
++        await waitFor(() => claude.prompts.length === 1);
++        const initialUuid = claude.prompts[0].uuid;
++
++        expect(claude.steer('Early follow-up')).toBe(true);
++        await waitFor(() => claude.prompts.length === 2);
++        const steerUuid = claude.prompts[1].uuid;
++
++        await claude.play(lifecycle(initialUuid, 'started'), lifecycle(steerUuid, 'queued'), result);
++        expect(claude.readyEvents).toHaveLength(0);
++        expect(claude.outcomes).toEqual([]);
++
++        await claude.play(lifecycle(steerUuid, 'started'), result);
++        expect(claude.outcomes).toEqual(['started:Early follow-up']);
++        expect(claude.readyEvents).toHaveLength(1);
++
++        await claude.finish();
++    });
++
++    it('stops the Claude process before dropping steers when a denied tool ends the run', async () => {
++        const { claude } = await startRunningTurn('Edit the file');
++
++        expect(claude.steer('Use tabs')).toBe(true);
++        await waitFor(() => claude.prompts.length === 2);
++        await claude.play(lifecycle(claude.prompts[1].uuid, 'queued'));
++
++        await claude.abortTool('tool-1');
++        expect(claude.outcomes).toEqual(['exit:killed', 'dropped:Use tabs']);
++    });
++
+     it('waits for a steer Claude never reports through one result only', async () => {
+         const { claude } = await startRunningTurn('Write an essay');
+ 
+diff --git a/cli/src/claude/claudeRemote.ts b/cli/src/claude/claudeRemote.ts
+index 7235cab64..0e091ebb7 100644
+--- a/cli/src/claude/claudeRemote.ts
++++ b/cli/src/claude/claudeRemote.ts
+@@ -134,7 +134,8 @@ export async function claudeRemote(opts: {
+     // is not the end of the work. Claude may run several of them as separate
+     // follow-up turns, so each steer is tracked until it starts.
+     let turnActive = false;
+-    let lifecycleReported = false;
++    // Unknown until Claude reports a lifecycle or a result arrives without one.
++    let lifecycleSupported: boolean | null = null;
+     type PendingSteer = SteerCallbacks & {
+         /** Claude reported the prompt as queued. */
+         queued: boolean;
+@@ -186,7 +187,7 @@ export async function claudeRemote(opts: {
+             logger.debug(`${debugPrefix} steer push failed`, e);
+             return false;
+         }
+-        if (!lifecycleReported) {
++        if (lifecycleSupported === false) {
+             // This CLI does not report when the prompt starts; treat it as
+             // taken, as before lifecycle tracking.
+             void Promise.resolve(callbacks.onStarted()).catch((e) => {
+@@ -252,6 +253,13 @@ export async function claudeRemote(opts: {
+         return next;
+     };
+ 
++    // Also stops the process when this function returns early on its own, so
++    // it cannot run steers that are restored to the queue.
++    const processController = new AbortController();
++    const processSignal = opts.signal
++        ? AbortSignal.any([opts.signal, processController.signal])
++        : processController.signal;
++
+     // Prepare SDK options. For --fork-session, start query() before waiting for the
+     // first child prompt so the native fork materializes at the clicked source state.
+     const sdkOptions: Options = {
+@@ -271,7 +279,7 @@ export async function claudeRemote(opts: {
+             : opts.allowedTools,
+         disallowedTools: bootstrapMode.disallowedTools,
+         canCallTool: (toolName: string, input: unknown, options: { signal: AbortSignal }) => opts.canCallTool(toolName, input, mode, options),
+-        abort: opts.signal,
++        abort: processSignal,
+         pathToClaudeCodeExecutable: getDefaultClaudeCodePath(),
+         settingsPath: opts.hookSettingsPath,
+         additionalDirectories: [getHapiBlobsDir()],
+@@ -447,7 +455,7 @@ export async function claudeRemote(opts: {
+ 
+             if (message.type === 'command_lifecycle') {
+                 const lifecycle = message as SDKCommandLifecycleMessage;
+-                lifecycleReported = true;
++                lifecycleSupported = true;
+                 const pending = pendingSteers.get(lifecycle.command_uuid);
+                 if (pending) {
+                     if (lifecycle.state === 'queued') {
+@@ -473,6 +481,15 @@ export async function claudeRemote(opts: {
+                     opts.onFirstResult?.(initial.message);
+                 }
+ 
++                if (lifecycleSupported === null) {
++                    // A whole turn without lifecycle reports: this CLI has none,
++                    // so steers kept since startup count as taken.
++                    lifecycleSupported = false;
++                    for (const uuid of [...pendingSteers.keys()]) {
++                        await startSteer(uuid);
++                    }
++                }
++
+                 // A steer Claude reported as queued runs in a later turn. One
+                 // it never reported may have arrived just before this result;
+                 // if it is still unreported at the next one, the report went
+@@ -546,8 +563,13 @@ export async function claudeRemote(opts: {
+             `(streamMessages=${streamMessageSeq}, results=${resultSeq}, nextFetches=${nextMessageFetchSeq}, inputEnded=${inputEnded})`
+         );
+         setTurnActive(false);
+-        // The process is gone or abandoned: prompts it never started are lost
+-        // with it.
++        if (pendingSteers.size > 0) {
++            // An early return leaves the process running, and it could still
++            // run these prompts while their restored copies run again.
++            processController.abort();
++            await response.waitForExit();
++        }
++        // The process is gone: prompts it never started are lost with it.
+         for (const uuid of [...pendingSteers.keys()]) {
+             dropSteer(uuid);
+         }
+diff --git a/cli/src/claude/claudeRemoteLauncher.ts b/cli/src/claude/claudeRemoteLauncher.ts
+index 03f6a2724..f2c5be0fd 100644
+--- a/cli/src/claude/claudeRemoteLauncher.ts
++++ b/cli/src/claude/claudeRemoteLauncher.ts
+@@ -189,9 +189,12 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
+                     onStarted: async () => {
+                         // Agent output produced before Claude took the prompt
+                         // must reach the hub first, or it sorts below it.
+-                        await messageQueue.flush();
+-                        session.queue.commitReservation(taken);
+-                        session.client.emitMessagesConsumed([localId], { steered: true });
++                        try {
++                            await messageQueue.flush();
++                        } finally {
++                            session.queue.commitReservation(taken);
++                            session.client.emitMessagesConsumed([localId], { steered: true });
++                        }
+                     },
+                     onDropped: () => {
+                         session.client.discardPendingHubPromptEcho(localId);
+diff --git a/cli/src/claude/runClaude.ts b/cli/src/claude/runClaude.ts
+index b6a5bfe5f..315b7045a 100644
+--- a/cli/src/claude/runClaude.ts
++++ b/cli/src/claude/runClaude.ts
+@@ -511,10 +511,11 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
+             return true;
+         }
+         const removed = messageQueue.cancelByLocalId(localId);
+-        if (removed) {
++        // 'in-flight' and 'consumed' prompts still reach Claude and echo back.
++        if (removed === true) {
+             session.discardPendingHubPromptEcho(localId);
+         }
+-        logger.debug(`[claude] cancelByLocalId(${localId}): ${removed ? 'removed' : 'not found (best-effort)'}`);
++        logger.debug(`[claude] cancelByLocalId(${localId}): ${removed === true ? 'removed' : removed || 'not found (best-effort)'}`);
+         return removed;
+     });
+ 
+diff --git a/cli/src/claude/sdk/query.ts b/cli/src/claude/sdk/query.ts
+index f8d433488..7181406d4 100644
+--- a/cli/src/claude/sdk/query.ts
++++ b/cli/src/claude/sdk/query.ts
+@@ -74,6 +74,11 @@ export class Query implements AsyncIterableIterator<SDKMessage> {
+         return this.promptFailure
+     }
+ 
++    /** Resolves once the Claude Code process has exited, however it ended. */
++    waitForExit(): Promise<void> {
++        return this.processExitPromise.catch(() => {})
++    }
++
+     /**
+      * AsyncIterableIterator implementation
+      */

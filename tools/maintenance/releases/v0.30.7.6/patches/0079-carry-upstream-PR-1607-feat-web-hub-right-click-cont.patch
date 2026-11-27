@@ -1,0 +1,1760 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Fri, 23 Oct 2026 18:43:08 +0000
+Subject: [PATCH 79/95] carry(upstream): PR #1607 feat(web,hub): right-click
+ context menu for sidebar project groups (#881)
+
+---
+ hub/README.md                                 |   1 +
+ hub/src/store/sessionStore.ts                 |   5 +
+ hub/src/store/sessions.test.ts                |  82 ++++++
+ hub/src/store/sessions.ts                     |  32 +++
+ hub/src/sync/aliveEvents.test.ts              |  24 ++
+ hub/src/sync/sessionCache.ts                  |  40 +++
+ hub/src/sync/syncEngine.ts                    |   4 +
+ hub/src/web/routes/sessions.test.ts           | 145 +++++++++++
+ hub/src/web/routes/sessions.ts                |  35 +++
+ shared/src/schemas.ts                         |   7 +
+ web/src/api/client.ts                         |  14 +-
+ .../ProjectGroupActionMenu.test.tsx           |  90 +++++++
+ web/src/components/ProjectGroupActionMenu.tsx | 159 ++++++++++++
+ .../SessionList.directory-action.test.tsx     | 155 +++++++++++-
+ web/src/components/SessionList.tsx            | 235 +++++++++++++-----
+ .../mutations/useProjectGroupActions.test.tsx | 110 ++++++++
+ .../hooks/mutations/useProjectGroupActions.ts |  62 +++++
+ web/src/hooks/useAnchoredMenu.ts              |   2 +-
+ web/src/lib/locales/en.ts                     |  13 +
+ web/src/lib/locales/zh-CN.ts                  |  13 +
+ web/src/lib/projectGroupActions.test.ts       | 128 ++++++++++
+ web/src/lib/projectGroupActions.ts            |  39 +++
+ 22 files changed, 1328 insertions(+), 67 deletions(-)
+ create mode 100644 web/src/components/ProjectGroupActionMenu.test.tsx
+ create mode 100644 web/src/components/ProjectGroupActionMenu.tsx
+ create mode 100644 web/src/hooks/mutations/useProjectGroupActions.test.tsx
+ create mode 100644 web/src/hooks/mutations/useProjectGroupActions.ts
+ create mode 100644 web/src/lib/projectGroupActions.test.ts
+ create mode 100644 web/src/lib/projectGroupActions.ts
+
+diff --git a/hub/README.md b/hub/README.md
+index ec4dc6c53..fb7674dc8 100644
+--- a/hub/README.md
++++ b/hub/README.md
+@@ -110,6 +110,7 @@ for request/response shapes and error semantics, and `src/web/routes/` for all e
+ - `POST /api/sessions/:id/archive` - Archive active session.
+ - `PATCH /api/sessions/:id` - Rename session.
+ - `DELETE /api/sessions/:id` - Delete an inactive session after confirming runner process exit; failed confirmation preserves the record.
++- `POST /api/sessions/delete-archived` - Atomically delete the supplied `sessionIds` with `requireAllArchived: true`; every session must belong to the authenticated namespace and still be inactive with lifecycle state `archived`. A changed lifecycle returns 409 without deleting any member.
+ - `GET /api/sessions/:id/slash-commands` - List slash commands.
+ - `GET /api/sessions/:id/skills` - List skills.
+ - `POST /api/sessions/:id/permission-mode` - Set permission mode.
+diff --git a/hub/src/store/sessionStore.ts b/hub/src/store/sessionStore.ts
+index f0ec18d5a..ac0ab82d6 100644
+--- a/hub/src/store/sessionStore.ts
++++ b/hub/src/store/sessionStore.ts
+@@ -2,6 +2,7 @@ import type { Database } from 'bun:sqlite'
+ 
+ import type { StoredSession, VersionedUpdateResult } from './types'
+ import {
++    deleteArchivedSessions,
+     deleteSession,
+     getOrCreateSession,
+     adoptPreallocatedSession,
+@@ -151,4 +152,8 @@ export class SessionStore {
+     deleteSession(id: string, namespace: string): boolean {
+         return deleteSession(this.db, id, namespace)
+     }
++
++    deleteArchivedSessions(ids: string[], namespace: string): StoredSession[] | null {
++        return deleteArchivedSessions(this.db, ids, namespace)
++    }
+ }
+diff --git a/hub/src/store/sessions.test.ts b/hub/src/store/sessions.test.ts
+index 800d2e439..d8286d4f7 100644
+--- a/hub/src/store/sessions.test.ts
++++ b/hub/src/store/sessions.test.ts
+@@ -1334,4 +1334,86 @@ describe('replaceSessionTodos: watermark ratchet (PR #897 rewind race)', () => {
+ 
+         store.close()
+     })
++
++    it('deletes an archived group atomically', () => {
++        const store = makeStore()
++        const archivedIds = ['atomic-a', 'atomic-b']
++        for (const id of archivedIds) {
++            store.sessions.getOrCreateSession(
++                id,
++                { path: '/tmp/project', host: 'localhost', lifecycleState: 'archived' },
++                null,
++                'default',
++                undefined,
++                undefined,
++                undefined,
++                id
++            )
++        }
++        store.messages.addMessage(archivedIds[0]!, { text: 'cascade child' })
++
++        const deleted = store.sessions.deleteArchivedSessions(archivedIds, 'default')
++        expect(deleted?.map((session) => session.id).sort()).toEqual(archivedIds.sort())
++        expect(store.sessions.getSession('atomic-a')).toBeNull()
++        expect(store.sessions.getSession('atomic-b')).toBeNull()
++        expect(store.messages.getMessages(archivedIds[0]!)).toEqual([])
++        store.close()
++    })
++
++    it('rejects a cross-namespace member without deleting either row', () => {
++        const store = makeStore()
++        const local = store.sessions.getOrCreateSession(
++            'atomic-local',
++            { path: '/tmp/project', host: 'localhost', lifecycleState: 'archived' },
++            null,
++            'default',
++            undefined,
++            undefined,
++            undefined,
++            'atomic-local'
++        )
++        const foreign = store.sessions.getOrCreateSession(
++            'atomic-foreign',
++            { path: '/tmp/project', host: 'localhost', lifecycleState: 'archived' },
++            null,
++            'other',
++            undefined,
++            undefined,
++            undefined,
++            'atomic-foreign'
++        )
++
++        expect(store.sessions.deleteArchivedSessions([local.id, foreign.id], 'default')).toBeNull()
++        expect(store.sessions.getSession(local.id)).not.toBeNull()
++        expect(store.sessions.getSession(foreign.id)).not.toBeNull()
++        store.close()
++    })
++
++    it('leaves every member when one archived-group member is invalid', () => {
++        const store = makeStore()
++        const archived = store.sessions.getOrCreateSession(
++            'atomic-valid',
++            { path: '/tmp/project', host: 'localhost', lifecycleState: 'archived' },
++            null,
++            'default',
++            undefined,
++            undefined,
++            undefined,
++            'atomic-valid'
++        )
++        const running = store.sessions.getOrCreateSession(
++            'atomic-invalid',
++            { path: '/tmp/project', host: 'localhost', lifecycleState: 'running' },
++            null,
++            'default',
++            undefined,
++            undefined,
++            undefined,
++            'atomic-invalid'
++        )
++        expect(store.sessions.deleteArchivedSessions([archived.id, running.id], 'default')).toBeNull()
++        expect(store.sessions.getSession(archived.id)).not.toBeNull()
++        expect(store.sessions.getSession(running.id)).not.toBeNull()
++        store.close()
++    })
+ })
+diff --git a/hub/src/store/sessions.ts b/hub/src/store/sessions.ts
+index 29344fd96..b323d7273 100644
+--- a/hub/src/store/sessions.ts
++++ b/hub/src/store/sessions.ts
+@@ -901,3 +901,35 @@ export function deleteSession(db: Database, id: string, namespace: string): bool
+     }
+     return result.changes > 0
+ }
++
++/** Delete a group only after validating every member in one transaction. */
++export function deleteArchivedSessions(
++    db: Database,
++    ids: string[],
++    namespace: string
++): StoredSession[] | null {
++    const uniqueIds = [...new Set(ids)]
++    if (uniqueIds.length === 0) return []
++
++    return db.transaction(() => {
++        const placeholders = uniqueIds.map(() => '?').join(', ')
++        const rows = db.prepare(
++            `SELECT * FROM sessions WHERE namespace = ? AND id IN (${placeholders})`
++        ).all(namespace, ...uniqueIds) as DbSessionRow[]
++        const allArchived = rows.length === uniqueIds.length && rows.every((row) => {
++            const metadata = safeJsonParse(row.metadata)
++            return row.active === 0
++                && isPlainObject(metadata)
++                && metadata.lifecycleState === 'archived'
++        })
++        if (!allArchived) return null
++
++        const deletedRows = db.prepare(
++            `DELETE FROM sessions WHERE namespace = ? AND id IN (${placeholders}) RETURNING id`
++        ).all(namespace, ...uniqueIds) as Array<{ id: string }>
++        if (deletedRows.length !== uniqueIds.length) {
++            throw new Error('Failed to delete archived sessions')
++        }
++        return rows.map(toStoredSession)
++    })()
++}
+diff --git a/hub/src/sync/aliveEvents.test.ts b/hub/src/sync/aliveEvents.test.ts
+index ed1a5246b..9a13ba2f0 100644
+--- a/hub/src/sync/aliveEvents.test.ts
++++ b/hub/src/sync/aliveEvents.test.ts
+@@ -16,6 +16,30 @@ function createPublisher(events: SyncEvent[]): EventPublisher {
+ }
+ 
+ describe('alive incremental events', () => {
++    it('preserves the entire archived group when a member reconnects before deletion', async () => {
++        const store = new Store(':memory:')
++        const events: SyncEvent[] = []
++        const cache = new SessionCache(store, createPublisher(events))
++        try {
++            const sessions = ['archived-first', 'reconnected-second'].map(name => cache.getOrCreateSession(
++                name, { path: '/tmp/project', host: 'localhost', lifecycleState: 'archived' }, null, 'default'
++            ))
++            for (const session of sessions) store.messages.addMessage(session.id, { text: 'preserve history' })
++            cache.handleSessionAlive({ sid: sessions[1]!.id, time: Date.now(), thinking: false })
++            expect(cache.getSession(sessions[1]!.id)?.active).toBe(true)
++            expect(store.sessions.getSession(sessions[1]!.id)?.active).toBe(false)
++            events.length = 0
++            await expect(cache.deleteArchivedSessions(sessions.map(session => session.id), 'default'))
++                .rejects.toThrow('Sessions are no longer archived')
++            for (const session of sessions) {
++                expect(cache.getSession(session.id)).toBeDefined()
++                expect(store.sessions.getSession(session.id)).not.toBeNull()
++                expect(store.messages.getMessages(session.id)).toHaveLength(1)
++            }
++            expect(events).toEqual([])
++        } finally { store.close() }
++    })
++
+     it('replays durable immediate prompts on every attach until consumed', () => {
+         const store = new Store(':memory:')
+         const emitted: Array<{ body?: { t?: string; message?: { localId?: string | null } } }> = []
+diff --git a/hub/src/sync/sessionCache.ts b/hub/src/sync/sessionCache.ts
+index dc614a1c5..003b50ecf 100644
+--- a/hub/src/sync/sessionCache.ts
++++ b/hub/src/sync/sessionCache.ts
+@@ -1301,6 +1301,46 @@ export class SessionCache {
+         this.publisher.emit({ type: 'session-removed', sessionId, namespace: session.namespace })
+     }
+ 
++    async deleteArchivedSessions(sessionIds: string[], namespace: string): Promise<void> {
++        const ids = [...new Set(sessionIds)]
++        if (ids.length === 0) return
++        const sessions = ids.map((id) => this.getSessionByNamespace(id, namespace))
++        if (sessions.some((session): session is undefined => !session)) {
++            throw new Error('Session access denied')
++        }
++        const scratchlistAttachments = new Map(
++            sessions.map((session) => [
++                session!.id,
++                this.store.scratchlist.list(session!.id).flatMap((entry) => entry.attachments)
++            ])
++        )
++        if (sessions.some(session => session!.active || session!.metadata?.lifecycleState !== 'archived')) {
++            throw new Error('Sessions are no longer archived')
++        }
++        const deleted = this.store.sessions.deleteArchivedSessions(ids, namespace)
++        if (!deleted) {
++            throw new Error('Sessions are no longer archived')
++        }
++
++        for (const session of sessions) {
++            this.sessions.delete(session!.id)
++            this.lastBroadcastAtBySessionId.delete(session!.id)
++            this.todoBackfillAttemptedSessionIds.delete(session!.id)
++            this.pendingThinkingUntilBySessionId.delete(session!.id)
++            const attachments = scratchlistAttachments.get(session!.id) ?? []
++            void import('../scratchlistAttachments/storage').then(async ({
++                deleteScratchlistAttachmentFiles,
++                deleteScratchlistSessionAttachmentDir,
++                getHapiHomeDir,
++            }) => {
++                const hapiHome = getHapiHomeDir()
++                await deleteScratchlistAttachmentFiles(hapiHome, attachments)
++                await deleteScratchlistSessionAttachmentDir(hapiHome, namespace, session!.id)
++            })
++            this.publisher.emit({ type: 'session-removed', sessionId: session!.id, namespace })
++        }
++    }
++
+     async mergeSessions(oldSessionId: string, newSessionId: string, namespace: string): Promise<void> {
+         await this.mergeSessionData(oldSessionId, newSessionId, namespace, { deleteOldSession: true })
+     }
+diff --git a/hub/src/sync/syncEngine.ts b/hub/src/sync/syncEngine.ts
+index a4ebe9898..36b7c4109 100644
+--- a/hub/src/sync/syncEngine.ts
++++ b/hub/src/sync/syncEngine.ts
+@@ -2308,6 +2308,10 @@ export class SyncEngine {
+         this.releaseSessionEnumerations(sessionId)
+     }
+ 
++    async deleteArchivedSessions(sessionIds: string[], namespace: string): Promise<void> {
++        await this.sessionCache.deleteArchivedSessions(sessionIds, namespace)
++    }
++
+     async applySessionConfig(
+         sessionId: string,
+         config: {
+diff --git a/hub/src/web/routes/sessions.test.ts b/hub/src/web/routes/sessions.test.ts
+index 6c1ff23c1..1726b63de 100644
+--- a/hub/src/web/routes/sessions.test.ts
++++ b/hub/src/web/routes/sessions.test.ts
+@@ -66,6 +66,8 @@ function createApp(session: Session, opts?: {
+     sessionExists?: boolean
+     archiveSession?: (sessionId: string) => Promise<void>
+     stopSession?: (sessionId: string) => Promise<{ alreadyStopped: boolean }>
++    deleteSession?: (sessionId: string) => Promise<void>
++    deleteArchivedSessions?: (sessionIds: string[], namespace: string) => Promise<void>
+     getCursorChatStoreStatus?: SyncEngine['getCursorChatStoreStatus']
+     listCodexModelsForSession?: SyncEngine['listCodexModelsForSession']
+     listSessionReasoningEffortOptionsForSession?: SyncEngine['listSessionReasoningEffortOptionsForSession']
+@@ -147,6 +149,8 @@ function createApp(session: Session, opts?: {
+     }))
+     const sessionExists = opts?.sessionExists !== false
+     const archiveSessionMock = opts?.archiveSession ?? (async () => {})
++    const deleteSessionMock = opts?.deleteSession ?? (async () => {})
++    const deleteArchivedSessionsMock = opts?.deleteArchivedSessions ?? (async () => {})
+     const engine = {
+         resolveSessionAccess: () => sessionExists
+             ? { ok: true, sessionId: session.id, session }
+@@ -172,6 +176,8 @@ function createApp(session: Session, opts?: {
+         })),
+         archiveSession: archiveSessionMock,
+         stopSession: opts?.stopSession ?? (async () => ({ alreadyStopped: false })),
++        deleteSession: deleteSessionMock,
++        deleteArchivedSessions: deleteArchivedSessionsMock,
+         setSessionPinned: opts?.setSessionPinned ?? (() => {}),
+         setSessionPinMode: opts?.setSessionPinMode ?? (() => {}),
+         getSessionExport: opts?.getSessionExport ?? (() => ({
+@@ -1766,6 +1772,145 @@ describe('sessions routes', () => {
+         })
+     })
+ 
++    describe('POST /sessions/delete-archived (atomic group delete, tiann/hapi#881)', () => {
++        it('passes the full group to the atomic archived delete operation', async () => {
++            const calls: string[][] = []
++            const session = createSession({ active: false, metadata: {
++                path: '/tmp/project',
++                host: 'localhost',
++                flavor: 'codex',
++                lifecycleState: 'archived'
++            } })
++            const { app } = createApp(session, {
++                deleteArchivedSessions: async (sessionIds, namespace) => {
++                    calls.push([...sessionIds, namespace])
++                }
++            })
++
++            const response = await app.request('/api/sessions/delete-archived', {
++                method: 'POST',
++                headers: { 'content-type': 'application/json' },
++                body: JSON.stringify({ sessionIds: ['session-1', 'session-2'], requireAllArchived: true })
++            })
++
++            expect(response.status).toBe(200)
++            expect(await response.json()).toEqual({ ok: true })
++            expect(calls).toEqual([['session-1', 'session-2', 'default']])
++        })
++
++        it('requires the all-archived guard flag', async () => {
++            const { app } = createApp(createSession({ active: false }))
++            const response = await app.request('/api/sessions/delete-archived', {
++                method: 'POST',
++                headers: { 'content-type': 'application/json' },
++                body: JSON.stringify({ sessionIds: ['session-1'] })
++            })
++            expect(response.status).toBe(400)
++        })
++
++        it('rejects malformed member IDs without invoking deletion', async () => {
++            const calls: string[][] = []
++            const { app } = createApp(createSession({ active: false }), {
++                deleteArchivedSessions: async (sessionIds) => { calls.push(sessionIds) }
++            })
++            const response = await app.request('/api/sessions/delete-archived', {
++                method: 'POST',
++                headers: { 'content-type': 'application/json' },
++                body: JSON.stringify({ sessionIds: ['session-1', ''], requireAllArchived: true })
++            })
++            expect(response.status).toBe(400)
++            expect(calls).toEqual([])
++        })
++
++        it('maps transactional delete failures to 500', async () => {
++            const { app } = createApp(createSession({ active: false }), {
++                deleteArchivedSessions: async () => {
++                    throw new Error('Failed to delete archived sessions')
++                }
++            })
++            const response = await app.request('/api/sessions/delete-archived', {
++                method: 'POST',
++                headers: { 'content-type': 'application/json' },
++                body: JSON.stringify({ sessionIds: ['session-1'], requireAllArchived: true })
++            })
++            expect(response.status).toBe(500)
++        })
++    })
++
++    describe('DELETE /sessions/:id (requireArchived guard, tiann/hapi#881)', () => {
++        it('deletes an inactive session without the guard', async () => {
++            const calls: string[] = []
++            const session = createSession({ active: false })
++            const { app } = createApp(session, {
++                deleteSession: async (sessionId: string) => { calls.push(sessionId) }
++            })
++
++            const response = await app.request('/api/sessions/session-1', { method: 'DELETE' })
++
++            expect(response.status).toBe(200)
++            expect(await response.json()).toEqual({ ok: true })
++            expect(calls).toEqual(['session-1'])
++        })
++
++        it('rejects requireArchived=1 when the session was never archived', async () => {
++            const calls: string[] = []
++            const session = createSession({
++                active: false,
++                metadata: {
++                    path: '/tmp/project',
++                    host: 'localhost',
++                    flavor: 'codex',
++                    lifecycleState: 'running'
++                }
++            })
++            const { app } = createApp(session, {
++                deleteSession: async (sessionId: string) => { calls.push(sessionId) }
++            })
++
++            const response = await app.request('/api/sessions/session-1?requireArchived=1', { method: 'DELETE' })
++
++            expect(response.status).toBe(409)
++            expect(await response.json()).toEqual({ error: 'Session is no longer archived' })
++            expect(calls).toEqual([])
++        })
++
++        it('rejects requireArchived=1 for an inactive row with no lifecycle metadata', async () => {
++            const calls: string[] = []
++            const session = createSession({ active: false })
++            const { app } = createApp(session, {
++                deleteSession: async (sessionId: string) => { calls.push(sessionId) }
++            })
++
++            const response = await app.request('/api/sessions/session-1?requireArchived=1', { method: 'DELETE' })
++
++            expect(response.status).toBe(409)
++            expect(await response.json()).toEqual({ error: 'Session is no longer archived' })
++            expect(calls).toEqual([])
++        })
++
++        it('deletes an archived session with requireArchived=1', async () => {
++            const calls: string[] = []
++            const session = createSession({
++                active: false,
++                metadata: {
++                    path: '/tmp/project',
++                    host: 'localhost',
++                    flavor: 'codex',
++                    lifecycleState: 'archived'
++                }
++            })
++            const { app } = createApp(session, {
++                deleteSession: async (sessionId: string) => { calls.push(sessionId) }
++            })
++
++            const response = await app.request('/api/sessions/session-1?requireArchived=1', { method: 'DELETE' })
++
++            expect(response.status).toBe(200)
++            expect(await response.json()).toEqual({ ok: true })
++            expect(calls).toEqual(['session-1'])
++        })
++    })
++
+     it('forks via POST /sessions/:id/fork and returns the child session id', async () => {
+         const calls: Array<{ sessionId: string; namespace: string; messageLocalId?: string }> = []
+         const session = createSession({
+diff --git a/hub/src/web/routes/sessions.ts b/hub/src/web/routes/sessions.ts
+index 3368f227b..01bb97912 100644
+--- a/hub/src/web/routes/sessions.ts
++++ b/hub/src/web/routes/sessions.ts
+@@ -28,6 +28,7 @@ import {
+ } from '@hapi/protocol'
+ import { RPC_METHODS, RPC_TARGET_MISSING_ERROR_CODE } from '@hapi/protocol/rpcMethods'
+ import type { SlashCommand } from '@hapi/protocol/apiTypes'
++import { DeleteArchivedSessionsRequestSchema } from '@hapi/protocol/schemas'
+ import { Hono, type Context } from 'hono'
+ import type { SyncEngine, Session } from '../../sync/syncEngine'
+ import type { WebAppEnv } from '../middleware/auth'
+@@ -968,6 +969,30 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
+         return c.json({ ok: true })
+     })
+ 
++    app.post('/sessions/delete-archived', async (c) => {
++        const engine = requireSyncEngine(c, getSyncEngine)
++        if (engine instanceof Response) {
++            return engine
++        }
++
++        const body = await c.req.json().catch(() => null)
++        const parsed = DeleteArchivedSessionsRequestSchema.safeParse(body)
++        if (!parsed.success) {
++            return c.json({ error: 'Invalid body' }, 400)
++        }
++
++        try {
++            await engine.deleteArchivedSessions(parsed.data.sessionIds, c.get('namespace'))
++            return c.json({ ok: true })
++        } catch (error) {
++            const message = error instanceof Error ? error.message : 'Failed to delete archived sessions'
++            if (message === 'Sessions are no longer archived') {
++                return c.json({ error: message }, 409)
++            }
++            return c.json({ error: message }, 500)
++        }
++    })
++
+     app.delete('/sessions/:id', async (c) => {
+         const engine = requireSyncEngine(c, getSyncEngine)
+         if (engine instanceof Response) {
+@@ -983,6 +1008,16 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
+             return c.json({ error: 'Cannot delete active session. Archive it first.' }, 409)
+         }
+ 
++        // Bulk group-delete guard (#881): the web UI only enables "Delete
++        // Group" when every session in the group is archived, but the server
++        // re-checks so a stale client or a race cannot delete a session whose
++        // lifecycle state is no longer 'archived' (e.g. completed/imported
++        // stubs that are inactive but never formally archived).
++        if (c.req.query('requireArchived') === '1'
++            && sessionResult.session.metadata?.lifecycleState !== 'archived') {
++            return c.json({ error: 'Session is no longer archived' }, 409)
++        }
++
+         try {
+             await engine.deleteSession(sessionResult.sessionId)
+             return c.json({ ok: true })
+diff --git a/shared/src/schemas.ts b/shared/src/schemas.ts
+index 5d22d7c65..909a7cb80 100644
+--- a/shared/src/schemas.ts
++++ b/shared/src/schemas.ts
+@@ -692,6 +692,13 @@ export const CancelMessageResponseSchema = z.discriminatedUnion('status', [
+ 
+ export type CancelMessageResponse = z.infer<typeof CancelMessageResponseSchema>
+ 
++export const DeleteArchivedSessionsRequestSchema = z.object({
++    sessionIds: z.array(z.string().min(1)).min(1),
++    requireAllArchived: z.literal(true)
++})
++
++export type DeleteArchivedSessionsRequest = z.infer<typeof DeleteArchivedSessionsRequestSchema>
++
+ export const SteerQueuedMessageResponseSchema = z.discriminatedUnion('status', [
+     z.object({ status: z.literal('steered'), localId: z.string() }),
+     z.object({ status: z.literal('invoked'), message: DecryptedMessageSchema }),
+diff --git a/web/src/api/client.ts b/web/src/api/client.ts
+index ea371f594..348435009 100644
+--- a/web/src/api/client.ts
++++ b/web/src/api/client.ts
+@@ -1061,12 +1061,22 @@ export class ApiClient {
+         })
+     }
+ 
+-    async deleteSession(sessionId: string): Promise<void> {
+-        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}`, {
++    async deleteSession(sessionId: string, options?: { requireArchived?: boolean }): Promise<void> {
++        const params = new URLSearchParams()
++        if (options?.requireArchived) params.set('requireArchived', '1')
++        const suffix = params.size > 0 ? `?${params}` : ''
++        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}${suffix}`, {
+             method: 'DELETE'
+         })
+     }
+ 
++    async deleteArchivedSessions(options: { sessionIds: string[]; requireAllArchived: true }): Promise<void> {
++        await this.request('/api/sessions/delete-archived', {
++            method: 'POST',
++            body: JSON.stringify(options)
++        })
++    }
++
+     /*
+      * Scratchlist v2 (tiann/hapi#893).
+      *
+diff --git a/web/src/components/ProjectGroupActionMenu.test.tsx b/web/src/components/ProjectGroupActionMenu.test.tsx
+new file mode 100644
+index 000000000..9695efe5a
+--- /dev/null
++++ b/web/src/components/ProjectGroupActionMenu.test.tsx
+@@ -0,0 +1,90 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++import { cleanup, fireEvent, render, screen } from '@testing-library/react'
++import { I18nProvider } from '@/lib/i18n-context'
++import { ProjectGroupActionMenu } from '@/components/ProjectGroupActionMenu'
++
++afterEach(() => cleanup())
++
++function renderMenu(overrides: Partial<React.ComponentProps<typeof ProjectGroupActionMenu>> = {}) {
++    const defaults: React.ComponentProps<typeof ProjectGroupActionMenu> = {
++        isOpen: true,
++        onClose: vi.fn(),
++        onCopyPath: vi.fn(),
++        onArchiveAll: vi.fn(),
++        canArchiveAll: true,
++        onDelete: vi.fn(),
++        canDelete: false,
++        anchorPoint: { x: 0, y: 0 },
++    }
++    const merged = { ...defaults, ...overrides }
++    return {
++        ...render(
++            <I18nProvider>
++                <ProjectGroupActionMenu {...merged} />
++            </I18nProvider>
++        ),
++        props: merged
++    }
++}
++
++beforeEach(() => vi.clearAllMocks())
++
++describe('ProjectGroupActionMenu', () => {
++    it('renders all three actions', () => {
++        renderMenu()
++        expect(screen.getByRole('menuitem', { name: /Copy Path/ })).toBeInTheDocument()
++        expect(screen.getByRole('menuitem', { name: /Archive All Sessions/ })).toBeInTheDocument()
++        expect(screen.getByRole('menuitem', { name: /Delete Group/ })).toBeInTheDocument()
++    })
++
++    it('fires onCopyPath and closes on Copy Path click', () => {
++        const onCopyPath = vi.fn()
++        const onClose = vi.fn()
++        renderMenu({ onCopyPath, onClose })
++
++        fireEvent.click(screen.getByRole('menuitem', { name: /Copy Path/ }))
++
++        expect(onCopyPath).toHaveBeenCalledTimes(1)
++        expect(onClose).toHaveBeenCalledTimes(1)
++    })
++
++    it('disables Archive All when nothing is archivable', () => {
++        const onArchiveAll = vi.fn()
++        renderMenu({ canArchiveAll: false, onArchiveAll })
++
++        const item = screen.getByRole('menuitem', { name: /Archive All Sessions/ })
++        expect(item).toBeDisabled()
++
++        fireEvent.click(item)
++        expect(onArchiveAll).not.toHaveBeenCalled()
++    })
++
++    it('disables Delete Group while any session is not archived', () => {
++        const onDelete = vi.fn()
++        renderMenu({ canDelete: false, onDelete })
++
++        const item = screen.getByRole('menuitem', { name: /Delete Group/ })
++        expect(item).toBeDisabled()
++
++        fireEvent.click(item)
++        expect(onDelete).not.toHaveBeenCalled()
++    })
++
++    it('enables Delete Group and fires onDelete when canDelete is true', () => {
++        const onDelete = vi.fn()
++        const onClose = vi.fn()
++        renderMenu({ canDelete: true, onDelete, onClose })
++
++        const item = screen.getByRole('menuitem', { name: /Delete Group/ })
++        expect(item).not.toBeDisabled()
++
++        fireEvent.click(item)
++        expect(onDelete).toHaveBeenCalledTimes(1)
++        expect(onClose).toHaveBeenCalledTimes(1)
++    })
++
++    it('renders nothing when closed', () => {
++        renderMenu({ isOpen: false })
++        expect(screen.queryByRole('menu')).toBeNull()
++    })
++})
+diff --git a/web/src/components/ProjectGroupActionMenu.tsx b/web/src/components/ProjectGroupActionMenu.tsx
+new file mode 100644
+index 000000000..c6e5574bf
+--- /dev/null
++++ b/web/src/components/ProjectGroupActionMenu.tsx
+@@ -0,0 +1,159 @@
++import { useId } from 'react'
++import { useTranslation } from '@/lib/use-translation'
++import { useAnchoredMenu } from '@/hooks/useAnchoredMenu'
++import { CopyIcon } from '@/components/icons'
++
++type ProjectGroupActionMenuProps = {
++    isOpen: boolean
++    onClose: () => void
++    onCopyPath: () => void
++    onArchiveAll: () => void
++    canArchiveAll: boolean
++    onDelete: () => void
++    canDelete: boolean
++    anchorPoint: { x: number; y: number }
++    menuId?: string
++}
++
++function ArchiveIcon(props: { className?: string }) {
++    return (
++        <svg
++            xmlns="http://www.w3.org/2000/svg"
++            width="18"
++            height="18"
++            viewBox="0 0 24 24"
++            fill="none"
++            stroke="currentColor"
++            strokeWidth="2"
++            strokeLinecap="round"
++            strokeLinejoin="round"
++            className={props.className}
++        >
++            <rect width="20" height="5" x="2" y="3" rx="1" />
++            <path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" />
++            <path d="M10 12h4" />
++        </svg>
++    )
++}
++
++function TrashIcon(props: { className?: string }) {
++    return (
++        <svg
++            xmlns="http://www.w3.org/2000/svg"
++            width="18"
++            height="18"
++            viewBox="0 0 24 24"
++            fill="none"
++            stroke="currentColor"
++            strokeWidth="2"
++            strokeLinecap="round"
++            strokeLinejoin="round"
++            className={props.className}
++        >
++            <path d="M3 6h18" />
++            <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
++            <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
++            <line x1="10" x2="10" y1="11" y2="17" />
++            <line x1="14" x2="14" y1="11" y2="17" />
++        </svg>
++    )
++}
++
++export function ProjectGroupActionMenu(props: ProjectGroupActionMenuProps) {
++    const { t } = useTranslation()
++    const {
++        isOpen,
++        onClose,
++        onCopyPath,
++        onArchiveAll,
++        canArchiveAll,
++        onDelete,
++        canDelete,
++        anchorPoint,
++        menuId
++    } = props
++    const { menuRef, menuStyle } = useAnchoredMenu({ isOpen, onClose, anchorPoint })
++    const internalId = useId()
++    const resolvedMenuId = menuId ?? `project-group-action-menu-${internalId}`
++    const headingId = `${resolvedMenuId}-heading`
++
++    const handleCopyPath = () => {
++        onClose()
++        onCopyPath()
++    }
++
++    const handleArchiveAll = () => {
++        onClose()
++        onArchiveAll()
++    }
++
++    const handleDelete = () => {
++        onClose()
++        onDelete()
++    }
++
++    if (!isOpen) return null
++
++    const baseItemClassName =
++        'flex w-full items-center gap-3 rounded-md px-3 py-2 text-left text-base transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]'
++
++    return (
++        <div
++            ref={menuRef}
++            className="fixed z-50 min-w-[220px] rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] p-1 shadow-lg animate-menu-pop"
++            style={menuStyle}
++        >
++            <div
++                id={headingId}
++                className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--app-hint)]"
++            >
++                {t('sessions.group.actions')}
++            </div>
++            <div
++                id={resolvedMenuId}
++                role="menu"
++                aria-labelledby={headingId}
++                className="flex flex-col gap-1"
++            >
++                <button
++                    type="button"
++                    role="menuitem"
++                    className={`${baseItemClassName} hover:bg-[var(--app-subtle-bg)]`}
++                    onClick={handleCopyPath}
++                >
++                    <CopyIcon className="h-[18px] w-[18px] text-[var(--app-hint)]" />
++                    {t('sessions.group.copyPath')}
++                </button>
++
++                <button
++                    type="button"
++                    role="menuitem"
++                    disabled={!canArchiveAll}
++                    className={`${baseItemClassName} ${canArchiveAll
++                        ? 'hover:bg-[var(--app-subtle-bg)]'
++                        : 'cursor-not-allowed text-[var(--app-hint)] opacity-50'}`}
++                    onClick={handleArchiveAll}
++                >
++                    <ArchiveIcon className="text-[var(--app-hint)]" />
++                    {t('sessions.group.archiveAll')}
++                </button>
++
++                <div className="my-1 h-px bg-[var(--app-border)]" role="separator" />
++
++                <button
++                    type="button"
++                    role="menuitem"
++                    disabled={!canDelete}
++                    title={canDelete ? undefined : t('sessions.group.deleteHint')}
++                    className={`${baseItemClassName} ${canDelete
++                        ? 'text-red-500 hover:bg-red-500/10'
++                        : 'cursor-not-allowed text-[var(--app-hint)] opacity-50'}`}
++                    onClick={handleDelete}
++                >
++                    <TrashIcon className={canDelete ? 'text-red-500' : 'text-[var(--app-hint)]'} />
++                    {t('sessions.group.delete')}
++                </button>
++            </div>
++        </div>
++    )
++}
+diff --git a/web/src/components/SessionList.directory-action.test.tsx b/web/src/components/SessionList.directory-action.test.tsx
+index 6358e7fb7..4dbea632b 100644
+--- a/web/src/components/SessionList.directory-action.test.tsx
++++ b/web/src/components/SessionList.directory-action.test.tsx
+@@ -68,6 +68,28 @@ function getSessionPath(label: string) {
+ }
+ 
+ describe('SessionList directory action', () => {
++    it.each(['Enter', ' '])('preserves native directory-button activation for %s', (key) => {
++        const onNewSessionInDirectory = vi.fn()
++        const writeText = vi.fn(async () => {})
++        Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
++        renderWithProviders(<SessionList
++            sessions={[makeSession({ id: 'keyboard', active: true, metadata: { path: '/work/hapi', name: 'Task' } })]}
++            selectedSessionId={null} onSelect={vi.fn()} onNewSession={vi.fn()}
++            onNewSessionInDirectory={onNewSessionInDirectory} onRefresh={vi.fn()}
++            isLoading={false} renderHeader={false} api={null}
++        />)
++        for (const name of [/Copy: \/work\/hapi/, /New session in this directory/]) {
++            const button = screen.getByRole('button', { name })
++            button.focus()
++            expect(fireEvent.keyDown(button, { key })).toBe(true)
++            expect(screen.getByTitle('/work/hapi').parentElement?.querySelector('.collapsible-panel'))
++                .toHaveAttribute('data-open', 'true')
++            fireEvent.click(button)
++        }
++        expect(writeText).toHaveBeenCalledWith('/work/hapi')
++        expect(onNewSessionInDirectory).toHaveBeenCalledOnce()
++    })
++
+     it('starts a new session with the project machine and directory', () => {
+         const onNewSessionInDirectory = vi.fn()
+         const session = makeSession({
+@@ -869,9 +891,7 @@ describe('SessionList collapse behavior', () => {
+         // The directory header survives as an action-only header (copy-path /
+         // new-session-in-directory) even though every row floated.
+         expect(screen.getByTitle('/work/hapi')).toBeInTheDocument()
+-        expect(screen.getByTitle('/work/hapi').nextElementSibling).toBeNull()
+         expect(screen.getByTitle('/work/other')).toBeInTheDocument()
+-        expect(screen.getByTitle('/work/other').nextElementSibling).toBeNull()
+     })
+ 
+     it('keeps new-session-in-directory actions for projects whose rows all floated', () => {
+@@ -901,8 +921,7 @@ describe('SessionList collapse behavior', () => {
+ 
+         expect(screen.getByTitle('Active sessions')).toBeInTheDocument()
+         // The project header survives as an action-only header.
+-        const header = screen.getByTitle('/work/hapi')
+-        expect(header.nextElementSibling).toBeNull()
++        expect(screen.getByTitle('/work/hapi')).toBeInTheDocument()
+ 
+         fireEvent.click(screen.getByRole('button', { name: 'New session in this directory' }))
+         expect(onNewSessionInDirectory).toHaveBeenCalledWith({
+@@ -1302,6 +1321,134 @@ describe('SessionList collapse behavior', () => {
+     })
+ })
+ 
++describe('SessionList project group context menu (tiann/hapi#881)', () => {
++    function renderList(sessions: SessionSummary[]) {
++        return renderWithProviders(
++            <SessionList
++                sessions={sessions}
++                selectedSessionId={null}
++                onSelect={vi.fn()}
++                onNewSession={vi.fn()}
++                onRefresh={vi.fn()}
++                isLoading={false}
++                renderHeader={false}
++                api={null}
++            />
++        )
++    }
++
++    it('opens the group menu on right-click with Copy Path / Archive All / Delete Group', () => {
++        renderList([makeSession({
++            id: 'session-1',
++            active: true,
++            metadata: { path: '/work/hapi', name: 'Task', flavor: 'codex', lifecycleState: 'running' },
++        })])
++
++        const groupHeader = screen.getByTitle('/work/hapi')
++        fireEvent.contextMenu(groupHeader)
++
++        expect(screen.getByRole('menuitem', { name: /Copy Path/ })).toBeInTheDocument()
++        expect(screen.getByRole('menuitem', { name: /Archive All Sessions/ })).toBeEnabled()
++        expect(screen.getByRole('menuitem', { name: /Delete Group/ })).toBeDisabled()
++    })
++
++    it('opens the group menu for an action-only pinned group header', () => {
++        localStorage.setItem('hapi-pin-in-progress-sessions', 'true')
++        renderList([makeSession({
++            id: 'session-pinned',
++            active: true,
++            metadata: { path: '/work/hapi', name: 'Pinned task', flavor: 'codex', lifecycleState: 'running' },
++        })])
++
++        fireEvent.contextMenu(screen.getByTitle('/work/hapi'))
++
++        expect(screen.getByRole('menuitem', { name: /Copy Path/ })).toBeInTheDocument()
++        expect(screen.getByRole('menuitem', { name: /Archive All Sessions/ })).toBeEnabled()
++        expect(screen.getByRole('menuitem', { name: /Delete Group/ })).toBeDisabled()
++    })
++
++    it('enables Delete Group only when every session in the group is archived', () => {
++        renderList([
++            makeSession({
++                id: 'session-1',
++                active: false,
++                metadata: { path: '/work/hapi', name: 'Task', flavor: 'codex', lifecycleState: 'archived' },
++            }),
++            makeSession({
++                id: 'session-2',
++                active: false,
++                metadata: { path: '/work/hapi', name: 'Task 2', flavor: 'codex', lifecycleState: 'archived' },
++            }),
++        ])
++
++        fireEvent.contextMenu(screen.getByTitle('/work/hapi'))
++
++        expect(screen.getByRole('menuitem', { name: /Delete Group/ })).toBeEnabled()
++        expect(screen.getByRole('menuitem', { name: /Archive All Sessions/ })).toBeDisabled()
++    })
++
++    it('scopes destructive actions to the full group, including hidden pinned sessions', () => {
++        // The archived row is visible; the running global-pinned row with the
++        // same directory is hidden from the directory groups. Delete Group
++        // must stay disabled because the destructive scope is the whole group.
++        renderList([
++            makeSession({
++                id: 'session-visible',
++                active: false,
++                globalPinned: false,
++                metadata: { path: '/work/hapi', name: 'Task', flavor: 'codex', lifecycleState: 'archived' },
++            }),
++            makeSession({
++                id: 'session-hidden-running',
++                active: true,
++                globalPinned: true,
++                metadata: { path: '/work/hapi', name: 'Task 2', flavor: 'codex', lifecycleState: 'running' },
++            }),
++        ])
++
++        fireEvent.contextMenu(screen.getByTitle('/work/hapi'))
++
++        expect(screen.getByRole('menuitem', { name: /Delete Group/ })).toBeDisabled()
++        expect(screen.getByRole('menuitem', { name: /Archive All Sessions/ })).toBeEnabled()
++    })
++
++    it('Copy Path click does not toggle the group collapse', () => {
++        const writeText = vi.fn(async () => {})
++        Object.defineProperty(navigator, 'clipboard', {
++            value: { writeText },
++            configurable: true
++        })
++        renderList([makeSession({
++            id: 'session-1',
++            active: true,
++            metadata: { path: '/work/hapi', name: 'Task', flavor: 'codex', lifecycleState: 'running' },
++        })])
++
++        const copyButton = screen.getByRole('button', { name: /Copy: \/work\/hapi/ })
++        fireEvent.click(copyButton)
++
++        expect(writeText).toHaveBeenCalledWith('/work/hapi')
++        // The group header stays expanded (its collapse panel remains open).
++        const panel = screen.getByTitle('/work/hapi').parentElement
++            ?.querySelector('.collapsible-panel')
++        expect(panel?.getAttribute('data-open')).toBe('true')
++    })
++
++    it('collapses the group on a plain click and does not open the menu', () => {
++        renderList([makeSession({
++            id: 'session-1',
++            active: true,
++            metadata: { path: '/work/hapi', name: 'Task', flavor: 'codex', lifecycleState: 'running' },
++        })])
++
++        const groupHeader = screen.getByTitle('/work/hapi')
++        fireEvent.click(groupHeader)
++
++        expect(screen.queryByRole('menu')).toBeNull()
++        expect(screen.getByTitle('/work/hapi')).toBeInTheDocument()
++    })
++})
++
+ describe('SessionList search toggle', () => {
+     it('expands on icon click and keeps filtering after collapsing on blur', () => {
+         const sessions = [
+diff --git a/web/src/components/SessionList.tsx b/web/src/components/SessionList.tsx
+index b3ea499c9..e3952b57c 100644
+--- a/web/src/components/SessionList.tsx
++++ b/web/src/components/SessionList.tsx
+@@ -15,12 +15,16 @@ import { useLongPress } from '@/hooks/useLongPress'
+ import { usePlatform } from '@/hooks/usePlatform'
+ import { useSessionActions } from '@/hooks/mutations/useSessionActions'
+ import { SessionActionMenu } from '@/components/SessionActionMenu'
++import { ProjectGroupActionMenu } from '@/components/ProjectGroupActionMenu'
+ import { SessionExportDialog } from '@/components/SessionExportDialog'
+ import { RenameSessionDialog } from '@/components/RenameSessionDialog'
+ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+ import { ArchiveSessionDialog } from '@/components/ArchiveSessionDialog'
+ import { DeleteSessionDialog } from '@/components/DeleteSessionDialog'
+ import { CopyIcon, CheckIcon, MarkAllReadIcon } from '@/components/icons'
++import { safeCopyToClipboard } from '@/lib/clipboard'
++import { useProjectGroupActions } from '@/hooks/mutations/useProjectGroupActions'
++import { getProjectGroupActionAvailability } from '@/lib/projectGroupActions'
+ 
+ function PinnedSectionIcon(props: { className?: string }) {
+     return (
+@@ -668,6 +672,147 @@ function CopyPathButton({ path, className }: { path: string; className?: string
+ }
+ 
+ 
++const stopRowPressPropagation = {
++    onMouseDown: (e: React.MouseEvent) => e.stopPropagation(),
++    onMouseUp: (e: React.MouseEvent) => e.stopPropagation(),
++    onTouchStart: (e: React.TouchEvent) => e.stopPropagation(),
++    onTouchEnd: (e: React.TouchEvent) => e.stopPropagation(),
++}
++
++function ProjectGroupHeader(props: {
++    group: SessionGroup
++    actionSessions: SessionSummary[]
++    groupTitle: string
++    isCollapsed: boolean
++    onToggle: () => void
++    collapsible?: boolean
++    onNewSessionInDirectory?: (args: { machineId: string | null; directory: string }) => void
++    api: ApiClient | null
++}) {
++    const { t } = useTranslation()
++    const { haptic } = usePlatform()
++    const { group, actionSessions, groupTitle, isCollapsed, onToggle, collapsible = true, onNewSessionInDirectory, api } = props
++    const [menuOpen, setMenuOpen] = useState(false)
++    const [menuAnchorPoint, setMenuAnchorPoint] = useState({ x: 0, y: 0 })
++    const [archiveAllOpen, setArchiveAllOpen] = useState(false)
++    const [deleteOpen, setDeleteOpen] = useState(false)
++    const { archiveAll, deleteGroup, isPending } = useProjectGroupActions(api, actionSessions)
++    const { canArchiveAll, canDelete } = getProjectGroupActionAvailability(actionSessions)
++    const canStartInGroupDirectory = group.directory !== 'Other'
++    const longPressHandlers = useLongPress({
++        onLongPress: (point) => {
++            haptic.impact('medium')
++            setMenuAnchorPoint(point)
++            setMenuOpen(true)
++        },
++        onClick: () => {
++            if (collapsible && !menuOpen) onToggle()
++        },
++        threshold: 500
++    })
++
++    const handleCopyPath = async () => {
++        try {
++            await safeCopyToClipboard(group.directory)
++            haptic.notification('success')
++        } catch {
++            haptic.notification('error')
++        }
++    }
++
++    return (
++        <>
++            <div
++                {...longPressHandlers}
++                data-session-scroll-anchor={!collapsible || undefined}
++                tabIndex={0}
++                aria-haspopup="menu"
++                aria-expanded={menuOpen}
++                onKeyDown={(event) => {
++                    if (event.target !== event.currentTarget) return
++                    if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
++                        event.preventDefault()
++                        const rect = event.currentTarget.getBoundingClientRect()
++                        setMenuAnchorPoint({ x: rect.left + rect.width / 2, y: rect.bottom })
++                        setMenuOpen(true)
++                        return
++                    }
++                    longPressHandlers.onKeyDown(event)
++                }}
++                className="group/project sticky top-0 z-10 flex items-center gap-2 bg-[var(--app-bg)] py-1.5 pl-2 pr-2 text-left rounded-lg transition-colors hover:bg-[var(--app-secondary-bg)] cursor-pointer min-w-0 w-full select-none"
++                style={{ WebkitTouchCallout: 'none' }}
++                title={group.directory}
++            >
++                {collapsible ? <ChevronIcon className="h-3.5 w-3.5 text-[var(--app-hint)] shrink-0" collapsed={isCollapsed} /> : null}
++                <span className="font-medium text-sm truncate flex-1">
++                    {groupTitle}
++                </span>
++                <span {...stopRowPressPropagation}>
++                    <CopyPathButton path={group.directory} className="opacity-0 group-hover/project:opacity-100 transition-opacity duration-150" />
++                </span>
++                {onNewSessionInDirectory && canStartInGroupDirectory ? (
++                    <button
++                        type="button"
++                        onClick={(event) => {
++                            event.stopPropagation()
++                            onNewSessionInDirectory({
++                                machineId: group.machineId,
++                                directory: group.directory
++                            })
++                        }}
++                        {...stopRowPressPropagation}
++                        className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[var(--app-hint)] opacity-70 transition-colors hover:bg-[var(--app-secondary-bg)] hover:text-[var(--app-link)] hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]"
++                        title={t('sessions.group.new')}
++                        aria-label={t('sessions.group.new')}
++                    >
++                        <PlusIcon className="h-3.5 w-3.5" />
++                    </button>
++                ) : null}
++                {collapsible ? (
++                    <span className="text-[11px] tabular-nums text-[var(--app-hint)] shrink-0">
++                        ({group.sessions.length})
++                    </span>
++                ) : null}
++            </div>
++
++            <ProjectGroupActionMenu
++                isOpen={menuOpen}
++                onClose={() => setMenuOpen(false)}
++                onCopyPath={handleCopyPath}
++                onArchiveAll={() => setArchiveAllOpen(true)}
++                canArchiveAll={canArchiveAll}
++                onDelete={() => setDeleteOpen(true)}
++                canDelete={canDelete}
++                anchorPoint={menuAnchorPoint}
++            />
++
++            <ConfirmDialog
++                isOpen={archiveAllOpen}
++                onClose={() => setArchiveAllOpen(false)}
++                title={t('dialog.archiveAll.title')}
++                description={t('dialog.archiveAll.description', { name: group.displayName })}
++                confirmLabel={t('dialog.archiveAll.confirm')}
++                confirmingLabel={t('dialog.archiveAll.confirming')}
++                onConfirm={archiveAll}
++                isPending={isPending}
++                destructive
++            />
++
++            <ConfirmDialog
++                isOpen={deleteOpen}
++                onClose={() => setDeleteOpen(false)}
++                title={t('dialog.deleteGroup.title')}
++                description={t('dialog.deleteGroup.description', { name: group.displayName, count: actionSessions.length })}
++                confirmLabel={t('dialog.deleteGroup.confirm')}
++                confirmingLabel={t('dialog.deleteGroup.confirming')}
++                onConfirm={deleteGroup}
++                isPending={isPending}
++                destructive
++            />
++        </>
++    )
++}
++
+ function SearchIcon(props: { className?: string }) {
+     return (
+         <svg
+@@ -1745,6 +1890,16 @@ export function SessionList(props: {
+         },
+         [machineFilteredSessions, pinInProgressSessions, searchScoreIndex, hasTextQuery]
+     )
++    // Destructive group actions must scope to the FULL project group, not the
++    // rendered subset: `groups` above drops global-pinned/in-progress rows and
++    // filters by search/time/unread, so a hidden running session could keep a
++    // visible archived row's "Delete Group" misleadingly enabled (#881).
++    const actionGroupsByKey = useMemo(
++        () => new Map(
++            groupSessionsByDirectory(props.sessions).map((group) => [group.key, group.sessions] as const)
++        ),
++        [props.sessions]
++    )
+     // Directory groups whose rows all floated to the pinned sections still
+     // render an action-only header so copy-path / new-session-in-directory
+     // stay available (no rows to group, but the project itself is live).
+@@ -1956,34 +2111,17 @@ export function SessionList(props: {
+             ? `${group.displayName} · ${resolveMachineLabel(group.machineId)}`
+             : group.displayName
+         return (
+-            <div key={group.key} data-session-scroll-anchor>
+-                <div
+-                    className="group/project sticky top-0 z-10 flex items-center gap-2 bg-[var(--app-bg)] py-1.5 pl-2 pr-2 text-left rounded-lg transition-colors hover:bg-[var(--app-secondary-bg)] min-w-0 w-full select-none"
+-                    title={group.directory}
+-                >
+-                    <span className="font-medium text-sm truncate flex-1">
+-                        {groupTitle}
+-                    </span>
+-                    <CopyPathButton path={group.directory} className="opacity-0 group-hover/project:opacity-100 transition-opacity duration-150" />
+-                    {onNewSessionInDirectory && group.directory !== 'Other' ? (
+-                        <button
+-                            type="button"
+-                            onClick={(event) => {
+-                                event.stopPropagation()
+-                                onNewSessionInDirectory({
+-                                    machineId: group.machineId,
+-                                    directory: group.directory
+-                                })
+-                            }}
+-                            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[var(--app-hint)] opacity-70 transition-colors hover:bg-[var(--app-secondary-bg)] hover:text-[var(--app-link)] hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]"
+-                            title={t('sessions.group.new')}
+-                            aria-label={t('sessions.group.new')}
+-                        >
+-                            <PlusIcon className="h-3.5 w-3.5" />
+-                        </button>
+-                    ) : null}
+-                </div>
+-            </div>
++            <ProjectGroupHeader
++                key={group.key}
++                group={group}
++                actionSessions={actionGroupsByKey.get(group.key) ?? []}
++                groupTitle={groupTitle}
++                isCollapsed={false}
++                onToggle={() => {}}
++                collapsible={false}
++                onNewSessionInDirectory={onNewSessionInDirectory}
++                api={api}
++            />
+         )
+     }
+ 
+@@ -2003,7 +2141,6 @@ export function SessionList(props: {
+         const collapseCount = visibleGroupSessions.length - previousGroupSessions.length
+         const canShowFewerSessions = previousLimit < currentLimit && collapseCount > 0
+         const expandCount = Math.min(sessionPreviewLimit, hiddenSessionCount)
+-        const canStartInGroupDirectory = group.directory !== 'Other'
+         // With multiple machines in the unfiltered view, disambiguate
+         // same-named directories by suffixing the machine label.
+         const groupTitle = showMachineFilterBar && activeMachineFilter === null
+@@ -2011,37 +2148,15 @@ export function SessionList(props: {
+             : group.displayName
+         return (
+             <div key={group.key} data-session-scroll-anchor>
+-                <div
+-                    className="group/project sticky top-0 z-10 flex items-center gap-2 bg-[var(--app-bg)] py-1.5 pl-2 pr-2 text-left rounded-lg transition-colors hover:bg-[var(--app-secondary-bg)] cursor-pointer min-w-0 w-full select-none"
+-                    onClick={() => toggleGroup(group.key, isCollapsed)}
+-                    title={group.directory}
+-                >
+-                    <ChevronIcon className="h-3.5 w-3.5 text-[var(--app-hint)] shrink-0" collapsed={isCollapsed} />
+-                    <span className="font-medium text-sm truncate flex-1">
+-                        {groupTitle}
+-                    </span>
+-                    <CopyPathButton path={group.directory} className="opacity-0 group-hover/project:opacity-100 transition-opacity duration-150" />
+-                    {onNewSessionInDirectory && canStartInGroupDirectory ? (
+-                        <button
+-                            type="button"
+-                            onClick={(event) => {
+-                                event.stopPropagation()
+-                                onNewSessionInDirectory({
+-                                    machineId: group.machineId,
+-                                    directory: group.directory
+-                                })
+-                            }}
+-                            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[var(--app-hint)] opacity-70 transition-colors hover:bg-[var(--app-secondary-bg)] hover:text-[var(--app-link)] hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]"
+-                            title={t('sessions.group.new')}
+-                            aria-label={t('sessions.group.new')}
+-                        >
+-                            <PlusIcon className="h-3.5 w-3.5" />
+-                        </button>
+-                    ) : null}
+-                    <span className="text-[11px] tabular-nums text-[var(--app-hint)] shrink-0">
+-                        ({group.sessions.length})
+-                    </span>
+-                </div>
++                <ProjectGroupHeader
++                    group={group}
++                    actionSessions={actionGroupsByKey.get(group.key) ?? []}
++                    groupTitle={groupTitle}
++                    isCollapsed={isCollapsed}
++                    onToggle={() => toggleGroup(group.key, isCollapsed)}
++                    onNewSessionInDirectory={onNewSessionInDirectory}
++                    api={api}
++                />
+ 
+                 {/* Sessions */}
+                 <div className="collapsible-panel" data-open={!isCollapsed || undefined}>
+diff --git a/web/src/hooks/mutations/useProjectGroupActions.test.tsx b/web/src/hooks/mutations/useProjectGroupActions.test.tsx
+new file mode 100644
+index 000000000..3ddf9bc54
+--- /dev/null
++++ b/web/src/hooks/mutations/useProjectGroupActions.test.tsx
+@@ -0,0 +1,110 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++import { act, renderHook } from '@testing-library/react'
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
++import type { ReactNode } from 'react'
++import { useProjectGroupActions } from './useProjectGroupActions'
++import type { ApiClient } from '@/api/client'
++import type { SessionSummary } from '@hapi/protocol/types'
++
++function createWrapper() {
++    const queryClient = new QueryClient({
++        defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
++    })
++    return function Wrapper({ children }: { children: ReactNode }) {
++        return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
++    }
++}
++
++function makeSession(overrides: Partial<SessionSummary>): SessionSummary {
++    return {
++        id: 'session-1',
++        active: false,
++        thinking: false,
++        activeAt: 0,
++        updatedAt: 0,
++        metadata: null,
++        metadataVersion: 1,
++        agentStateVersion: 1,
++        todosUpdatedAt: 0,
++        todoProgress: null,
++        pendingRequestsCount: 0,
++        pendingRequestKinds: [],
++        pendingRequests: [],
++        backgroundTaskCount: 0,
++        futureScheduledMessageCount: 0,
++        nextScheduledAt: null,
++        model: null,
++        effort: null,
++        ...overrides,
++    }
++}
++
++const runningSession = (id: string) => makeSession({
++    id,
++    active: true,
++    metadata: { path: '/p', lifecycleState: 'running' }
++})
++const archivedSession = (id: string) => makeSession({
++    id,
++    active: false,
++    metadata: { path: '/p', lifecycleState: 'archived' }
++})
++
++beforeEach(() => {
++    vi.clearAllMocks()
++})
++
++afterEach(() => {
++    vi.restoreAllMocks()
++})
++
++describe('useProjectGroupActions', () => {
++    it('archives only archivable sessions and stops at the first rejection', async () => {
++        const archive = vi.fn(async () => {})
++        const api = { archiveSession: archive } as unknown as ApiClient
++        const sessions = [runningSession('a'), archivedSession('b'), runningSession('c')]
++
++        const { result } = renderHook(
++            () => useProjectGroupActions(api, sessions),
++            { wrapper: createWrapper() }
++        )
++
++        await act(async () => {
++            await result.current.archiveAll()
++        })
++
++        expect(archive).toHaveBeenCalledTimes(2)
++        expect(archive).toHaveBeenNthCalledWith(1, 'a')
++        expect(archive).toHaveBeenNthCalledWith(2, 'c')
++    })
++
++    it('deletes the group through the atomic archived bulk route', async () => {
++        const deleteFn = vi.fn(async () => {})
++        const api = { deleteArchivedSessions: deleteFn } as unknown as ApiClient
++        const sessions = [archivedSession('a'), archivedSession('b')]
++
++        const { result } = renderHook(
++            () => useProjectGroupActions(api, sessions),
++            { wrapper: createWrapper() }
++        )
++
++        await act(async () => {
++            await result.current.deleteGroup()
++        })
++
++        expect(deleteFn).toHaveBeenCalledWith({
++            sessionIds: ['a', 'b'],
++            requireAllArchived: true,
++        })
++    })
++
++    it('throws when api is missing', async () => {
++        const { result } = renderHook(
++            () => useProjectGroupActions(null, []),
++            { wrapper: createWrapper() }
++        )
++
++        await expect(result.current.archiveAll()).rejects.toThrow('Session unavailable')
++        await expect(result.current.deleteGroup()).rejects.toThrow('Session unavailable')
++    })
++})
+diff --git a/web/src/hooks/mutations/useProjectGroupActions.ts b/web/src/hooks/mutations/useProjectGroupActions.ts
+new file mode 100644
+index 000000000..c96955796
+--- /dev/null
++++ b/web/src/hooks/mutations/useProjectGroupActions.ts
+@@ -0,0 +1,62 @@
++import { useMutation, useQueryClient } from '@tanstack/react-query'
++import type { ApiClient } from '@/api/client'
++import type { SessionSummary } from '@hapi/protocol/types'
++import { queryKeys } from '@/lib/query-keys'
++import { clearMessageWindow } from '@/lib/message-window-store'
++import { isSessionArchivable } from '@/lib/projectGroupActions'
++
++/**
++ * Bulk actions over every session in a sidebar project group (tiann/hapi#881).
++ *
++ * Group deletion uses the server-side all-or-nothing archived bulk route so a
++ * race cannot partially delete a confirmed group.
++ */
++export function useProjectGroupActions(
++    api: ApiClient | null,
++    sessions: SessionSummary[]
++): {
++    archiveAll: () => Promise<void>
++    deleteGroup: () => Promise<void>
++    isPending: boolean
++} {
++    const queryClient = useQueryClient()
++
++    const archiveMutation = useMutation({
++        mutationFn: async () => {
++            if (!api) {
++                throw new Error('Session unavailable')
++            }
++            for (const session of sessions) {
++                if (isSessionArchivable(session)) {
++                    await api.archiveSession(session.id)
++                }
++            }
++        },
++        onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.sessions }),
++    })
++
++    const deleteMutation = useMutation({
++        mutationFn: async () => {
++            if (!api) {
++                throw new Error('Session unavailable')
++            }
++            await api.deleteArchivedSessions({
++                sessionIds: sessions.map(({ id }) => id),
++                requireAllArchived: true,
++            })
++        },
++        onSuccess: async () => {
++            for (const session of sessions) {
++                queryClient.removeQueries({ queryKey: queryKeys.session(session.id) })
++                clearMessageWindow(session.id)
++            }
++            await queryClient.invalidateQueries({ queryKey: queryKeys.sessions })
++        },
++    })
++
++    return {
++        archiveAll: archiveMutation.mutateAsync,
++        deleteGroup: deleteMutation.mutateAsync,
++        isPending: archiveMutation.isPending || deleteMutation.isPending,
++    }
++}
+diff --git a/web/src/hooks/useAnchoredMenu.ts b/web/src/hooks/useAnchoredMenu.ts
+index 622ec5279..c4f49afa7 100644
+--- a/web/src/hooks/useAnchoredMenu.ts
++++ b/web/src/hooks/useAnchoredMenu.ts
+@@ -114,7 +114,7 @@ export function useAnchoredMenu(options: {
+         if (!isOpen) return
+ 
+         const frame = window.requestAnimationFrame(() => {
+-            const firstItem = menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')
++            const firstItem = menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]:not([disabled])')
+             firstItem?.focus()
+         })
+ 
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index 6d1a86e45..12b395bbc 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -98,6 +98,11 @@ export default {
+   'sessions.runningSection': 'In progress',
+   'sessions.activeSection': 'Active sessions',
+   'sessions.group.new': 'New session in this directory',
++  'sessions.group.actions': 'Group actions',
++  'sessions.group.copyPath': 'Copy Path',
++  'sessions.group.archiveAll': 'Archive All Sessions',
++  'sessions.group.delete': 'Delete Group',
++  'sessions.group.deleteHint': 'Archive every session first to delete the group',
+   'sessions.machineFilter.label': 'Filter sessions by machine',
+   'sessions.machineFilter.all': 'All',
+   'codexSync.tooltip': 'Import sessions from Codex into Hapi',
+@@ -314,6 +319,14 @@ export default {
+   'dialog.delete.confirming': 'Deleting…',
+   'dialog.delete.waitingForArchive': 'Waiting for archive to finish…',
+   'dialog.delete.waitingForArchiveDescription': 'Archiving is still in progress. Wait for it to finish, then confirm deletion.',
++  'dialog.archiveAll.title': 'Archive All Sessions',
++  'dialog.archiveAll.description': 'Archive all active sessions in "{name}"? This will disconnect them.',
++  'dialog.archiveAll.confirm': 'Archive All',
++  'dialog.archiveAll.confirming': 'Archiving…',
++  'dialog.deleteGroup.title': 'Delete Group',
++  'dialog.deleteGroup.description': 'Delete "{name}" and all {count} sessions? This action cannot be undone.',
++  'dialog.deleteGroup.confirm': 'Delete Group',
++  'dialog.deleteGroup.confirming': 'Deleting…',
+   'dialog.error.default': 'Operation failed. Please try again.',
+ 
+   // Session export
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index ba31d002e..05671bf86 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -98,6 +98,11 @@ export default {
+   'sessions.runningSection': '进行中',
+   'sessions.activeSection': '活跃会话',
+   'sessions.group.new': '在此目录新建会话',
++  'sessions.group.actions': '分组操作',
++  'sessions.group.copyPath': '复制路径',
++  'sessions.group.archiveAll': '归档所有会话',
++  'sessions.group.delete': '删除分组',
++  'sessions.group.deleteHint': '请先归档所有会话，才能删除分组',
+   'sessions.machineFilter.label': '按机器筛选会话',
+   'sessions.machineFilter.all': '全部',
+   'codexSync.tooltip': '从 Codex 导入会话到 Hapi',
+@@ -317,6 +322,14 @@ export default {
+   'dialog.delete.confirming': '删除中…',
+   'dialog.delete.waitingForArchive': '等待归档完成…',
+   'dialog.delete.waitingForArchiveDescription': '归档尚未完成，暂时无法删除。请等待归档完成后再确认删除。',
++  'dialog.archiveAll.title': '归档所有会话',
++  'dialog.archiveAll.description': '归档 "{name}" 中所有活动会话吗？这将断开这些会话。',
++  'dialog.archiveAll.confirm': '全部归档',
++  'dialog.archiveAll.confirming': '归档中…',
++  'dialog.deleteGroup.title': '删除分组',
++  'dialog.deleteGroup.description': '删除 "{name}" 及其全部 {count} 个会话吗？此操作无法撤销。',
++  'dialog.deleteGroup.confirm': '删除分组',
++  'dialog.deleteGroup.confirming': '删除中…',
+ 
+   'dialog.error.default': '操作失败，请重试。',
+ 
+diff --git a/web/src/lib/projectGroupActions.test.ts b/web/src/lib/projectGroupActions.test.ts
+new file mode 100644
+index 000000000..89ce258bd
+--- /dev/null
++++ b/web/src/lib/projectGroupActions.test.ts
+@@ -0,0 +1,128 @@
++import { describe, expect, it } from 'vitest'
++import type { SessionSummary } from '@hapi/protocol/types'
++import {
++    getProjectGroupActionAvailability,
++    isSessionArchivable,
++    isSessionArchived,
++} from './projectGroupActions'
++
++function makeSession(overrides: Partial<SessionSummary>): SessionSummary {
++    return {
++        id: 'session-1',
++        active: false,
++        thinking: false,
++        activeAt: 0,
++        updatedAt: 0,
++        metadata: null,
++        metadataVersion: 1,
++        agentStateVersion: 1,
++        todosUpdatedAt: 0,
++        todoProgress: null,
++        pendingRequestsCount: 0,
++        pendingRequestKinds: [],
++        pendingRequests: [],
++        backgroundTaskCount: 0,
++        futureScheduledMessageCount: 0,
++        nextScheduledAt: null,
++        model: null,
++        effort: null,
++        ...overrides,
++    }
++}
++
++function archived(id: string): SessionSummary {
++    return makeSession({
++        id,
++        active: false,
++        metadata: { path: '/p', lifecycleState: 'archived' }
++    })
++}
++
++function running(id: string): SessionSummary {
++    return makeSession({
++        id,
++        active: true,
++        metadata: { path: '/p', lifecycleState: 'running' }
++    })
++}
++
++/** Inactive but never formally archived (imported/completed stub). */
++function completedStub(id: string): SessionSummary {
++    return makeSession({
++        id,
++        active: false,
++        metadata: { path: '/p' }
++    })
++}
++
++describe('isSessionArchived', () => {
++    it('only treats explicit lifecycleState=archived as archived', () => {
++        expect(isSessionArchived(archived('a'))).toBe(true)
++        expect(isSessionArchived(running('b'))).toBe(false)
++        expect(isSessionArchived(completedStub('c'))).toBe(false)
++        expect(isSessionArchived(makeSession({
++            id: 'split-brain',
++            active: true,
++            metadata: { path: '/p', lifecycleState: 'archived' }
++        }))).toBe(false)
++        expect(isSessionArchived(makeSession({ id: 'd', active: false }))).toBe(false)
++    })
++})
++
++describe('isSessionArchivable', () => {
++    it('accepts live sessions and split-brain rows still marked running', () => {
++        const splitBrain = makeSession({
++            id: 'sb',
++            active: false,
++            metadata: { path: '/p', lifecycleState: 'running' }
++        })
++        expect(isSessionArchivable(running('a'))).toBe(true)
++        expect(isSessionArchivable(splitBrain)).toBe(true)
++        expect(isSessionArchivable(archived('c'))).toBe(false)
++        expect(isSessionArchivable(completedStub('d'))).toBe(false)
++    })
++})
++
++describe('getProjectGroupActionAvailability', () => {
++    it('allows archive-all when any session is archivable', () => {
++        const { canArchiveAll, canDelete } = getProjectGroupActionAvailability([
++            archived('a'),
++            running('b')
++        ])
++        expect(canArchiveAll).toBe(true)
++        // Not all archived → delete blocked.
++        expect(canDelete).toBe(false)
++    })
++
++    it('blocks delete for inactive sessions that were not archived', () => {
++        const { canArchiveAll, canDelete } = getProjectGroupActionAvailability([
++            archived('a'),
++            completedStub('b')
++        ])
++        expect(canArchiveAll).toBe(false)
++        expect(canDelete).toBe(false)
++    })
++
++    it('allows delete only when every session is archived', () => {
++        const { canArchiveAll, canDelete } = getProjectGroupActionAvailability([
++            archived('a'),
++            archived('b')
++        ])
++        expect(canArchiveAll).toBe(false)
++        expect(canDelete).toBe(true)
++    })
++
++    it('blocks delete when an active session is present', () => {
++        const { canDelete } = getProjectGroupActionAvailability([
++            archived('a'),
++            running('b')
++        ])
++        expect(canDelete).toBe(false)
++    })
++
++    it('blocks delete for an empty group', () => {
++        const { canArchiveAll, canDelete } = getProjectGroupActionAvailability([])
++        expect(canArchiveAll).toBe(false)
++        expect(canDelete).toBe(false)
++    })
++})
+diff --git a/web/src/lib/projectGroupActions.ts b/web/src/lib/projectGroupActions.ts
+new file mode 100644
+index 000000000..02a23cd06
+--- /dev/null
++++ b/web/src/lib/projectGroupActions.ts
+@@ -0,0 +1,39 @@
++import type { SessionSummary } from '@hapi/protocol/types'
++
++/**
++ * Project-group bulk-action guards (tiann/hapi#881).
++ *
++ * A session's lifecycle is tracked by `metadata.lifecycleState`
++ * ('running' | 'archived' | undefined) alongside the live `active` flag.
++ */
++
++/** A session is "archived" only when its lifecycle metadata says so —
++ *  `active === false` alone is not enough (imported/completed stubs are
++ *  inactive but never formally archived). */
++export function isSessionArchived(session: SessionSummary): boolean {
++    return !session.active && session.metadata?.lifecycleState === 'archived'
++}
++
++/** A session can be archived when it is live, or split-brain (inactive cache
++ *  row whose lifecycle metadata still reads 'running'). Matches the archive
++ *  route's accept condition in hub/src/web/routes/sessions.ts. */
++export function isSessionArchivable(session: SessionSummary): boolean {
++    return session.active || session.metadata?.lifecycleState === 'running'
++}
++
++export type ProjectGroupActionAvailability = {
++    /** At least one session can be archived. */
++    canArchiveAll: boolean
++    /** Every session is already archived — the precondition for deleting the
++     *  whole group (deliberate two-step: archive everything, then delete). */
++    canDelete: boolean
++}
++
++export function getProjectGroupActionAvailability(
++    sessions: SessionSummary[]
++): ProjectGroupActionAvailability {
++    return {
++        canArchiveAll: sessions.some(isSessionArchivable),
++        canDelete: sessions.length > 0 && sessions.every(isSessionArchived)
++    }
++}

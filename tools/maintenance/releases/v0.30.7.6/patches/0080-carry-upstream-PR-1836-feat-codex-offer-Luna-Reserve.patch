@@ -1,0 +1,1102 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Fri, 23 Oct 2026 18:49:16 +0000
+Subject: [PATCH 80/95] carry(upstream): PR #1836 feat(codex): offer Luna
+ Reserve as a manual model choice
+
+---
+ .github/workflows/test.yml                    |   2 +-
+ cli/README.md                                 |  17 +++
+ cli/src/codex/shared/lunaReserve.test.ts      |  35 ++++++
+ cli/src/codex/shared/lunaReserve.ts           |  68 ++++++++++
+ cli/src/codex/shared/projection.test.ts       |  19 +++
+ cli/src/codex/shared/projection.ts            |  10 +-
+ cli/src/codex/shared/root.test.ts             | 119 ++++++++++++++++++
+ cli/src/codex/shared/root.ts                  |  82 ++++++++++--
+ cli/src/modules/common/codexModels.ts         |   2 +-
+ e2e/luna-reserve.spec.ts                      |  56 +++++++++
+ .../sync/permissionModePersistence.test.ts    |   8 ++
+ hub/src/sync/syncEngine.ts                    |   1 +
+ shared/src/apiTypes.ts                        |  14 +++
+ web/e2e-fixtures/luna-reserve-fixture.html    |   3 +
+ web/e2e-fixtures/luna-reserve-fixture.tsx     |  42 +++++++
+ .../AssistantChat/CodexUsage.test.tsx         |  27 ++++
+ .../components/AssistantChat/CodexUsage.tsx   |  42 +++++++
+ .../AssistantChat/HappyComposer.tsx           |   8 +-
+ .../components/AssistantChat/StatusBar.tsx    |   4 +
+ .../components/AssistantChat/modelOptions.ts  |   2 +-
+ web/src/components/SessionChat.test.ts        |   7 ++
+ web/src/components/SessionChat.tsx            |  10 +-
+ web/src/hooks/queries/useCodexModels.test.tsx |  19 +++
+ web/src/hooks/queries/useCodexModels.ts       |   5 +
+ web/src/hooks/useSSE.ts                       |   2 +
+ web/src/lib/locales/en.ts                     |  11 ++
+ web/src/lib/locales/zh-CN.ts                  |  11 ++
+ web/src/lib/sessionModelLabel.ts              |   1 +
+ 28 files changed, 609 insertions(+), 18 deletions(-)
+ create mode 100644 cli/src/codex/shared/lunaReserve.test.ts
+ create mode 100644 cli/src/codex/shared/lunaReserve.ts
+ create mode 100644 e2e/luna-reserve.spec.ts
+ create mode 100644 web/e2e-fixtures/luna-reserve-fixture.html
+ create mode 100644 web/e2e-fixtures/luna-reserve-fixture.tsx
+ create mode 100644 web/src/components/AssistantChat/CodexUsage.test.tsx
+ create mode 100644 web/src/components/AssistantChat/CodexUsage.tsx
+
+diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
+index 36bc237cc..e5ae5a48f 100644
+--- a/.github/workflows/test.yml
++++ b/.github/workflows/test.yml
+@@ -18,7 +18,7 @@ jobs:
+             # Required by cli/src/utils/windowsProcessTree.pwsh.test.ts — image
+             # inspect alone does not pull; silent skip was fake B1 coverage (#1911).
+             - run: docker pull mcr.microsoft.com/powershell:latest
+-            - run: bun run test:e2e -- terminal-wrap-fidelity.spec.ts composer-copy.spec.ts session-list-scroll.spec.ts cold-initial-tail.spec.ts scrollbar-auto-hide.spec.ts abort-retry.spec.ts load-earlier-running-session.spec.ts
++            - run: bun run test:e2e -- terminal-wrap-fidelity.spec.ts composer-copy.spec.ts session-list-scroll.spec.ts cold-initial-tail.spec.ts scrollbar-auto-hide.spec.ts abort-retry.spec.ts load-earlier-running-session.spec.ts luna-reserve.spec.ts
+             - run: bun run test
+ 
+     # Serial runner-integration suite: starts real detached runner/session
+diff --git a/cli/README.md b/cli/README.md
+index f962ef4dd..76b77156f 100644
+--- a/cli/README.md
++++ b/cli/README.md
+@@ -86,6 +86,23 @@ terminal attached later does not stop them. **End session** archives the
+ selected conversation. See [Codex usage and limits](../docs/guide/codex-shared-sessions.md)
+ for details.
+ 
++### Manually select Luna Reserve
++
++In a shared Codex session, the existing Web model menu offers **☾ Luna Reserve**
++only when the current backend authorizes it after ordinary usage is exhausted.
++Selecting it changes that thread to `gpt-reserve`; the native settings notification
++confirms the change. HAPI never automatically enters or leaves Reserve and never
++resubmits a failed turn when switching. Reasoning remains adjustable, and the
++Usage popover shows ordinary and active Reserve allowances separately.
++
++The option is session-scoped, absent from New Session defaults, and unavailable
++on servers without the required usage protocol or accounts without entitlement.
++Usage is read on discovery/menu opening, reconnect, and turn completion/errors;
++there is no idle quota timer or usage-driven session activity update. Open the
++model menu to refresh availability, then select a regular model to leave Reserve.
++An attached official TUI retains its own native behavior; HAPI reflects accepted
++settings from all frontends.
++
+ ### Answer local Claude prompts from HAPI
+ 
+ In a local Claude session started by `hapi claude`, main-session `AskUserQuestion`
+diff --git a/cli/src/codex/shared/lunaReserve.test.ts b/cli/src/codex/shared/lunaReserve.test.ts
+new file mode 100644
+index 000000000..9a83b8837
+--- /dev/null
++++ b/cli/src/codex/shared/lunaReserve.test.ts
+@@ -0,0 +1,35 @@
++import { describe, expect, it, vi } from 'vitest';
++import { LunaReserve } from './lunaReserve';
++import type { CodexAppServerClient } from '../codexAppServerClient';
++
++describe('Reserve authorization and usage', () => {
++    it('does not infer eligibility from buckets, percentages, timestamps, or unrelated banners', async () => {
++        let response: unknown = { rateLimits: { limitId: 'codex' } };
++        const request = vi.fn(async () => response);
++        const reserve = new LunaReserve({ request } as unknown as CodexAppServerClient);
++        expect(await reserve.usage('astra')).toBeNull();
++        expect(request.mock.calls).toHaveLength(1);
++        response = { accountId: 'a', ordinaryUsageAllowed: false,
++            rateLimits: { limitId: 'codex', primary: { usedPercent: 100, resetsAt: 0 } },
++            rateLimitsByLimitId: { base_model_inference: { limitName: 'gpt-reserve', secondary: { usedPercent: 'bad' } } },
++            rateLimitUpsell: { banner_type: 'luna_reserve', blocked_model_slug: 'other' }
++        };
++        expect((await reserve.usage('astra'))?.reserveAvailable).toBe(false);
++        expect((await reserve.usage('gpt-reserve'))?.reserve?.secondary?.remainingPercent).toBeNull();
++        response = { accountId: 'a', ordinaryUsageAllowed: null, rateLimits: {}, rateLimitUpsell: { banner_type: 'luna_reserve' } };
++        expect((await reserve.usage('astra'))?.reserveAvailable).toBe(false);
++        response = { ordinaryUsageAllowed: false, rateLimits: {}, rateLimitUpsell: { banner_type: 'luna_reserve' } };
++        expect(await reserve.usage('astra')).toBeNull();
++    });
++
++    it('coalesces simultaneous reads and fails closed after a read error', async () => {
++        const response = { accountId: 'a', ordinaryUsageAllowed: false, rateLimits: {}, rateLimitUpsell: { banner_type: 'luna_reserve' } };
++        const request = vi.fn(async () => response);
++        const reserve = new LunaReserve({ request } as unknown as CodexAppServerClient);
++        const values = await Promise.all([reserve.usage('a'), reserve.usage('a')]);
++        expect(values.every(value => value?.reserveAvailable)).toBe(true);
++        expect(request).toHaveBeenCalledTimes(2);
++        request.mockRejectedValueOnce(new Error('offline'));
++        expect(await reserve.usage('a')).toBeNull();
++    });
++});
+diff --git a/cli/src/codex/shared/lunaReserve.ts b/cli/src/codex/shared/lunaReserve.ts
+new file mode 100644
+index 000000000..047386016
+--- /dev/null
++++ b/cli/src/codex/shared/lunaReserve.ts
+@@ -0,0 +1,68 @@
++import { z } from 'zod';
++import type { CodexAccountUsage, CodexUsageWindow } from '@hapi/protocol/apiTypes';
++import type { CodexAppServerClient } from '../codexAppServerClient';
++
++export const LUNA_RESERVE_MODEL = 'gpt-reserve';
++const WindowSchema = z.object({
++    usedPercent: z.unknown().optional(), windowDurationMins: z.unknown().optional(), resetsAt: z.unknown().optional()
++});
++const BucketSchema = z.object({
++    limitId: z.string().nullish(), limitName: z.string().nullish(),
++    primary: WindowSchema.nullish(), secondary: WindowSchema.nullish()
++});
++const UsageSchema = z.object({
++    accountId: z.string().nullish(), ordinaryUsageAllowed: z.boolean().nullish(),
++    rateLimits: BucketSchema, rateLimitsByLimitId: z.record(z.string(), BucketSchema).nullish(),
++    rateLimitUpsell: z.unknown().optional()
++});
++const BannerSchema = z.object({
++    banner_type: z.literal('luna_reserve'), blocked_model_slug: z.string().min(1).nullish()
++});
++
++function window(value: z.infer<typeof WindowSchema> | null | undefined): CodexUsageWindow | null {
++    if (!value) return null;
++    const finite = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n);
++    return {
++        remainingPercent: finite(value.usedPercent) && value.usedPercent >= 0 && value.usedPercent <= 100 ? 100 - value.usedPercent : null,
++        windowDurationMins: finite(value.windowDurationMins) && value.windowDurationMins > 0 ? value.windowDurationMins : null,
++        resetsAt: finite(value.resetsAt) && value.resetsAt >= 0 && value.resetsAt <= 8.64e12 ? value.resetsAt : null
++    };
++}
++function bucket(value: z.infer<typeof BucketSchema> | null | undefined): CodexAccountUsage['ordinary'] {
++    return { primary: window(value?.primary), secondary: window(value?.secondary) };
++}
++
++/** Reads authorize an explicit model selection only. No timers, settings writes, or turn replay. */
++export class LunaReserve {
++    private pending?: Promise<z.infer<typeof UsageSchema> | null>;
++    constructor(private readonly client: Pick<CodexAppServerClient, 'request'>) {}
++
++    private read(): Promise<z.infer<typeof UsageSchema> | null> {
++        return this.pending ??= (async () => {
++            try {
++                // Older servers require null params. Probe before declaring Reserve capability.
++                const probe = UsageSchema.parse(await this.client.request('account/rateLimits/read', null));
++                if (!('ordinaryUsageAllowed' in probe)) return null;
++                return UsageSchema.parse(await this.client.request('account/rateLimits/read', {
++                    supportsLunaReserve: true, excludeResetCreditDetails: true
++                }));
++            } catch { return null; }
++        })().finally(() => { this.pending = undefined; });
++    }
++
++    async usage(model: string | null | undefined): Promise<CodexAccountUsage | null> {
++        const response = await this.read();
++        if (!response?.accountId) return null;
++        const banner = BannerSchema.safeParse(response.rateLimitUpsell);
++        const reserve = Object.values(response.rateLimitsByLimitId ?? {}).find(value => value.limitName === LUNA_RESERVE_MODEL)
++            ?? (response.rateLimits.limitName === LUNA_RESERVE_MODEL ? response.rateLimits : undefined);
++        const ordinary = response.rateLimitsByLimitId?.codex
++            ?? ((!response.rateLimits.limitId || response.rateLimits.limitId === 'codex') && response.rateLimits.limitName !== LUNA_RESERVE_MODEL ? response.rateLimits : undefined);
++        return {
++            ordinary: bucket(ordinary),
++            reserve: model === LUNA_RESERVE_MODEL ? bucket(reserve) : null,
++            reserveAvailable: response.ordinaryUsageAllowed === false && banner.success
++                && (!banner.data.blocked_model_slug || banner.data.blocked_model_slug === model)
++        };
++    }
++}
+diff --git a/cli/src/codex/shared/projection.test.ts b/cli/src/codex/shared/projection.test.ts
+index dbe93bc0d..c08b9d006 100644
+--- a/cli/src/codex/shared/projection.test.ts
++++ b/cli/src/codex/shared/projection.test.ts
+@@ -180,6 +180,25 @@ describe('shared history projection', () => {
+         const events = send.mock.calls.map(([body]) => body).filter(body => body.type === 'token_count');
+         expect(events.map(body => body.model)).toEqual(['model-a', 'model-c']);
+     });
++    it.each(['', 'Reserve available'])('does not block later events or repeat quota hint reads (%s)', async hint => {
++        const send = vi.fn();
++        const session = { getMetadata: () => ({}), sendAgentMessage: send } as unknown as ApiSessionClient;
++        let release!: (hint: string) => void;
++        const read = vi.fn(() => new Promise<string>(resolve => { release = resolve; }));
++        const projection = new SharedCodexProjection(session, 'thread', async () => {}, undefined, true, read);
++        const error = { message: 'Quota exhausted', codexErrorInfo: 'usageLimitExceeded' };
++        await projection.notification('error', { threadId: 'thread', turnId: 'turn', error });
++        await projection.notification('turn/completed', { threadId: 'thread', turn: { id: 'turn', status: 'failed', error } });
++        await projection.notification('item/completed', { threadId: 'thread', turnId: 'next', item: { id: 'answer', type: 'agentMessage', text: 'Next answer' } });
++        expect(send).toHaveBeenCalledWith(expect.objectContaining({ message: 'Next answer' }), expect.any(String));
++        expect(read).toHaveBeenCalledTimes(1);
++        release(hint);
++        await Promise.resolve();
++        await projection.notification('error', { threadId: 'thread', turnId: 'turn', error });
++        expect(read).toHaveBeenCalledTimes(1);
++        expect(send.mock.calls.filter(([body]) => body.message === 'Reserve available')).toHaveLength(hint ? 1 : 0);
++    });
++
+     it('keeps image-only native inputs visible without embedding data URLs', () => {
+         expect(inputText([{ type: 'image', url: 'data:image/png;base64,large' }])).toBe('[Image]');
+         expect(inputText([{ type: 'localImage', path: '/tmp/image.png' }])).toBe('[Image: /tmp/image.png]');
+diff --git a/cli/src/codex/shared/projection.ts b/cli/src/codex/shared/projection.ts
+index fa9165b5e..ba4123ed4 100644
+--- a/cli/src/codex/shared/projection.ts
++++ b/cli/src/codex/shared/projection.ts
+@@ -49,7 +49,8 @@ export class SharedCodexProjection {
+     private readonly completedTitles = new Set<string>();
+     private titleRevision = 0;
+     constructor(private readonly session: ApiSessionClient, readonly threadId: string,
+-        private readonly committed: (id: string) => Promise<void>, private readonly parentThreadId?: string, restoreLocators = true) {
++        private readonly committed: (id: string) => Promise<void>, private readonly parentThreadId?: string, restoreLocators = true,
++        private readonly quotaHint?: () => Promise<string>) {
+         if (!parentThreadId && restoreLocators) for (const [id, turn] of Object.entries(session.getMetadata()?.conversationHistoryTurns ?? {})) this.turns.set(id, turn);
+         if (!restoreLocators) session.updateMetadata(metadata => ({ ...metadata, conversationHistoryTurns: {}, conversationHistoryPoints: {} }));
+     }
+@@ -205,6 +206,13 @@ export class SharedCodexProjection {
+                 if (image) send({ type: 'generated-image', imageId: image.id, fileName: image.fileName, mimeType: image.mimeType }, key);
+             } else if (event.type === 'task_failed') {
+                 send({ type: 'message', message: `Codex error: ${event.error ?? event.message ?? 'Turn failed'}` }, key);
++                const hintKey = `reserve-hint:${turnId ?? key}`;
++                if (event.codex_error_info === 'usageLimitExceeded' && this.quotaHint && !this.emitted.has(`${hintKey}:requested`)) {
++                    this.emitted.add(`${hintKey}:requested`);
++                    void this.quotaHint().then(hint => {
++                        if (hint) this.send({ type: 'message', message: hint }, hintKey);
++                    }).catch(() => {});
++                }
+             }
+         }
+         if (item.type === 'collabAgentToolCall') {
+diff --git a/cli/src/codex/shared/root.test.ts b/cli/src/codex/shared/root.test.ts
+index b4e808ec7..822b1783f 100644
+--- a/cli/src/codex/shared/root.test.ts
++++ b/cli/src/codex/shared/root.test.ts
+@@ -13,6 +13,12 @@ type NativeTurn = { id: string; status: string; items: unknown[]; startedAt?: nu
+ vi.mock('../codexAppServerClient', () => ({
+     CodexAppServerClient: class {
+         initialized = false;
++        usage: unknown = { accountId: 'account', ordinaryUsageAllowed: true, rateLimits: { limitId: 'codex' } };
++        async listModels() { return { data: [
++            { id: 'mock', model: 'mock', displayName: 'Mock', isDefault: true },
++            { id: 'gpt-reserve', model: 'gpt-reserve', hidden: true, defaultReasoningEffort: 'medium',
++                supportedReasoningEfforts: [{ reasoningEffort: 'medium' }, { reasoningEffort: 'high' }] }
++        ] }; }
+         thread = { id: 'thread', historyMode: 'legacy', turns: [] as NativeTurn[] };
+         children: Record<string, NativeTurn[]> = {};
+         failReads = false;
+@@ -31,6 +37,7 @@ vi.mock('../codexAppServerClient', () => ({
+         async disconnect() { this.initialized = false; }
+         async supportsMethod() { return true; }
+         async request(method: string, params: Record<string, unknown> = {}) {
++            if (method === 'account/rateLimits/read') return this.usage;
+             const child = typeof params.threadId === 'string' ? this.children[params.threadId] : undefined;
+             if (method === 'thread/read' && params.includeTurns && this.failReads) throw new Error('read failed');
+             if (method === 'thread/read' && child && params.includeTurns && this.failChildren) throw new Error('child read failed');
+@@ -110,6 +117,7 @@ async function fixture(opts?: { hubArchived?: boolean; end?: RootHost['end']; me
+     cleanups.push(async () => { await root.close(false); await rm(directory, { recursive: true, force: true }); });
+     await root.prepare();
+     const native = root.client as unknown as {
++        usage: unknown;
+         initialized: boolean;
+         thread: { id: string; historyMode: string; turns: NativeTurn[] };
+         children: Record<string, NativeTurn[]>;
+@@ -641,3 +649,114 @@ describe('shared steering availability', () => {
+         await vi.waitFor(() => expect(end).toHaveBeenCalledTimes(1));
+     });
+ });
++
++describe('manual Luna Reserve', () => {
++    const eligible = {
++        accountId: 'account', ordinaryUsageAllowed: false,
++        rateLimits: { limitId: 'codex', primary: { usedPercent: 100 } },
++        rateLimitUpsell: { banner_type: 'luna_reserve', blocked_model_slug: 'mock' },
++        rateLimitsByLimitId: { reserve_bucket: { limitName: 'gpt-reserve', secondary: { usedPercent: 73 } } }
++    };
++
++    it('offers Reserve only when authorized; reads never change settings, turns, or agent state', async () => {
++        const f = await fixture();
++        const requests = vi.spyOn(f.root.client, 'request');
++        const updates = f.updateState.mock.calls.length;
++        expect((await f.root.listModels()).models?.map(model => model.id)).toEqual(['mock']);
++        f.native.usage = eligible;
++        const result = await f.root.listModels();
++        expect(result.models?.map(model => model.id)).toEqual(['mock', 'gpt-reserve']);
++        expect(result.usage).toMatchObject({ reserveAvailable: true, reserve: null });
++        expect(requests.mock.calls.every(([method]) => method === 'account/rateLimits/read')).toBe(true);
++        expect(f.updateState).toHaveBeenCalledTimes(updates);
++        f.native.usage = { ...eligible, ordinaryUsageAllowed: true };
++        await expect(f.root.applySettings({ model: 'gpt-reserve' })).rejects.toThrow('not available');
++        expect(requests.mock.calls.every(([method]) => method === 'account/rateLimits/read')).toBe(true);
++    });
++
++    it('waits for native confirmation, retains Reserve after recovery, and never replays input', async () => {
++        const f = await fixture();
++        f.native.usage = eligible;
++        const request = f.root.client.request.bind(f.root.client);
++        const requests = vi.spyOn(f.root.client, 'request').mockImplementation((method, params) =>
++            method === 'thread/settings/update' ? Promise.resolve({}) : request(method, params));
++        let settled = false;
++        const switching = f.root.applySettings({ model: 'gpt-reserve' }).then(value => { settled = true; return value; });
++        await vi.waitFor(() => expect(requests).toHaveBeenCalledWith('thread/settings/update', expect.objectContaining({ model: 'gpt-reserve' })));
++        expect(settled).toBe(false);
++        f.native.notify('thread/settings/updated', { threadId: 'thread', threadSettings: {
++            model: 'gpt-reserve', effort: 'medium', serviceTier: null,
++            collaborationMode: { mode: 'default', settings: { model: 'gpt-reserve', reasoning_effort: 'medium', developer_instructions: null } }
++        } });
++        expect((await switching).applied.model).toBe('gpt-reserve');
++        expect((await f.root.listModels()).usage?.reserve?.secondary?.remainingPercent).toBe(27);
++        f.native.usage = { ...eligible, ordinaryUsageAllowed: true, rateLimitUpsell: null };
++        expect((await f.root.listModels()).models?.map(model => model.id)).toContain('gpt-reserve');
++        expect(requests.mock.calls.filter(([method]) => method === 'thread/settings/update')).toHaveLength(1);
++        expect(requests.mock.calls.some(([method]) => method.startsWith('turn/') || method.startsWith('thread/queue/'))).toBe(false);
++    });
++
++    it('does not publish rejected settings or let stale eligibility override a native model change', async () => {
++        const f = await fixture();
++        f.native.usage = eligible;
++        const original = f.root.client.request.bind(f.root.client);
++        vi.spyOn(f.root.client, 'request').mockImplementation(async (method, params) => {
++            if (method === 'thread/settings/update') throw new Error('Settings rejected');
++            return original(method, params);
++        });
++        await expect(f.root.applySettings({ model: 'gpt-reserve' })).rejects.toThrow('Settings rejected');
++        expect((await f.root.applySettings({})).applied.model).toBe('mock');
++        const listing = f.root.listModels();
++        f.root.acceptSettings({ model: 'other' });
++        expect((await listing).usage).toBeNull();
++        expect((await f.root.applySettings({})).applied.model).toBe('other');
++    });
++
++    it('expires delayed and queued selections without dispatching a late mutation', async () => {
++        const f = await fixture();
++        f.native.usage = eligible;
++        let release!: () => void;
++        const delay = new Promise<void>(resolve => { release = resolve; });
++        const original = f.root.client.request.bind(f.root.client);
++        const requests = vi.spyOn(f.root.client, 'request').mockImplementation(async (method, params) => {
++            if (method === 'account/rateLimits/read') await delay;
++            return original(method, params);
++        });
++        vi.useFakeTimers();
++        const first = expect(f.root.applySettings({ model: 'gpt-reserve' })).rejects.toThrow('expired');
++        const queued = expect(f.root.applySettings({ model: 'other' })).rejects.toThrow('expired');
++        await vi.advanceTimersByTimeAsync(28_000);
++        await first; await queued;
++        await vi.advanceTimersByTimeAsync(5_000);
++        release();
++        await vi.advanceTimersByTimeAsync(0);
++        expect(requests.mock.calls.some(([method]) => method === 'thread/settings/update')).toBe(false);
++        expect((await f.root.applySettings({})).applied.model).toBe('mock');
++    });
++
++    it('preserves custom plan instructions when selecting Reserve', async () => {
++        const f = await fixture();
++        f.native.usage = eligible;
++        f.root.acceptSettings({ model: 'mock', effort: 'high', collaborationMode: {
++            mode: 'plan', settings: { model: 'mock', reasoning_effort: 'high', developer_instructions: 'Custom planning rules' }
++        } });
++        const requests = vi.spyOn(f.root.client, 'request');
++        const switching = f.root.applySettings({ model: 'gpt-reserve' });
++        const settings = { model: 'gpt-reserve', effort: 'high', serviceTier: null, collaborationMode: {
++            mode: 'plan', settings: { model: 'gpt-reserve', reasoning_effort: 'high', developer_instructions: 'Custom planning rules' }
++        } };
++        await vi.waitFor(() => expect(requests).toHaveBeenCalledWith('thread/settings/update', { threadId: 'thread', ...settings }));
++        f.native.notify('thread/settings/updated', { threadId: 'thread', threadSettings: settings });
++        expect((await switching).applied.collaborationMode).toBe('plan');
++    });
++
++    it('never offers ChatGPT Reserve to a custom-provider thread', async () => {
++        const f = await fixture();
++        f.native.usage = eligible;
++        f.root.acceptSettings({ model: 'mock', modelProvider: 'custom' });
++        const requests = vi.spyOn(f.root.client, 'request');
++        expect((await f.root.listModels()).models?.map(model => model.id)).toEqual(['mock']);
++        expect(requests).not.toHaveBeenCalled();
++        await expect(f.root.applySettings({ model: 'gpt-reserve' })).rejects.toThrow('not available');
++    });
++});
+diff --git a/cli/src/codex/shared/root.ts b/cli/src/codex/shared/root.ts
+index a1dd00e8a..fe89edf96 100644
+--- a/cli/src/codex/shared/root.ts
++++ b/cli/src/codex/shared/root.ts
+@@ -23,6 +23,8 @@ import { CodexSessionTitles } from '../utils/codexSessionTitles';
+ import { record, string } from './gateway';
+ import { initializeSharedClient, type SharedLaunchOptions } from './launch';
+ import { inheritedSandbox, settingsMatch } from './settings';
++import { LunaReserve, LUNA_RESERVE_MODEL } from './lunaReserve';
++import type { CodexModelsResponse } from '@hapi/protocol/apiTypes';
+ import { planImplementationMessageId, planProposalForItem, planProposalForTurn } from './plan';
+ import { SharedRewindBarrier, isNativeHistoryRead } from './rewind';
+ 
+@@ -57,6 +59,16 @@ export class SharedCodexRoot {
+     readonly session: ApiSessionClient;
+     private readonly titles: CodexSessionTitles;
+     private titleRequest = '';
++    private readonly reserve: LunaReserve;
++    private modelRead?: Promise<CodexModelsResponse>;
++    private configWork: Promise<unknown> = Promise.resolve();
++    // Suggest Luna Reserve after a quota failure when the account can use it.
++    private readonly quotaHint = async (): Promise<string> => {
++        const usage = this.settingsNative.modelProvider && this.settingsNative.modelProvider !== 'openai'
++            ? null : await this.reserve.usage(this.settings.model);
++        return usage?.reserveAvailable && this.settings.model !== LUNA_RESERVE_MODEL
++            ? 'Luna Reserve is available in the model menu.' : '';
++    };
+     bridge!: HapiMcpBridge;
+     threadId = '';
+     private permissions!: SharedCodexPermissions;
+@@ -101,6 +113,7 @@ export class SharedCodexRoot {
+             { endpoint: host.endpoint, token: host.token });
+         this.rewindBarrier = new SharedRewindBarrier(join(host.directory, `${this.session.sessionId}.rewind.json`));
+         this.client = new CodexAppServerClient({ endpoint: host.endpoint, token: host.token, cwd: bootstrap.workingDirectory });
++        this.reserve = new LunaReserve(this.client);
+         this.client.setNotificationHandler((method, params) => {
+             if (method === 'serverRequest/resolved') {
+                 this.permissions?.resolved(string(record(params).threadId) ?? '', record(params).requestId); return;
+@@ -240,7 +253,7 @@ export class SharedCodexRoot {
+             (id, input) => this.session.syncNativeQueuedMessage(id, input === null ? null : inputText(input)),
+             ids => this.session.setSteerDeliveryState(ids, 'queued'));
+         await this.queue.load();
+-        this.projection = new SharedCodexProjection(this.session, threadId, id => this.queue.committed(id));
++        this.projection = new SharedCodexProjection(this.session, threadId, id => this.queue.committed(id), undefined, true, this.quotaHint);
+         const bootstrapped = this.bootstrap.metadata;
+         const capturing = bootstrapped?.codexHistoryBaseline?.capture === true && bootstrapped.codexSessionId === threadId;
+         const prior = capturing || !bootstrapped?.codexHistoryBaseline?.capture ? bootstrapped?.codexHistoryBaseline : undefined;
+@@ -470,8 +483,36 @@ export class SharedCodexRoot {
+             }
+         } finally { this.reconnecting = false; this.publishSteering(); this.publishPlan(); }
+     }
+-    async applySettings(raw: unknown): Promise<{ applied: RuntimeSettings }> {
++    applySettings(raw: unknown): Promise<{ applied: RuntimeSettings }> {
++        // Leave 20 seconds for the native request inside the hub's 30-second RPC budget.
++        const dispatchDeadline = Date.now() + 8_000;
++        const pending = this.configWork.catch(() => {}).then(() => this.applySettingsNow(raw, dispatchDeadline));
++        this.configWork = pending;
++        let timer: ReturnType<typeof setTimeout> | undefined;
++        const timeout = new Promise<never>((_, reject) => {
++            timer = setTimeout(() => reject(new Error('Settings selection expired; reopen the model menu')), 28_000);
++        });
++        return Promise.race([pending, timeout]).catch(error => {
++            if (record(raw).model === LUNA_RESERVE_MODEL) this.notice(`Reserve selection was not confirmed: ${error instanceof Error ? error.message : String(error)}`);
++            throw error;
++        }).finally(() => clearTimeout(timer));
++    }
++    private async applySettingsNow(raw: unknown, dispatchDeadline: number): Promise<{ applied: RuntimeSettings }> {
++        if (this.closed || this.stopping) throw new Error('Codex execution is stopping');
+         const config = SettingsSchema.parse(raw);
++        if (config.model === LUNA_RESERVE_MODEL && this.settings.model !== LUNA_RESERVE_MODEL) {
++            const revision = this.settingsRevision;
++            // A selection must revalidate entitlement; never reuse the model picker's read.
++            if (this.modelRead) await this.modelRead;
++            const available = await this.listModels();
++            if (this.stopping || this.closed || revision !== this.settingsRevision) throw new Error('Session settings changed; reopen the model menu before switching');
++            const model = available.models?.find(model => model.id === LUNA_RESERVE_MODEL);
++            if (!available.usage?.reserveAvailable || !model) throw new Error('Luna Reserve is not available for this session');
++            const effort = config.modelReasoningEffort ?? this.settings.modelReasoningEffort;
++            config.modelReasoningEffort = effort && model.supportedReasoningEfforts?.includes(effort) ? effort : model.defaultReasoningEffort;
++            if (!model.serviceTiers?.includes('priority')) config.serviceTier = 'standard';
++            config.collaborationMode ??= this.settings.collaborationMode ?? 'default';
++        }
+         if (config.permissionMode === 'safe-yolo') throw new Error('safe-yolo is not a native shared permission mode; choose default, read-only, autoReview, or yolo');
+         if (Object.keys(config).length === 0) return { applied: this.settings };
+         if (typeof config.modelReasoningEffort === 'string') config.modelReasoningEffort = parseReasoningEffortValue(config.modelReasoningEffort);
+@@ -498,9 +539,12 @@ export class SharedCodexRoot {
+                 approvalsReviewer: config.permissionMode === 'autoReview' ? 'auto_review' : 'user' } : {}),
+             ...(config.collaborationMode ? { collaborationMode: { mode: config.collaborationMode, settings: {
+                 model: config.model ?? this.settings.model, reasoning_effort: config.modelReasoningEffort ?? this.settings.modelReasoningEffort,
+-                developer_instructions: null
++                developer_instructions: record(raw).collaborationMode === undefined
++                    ? string(record(record(this.settingsNative.collaborationMode).settings).developer_instructions) ?? null
++                    : null
+             } } } : {})
+         };
++        if (Date.now() >= dispatchDeadline) throw new Error('Settings selection expired; reopen the model menu');
+         let changed!: () => void;
+         let timer: ReturnType<typeof setTimeout> | undefined;
+         const accepted = new Promise<void>((resolve, reject) => {
+@@ -519,6 +563,27 @@ export class SharedCodexRoot {
+     async initialSettings(options: SharedLaunchOptions): Promise<void> {
+         if (options.collaborationMode) await this.applySettings({ collaborationMode: options.collaborationMode });
+     }
++    listModels(): Promise<CodexModelsResponse> {
++        return this.modelRead ??= (async () => {
++            const revision = this.settingsRevision;
++            const usage = this.settingsNative.modelProvider && this.settingsNative.modelProvider !== 'openai'
++                ? null : await this.reserve.usage(this.settings.model);
++            const models = []; let cursor: string | undefined;
++            do {
++                const page = await this.client.listModels({ includeHidden: true, cursor });
++                for (const entry of page.data ?? []) {
++                    const isReserve = (entry.model ?? entry.id) === LUNA_RESERVE_MODEL;
++                    if (isReserve ? !(usage?.reserveAvailable || this.settings.model === LUNA_RESERVE_MODEL) : entry.hidden === true) continue;
++                    const model = normalizeCodexModel(isReserve ? { ...entry, id: LUNA_RESERVE_MODEL, displayName: 'Luna Reserve', isDefault: false } : entry);
++                    if (model) models.push(model);
++                }
++                cursor = page.nextCursor ?? undefined;
++            } while (cursor);
++            // Do not offer eligibility calculated for a model that a concurrent frontend replaced.
++            if (revision !== this.settingsRevision) return { success: true, models: models.filter(model => model.id !== LUNA_RESERVE_MODEL), usage: null };
++            return { success: true, models, usage };
++        })().finally(() => { this.modelRead = undefined; });
++    }
+     private async implementPlan(planId: string): Promise<ImplementCodexPlanResult> {
+         const unavailable = (): ImplementCodexPlanResult => ({ ok: false, code: 'unavailable', error: 'Codex is disconnected or stopping. Reconnect before implementing the plan.' });
+         const stale = (): ImplementCodexPlanResult => ({ ok: false, code: 'stale_plan', error: 'This plan is no longer actionable. Refresh the conversation.' });
+@@ -560,14 +625,7 @@ export class SharedCodexRoot {
+                 } finally { release(); }
+             });
+         } };
+-        rpc.registerHandler(RPC_METHODS.ListCodexModels, async raw => {
+-            const models = []; let cursor: string | undefined;
+-            do {
+-                const response = await this.client.listModels({ includeHidden: record(raw).includeHidden === true, cursor });
+-                models.push(...(response.data ?? []).map(normalizeCodexModel).filter(model => model !== null)); cursor = response.nextCursor ?? undefined;
+-            } while (cursor);
+-            return { success: true, models };
+-        });
++        rpc.registerHandler(RPC_METHODS.ListCodexModels, () => this.listModels());
+         rpc.registerHandler(RPC_METHODS.Switch, async () => { throw new Error('control_mode_not_applicable'); });
+         rpc.registerHandler(RPC_METHODS.HandoffLocal, async () => { throw new Error('control_mode_not_applicable'); });
+         rpc.registerHandler(RPC_METHODS.Abort, async () => {
+@@ -701,7 +759,7 @@ export class SharedCodexRoot {
+             await this.notifications;
+             const response = record(await this.client.request('thread/read', { threadId: this.threadId, includeTurns: false }));
+             this.acceptSettings(response);
+-            this.projection = new SharedCodexProjection(this.session, this.threadId, id => this.queue.committed(id), undefined, false);
++            this.projection = new SharedCodexProjection(this.session, this.threadId, id => this.queue.committed(id), undefined, false, this.quotaHint);
+             const last = Array.isArray(thread.turns) ? record(thread.turns.at(-1)) : {};
+             const lastId = string(last.id);
+             this.currentTurn = undefined;
+diff --git a/cli/src/modules/common/codexModels.ts b/cli/src/modules/common/codexModels.ts
+index 30a4cdeea..344295588 100644
+--- a/cli/src/modules/common/codexModels.ts
++++ b/cli/src/modules/common/codexModels.ts
+@@ -176,7 +176,7 @@ async function fetchCodexModelsFromAppServer(includeHidden: boolean): Promise<Co
+ 
+         const response = await client.listModels({ includeHidden });
+         return Array.isArray(response.data)
+-            ? response.data.map(normalizeCodexModel).filter((model): model is CodexModelSummary => model !== null)
++            ? response.data.map(normalizeCodexModel).filter((model): model is CodexModelSummary => model !== null && model.id !== 'gpt-reserve')
+             : [];
+     } catch (error) {
+         throw new Error(getErrorMessage(error, 'Failed to list Codex models'));
+diff --git a/e2e/luna-reserve.spec.ts b/e2e/luna-reserve.spec.ts
+new file mode 100644
+index 000000000..bce30526e
+--- /dev/null
++++ b/e2e/luna-reserve.spec.ts
+@@ -0,0 +1,56 @@
++import { test, expect, type Page } from '@playwright/test'
++
++// Narrow composers group model and effort under Settings; wide ones show the
++// model button directly (#1662).
++async function openModelMenu(page: Page, width: number) {
++    const name = width < 640 ? 'Settings' : 'GPT-6 Astra'
++    await page.getByRole('button', { name, exact: true }).click()
++}
++
++for (const width of [390, 1280]) {
++    test(`Reserve uses the existing model menu, with no automatic switch (${width}px)`, async ({ page }) => {
++        await page.setViewportSize({ width, height: 844 })
++        await page.goto('/e2e-fixtures/luna-reserve-fixture.html')
++        await openModelMenu(page, width)
++        await expect(page.getByRole('button', { name: /Luna Reserve/ })).toHaveCount(0)
++        await page.keyboard.press('Escape')
++        await page.getByRole('button', { name: 'Toggle eligibility' }).click()
++        await expect(page.getByTestId('model')).toHaveText('gpt-6-astra')
++        await openModelMenu(page, width)
++        await page.getByRole('button', { name: /Luna Reserve/ }).click()
++        await expect(page.getByTestId('model')).toHaveText('gpt-6-astra')
++        await page.getByRole('button', { name: 'Confirm native settings' }).click()
++        await expect(page.getByTestId('model')).toHaveText('☾ Luna Reserve')
++        await expect(page.getByTestId('sends')).toHaveText('0')
++        await page.getByRole('button', { name: 'Codex usage details' }).click()
++        await expect(page.getByText('Ordinary usage', { exact: true })).toBeVisible()
++        await expect(page.getByText(/27% remaining/)).toBeVisible()
++        expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
++    })
++}
++
++for (const width of [390, 1280]) {
++    test(`usage details stay above the expanded editor (${width}px)`, async ({ page }) => {
++        await page.setViewportSize({ width, height: 844 })
++        await page.goto('/e2e-fixtures/luna-reserve-fixture.html')
++        await page.getByRole('button', { name: 'Toggle eligibility' }).click()
++        await openModelMenu(page, width)
++        await page.getByRole('button', { name: /Luna Reserve/ }).click()
++        await page.getByRole('button', { name: 'Confirm native settings' }).click()
++        await page.getByRole('button', { name: 'Expand message editor' }).click()
++        await page.getByRole('button', { name: 'Codex usage details' }).click()
++
++        const details = page.getByRole('dialog').filter({ hasText: 'Ordinary usage' })
++        await expect(details.getByText('Ordinary usage', { exact: true })).toBeVisible()
++        await expect(details.getByText(/27% remaining/)).toBeVisible()
++        await expect.poll(() => details.evaluate(element => {
++            const bounds = element.getBoundingClientRect()
++            const top = document.elementFromPoint(
++                bounds.left + bounds.width / 2,
++                bounds.top + bounds.height / 2,
++            )
++            return top !== null && element.contains(top)
++        })).toBe(true)
++        await expect(page.getByTestId('sends')).toHaveText('0')
++    })
++}
+diff --git a/hub/src/sync/permissionModePersistence.test.ts b/hub/src/sync/permissionModePersistence.test.ts
+index ed89a8257..ff5e9ad60 100644
+--- a/hub/src/sync/permissionModePersistence.test.ts
++++ b/hub/src/sync/permissionModePersistence.test.ts
+@@ -165,3 +165,11 @@ describe('permission mode persistence', () => {
+     })
+ 
+ })
++
++it('does not persist an unverified Reserve selection on an inactive session', async () => {
++    const engine = createEngine()
++    const session = engine.getOrCreateSession('reserve-inactive', { path: '/tmp/project', host: 'localhost', flavor: 'codex' }, null, 'default')
++    const originalModel = session.model
++    await expect(engine.applySessionConfig(session.id, { model: 'gpt-reserve' })).rejects.toThrow('requires an active Codex session')
++    expect(engine.getSession(session.id)?.model).toBe(originalModel)
++})
+diff --git a/hub/src/sync/syncEngine.ts b/hub/src/sync/syncEngine.ts
+index 36b7c4109..91b9149c9 100644
+--- a/hub/src/sync/syncEngine.ts
++++ b/hub/src/sync/syncEngine.ts
+@@ -2326,6 +2326,7 @@ export class SyncEngine {
+     ): Promise<void> {
+         const session = this.sessionCache.getSession(sessionId)
+         if (!session?.active) {
++            if (config.model === 'gpt-reserve') throw new Error('Luna Reserve requires an active Codex session to verify availability')
+             // For inactive sessions, update the in-memory cache directly without
+             // an RPC call — the CLI is not running yet. The updated value will be
+             // passed to the spawned process when the session is resumed.
+diff --git a/shared/src/apiTypes.ts b/shared/src/apiTypes.ts
+index 73a6f377c..f3ff46d07 100644
+--- a/shared/src/apiTypes.ts
++++ b/shared/src/apiTypes.ts
+@@ -811,9 +811,23 @@ export type CodexModelSummary = {
+ export type CodexModelsResponse = {
+     success: boolean
+     models?: CodexModelSummary[]
++    /** Session-scoped account usage. Read-only; never session activity. */
++    usage?: CodexAccountUsage | null
+     error?: string
+ }
+ 
++export type CodexUsageWindow = {
++    remainingPercent: number | null
++    windowDurationMins: number | null
++    resetsAt: number | null
++}
++
++export type CodexAccountUsage = {
++    ordinary: { primary: CodexUsageWindow | null; secondary: CodexUsageWindow | null }
++    reserve: { primary: CodexUsageWindow | null; secondary: CodexUsageWindow | null } | null
++    reserveAvailable: boolean
++}
++
+ export type ListCodexModelsResponse = CodexModelsResponse
+ 
+ export type OpencodeModelSummary = {
+diff --git a/web/e2e-fixtures/luna-reserve-fixture.html b/web/e2e-fixtures/luna-reserve-fixture.html
+new file mode 100644
+index 000000000..269e83697
+--- /dev/null
++++ b/web/e2e-fixtures/luna-reserve-fixture.html
+@@ -0,0 +1,3 @@
++<!doctype html>
++<html lang="en"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><title>Luna Reserve fixture</title></head>
++<body><div id="root"></div><script type="module" src="./luna-reserve-fixture.tsx"></script></body></html>
+diff --git a/web/e2e-fixtures/luna-reserve-fixture.tsx b/web/e2e-fixtures/luna-reserve-fixture.tsx
+new file mode 100644
+index 000000000..29a1d9386
+--- /dev/null
++++ b/web/e2e-fixtures/luna-reserve-fixture.tsx
+@@ -0,0 +1,42 @@
++import { useState } from 'react'
++import ReactDOM from 'react-dom/client'
++import { AssistantRuntimeProvider, useExternalStoreRuntime } from '@assistant-ui/react'
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
++import { I18nProvider } from '../src/lib/i18n-context'
++import { HappyComposer } from '../src/components/AssistantChat/HappyComposer'
++import { getSessionModelLabel } from '../src/lib/sessionModelLabel'
++import '../src/index.css'
++
++const queryClient = new QueryClient()
++function Fixture() {
++    const [model, setModel] = useState('gpt-6-astra')
++    const [pending, setPending] = useState<string | null>(null)
++    const [eligible, setEligible] = useState(false)
++    const [reads, setReads] = useState(0)
++    const [sends, setSends] = useState(0)
++    const runtime = useExternalStoreRuntime({ messages: [], isRunning: false, onNew: async () => { setSends(n => n + 1) } })
++    return <AssistantRuntimeProvider runtime={runtime}>
++        <main className="mx-auto flex h-screen max-w-3xl flex-col p-3">
++            <div data-testid="model">{getSessionModelLabel({ model })?.value}</div>
++            <div className="flex-1">
++                <button onClick={() => setEligible(value => !value)}>Toggle eligibility</button>
++                <button onClick={() => { if (pending) setModel(pending); setPending(null) }}>Confirm native settings</button>
++                <output data-testid="reads">{reads}</output><output data-testid="sends">{sends}</output>
++            </div>
++            <HappyComposer sessionId="luna-fixture" agentFlavor="codex" active thinking={false} model={model}
++                modelReasoningEffort="high" onModelReasoningEffortChange={() => {}}
++                onModelChange={value => { if (typeof value === 'string') setPending(value) }}
++                onModelMenuOpen={() => setReads(n => n + 1)}
++                availableModelOptions={[
++                    { value: 'gpt-6-astra', label: 'GPT-6 Astra' },
++                    { value: 'gpt-5.6-luna', label: 'GPT-5.6 Luna' },
++                    ...(eligible || model === 'gpt-reserve' ? [{ value: 'gpt-reserve', label: '☾ Luna Reserve' }] : [])
++                ]}
++                codexUsage={{ ordinary: { primary: { remainingPercent: 0, windowDurationMins: 300, resetsAt: null }, secondary: null },
++                    reserveAvailable: eligible,
++                    reserve: model === 'gpt-reserve' ? { primary: null, secondary: { remainingPercent: 27, windowDurationMins: 10080, resetsAt: null } } : null }}
++            />
++        </main>
++    </AssistantRuntimeProvider>
++}
++ReactDOM.createRoot(document.getElementById('root')!).render(<QueryClientProvider client={queryClient}><I18nProvider><Fixture /></I18nProvider></QueryClientProvider>)
+diff --git a/web/src/components/AssistantChat/CodexUsage.test.tsx b/web/src/components/AssistantChat/CodexUsage.test.tsx
+new file mode 100644
+index 000000000..b3c8279eb
+--- /dev/null
++++ b/web/src/components/AssistantChat/CodexUsage.test.tsx
+@@ -0,0 +1,27 @@
++import { fireEvent, render, screen } from '@testing-library/react'
++import { describe, expect, it } from 'vitest'
++import { I18nProvider } from '@/lib/i18n-context'
++import { CodexUsage } from './CodexUsage'
++import type { CodexAccountUsage } from '@hapi/protocol/apiTypes'
++
++const usage: CodexAccountUsage = {
++    ordinary: { primary: { remainingPercent: 0, windowDurationMins: 300, resetsAt: 1800000000 }, secondary: null },
++    reserve: { primary: null, secondary: { remainingPercent: 27, windowDurationMins: 10080, resetsAt: null } },
++    reserveAvailable: true
++}
++
++describe('Codex usage', () => {
++    it('hides unused Reserve, keeps ordinary limits alongside active Reserve, and displays exhaustion', () => {
++        const view = render(<I18nProvider><CodexUsage usage={usage} model="gpt-6-astra" /></I18nProvider>)
++        fireEvent.click(screen.getByRole('button', { name: 'Codex usage details' }))
++        expect(screen.queryByText('☾ Luna Reserve')).toBeNull()
++        view.rerender(<I18nProvider><CodexUsage usage={usage} model="gpt-reserve" /></I18nProvider>)
++        expect(screen.getByText('☾ Luna Reserve')).toBeTruthy()
++        expect(screen.getByText('Ordinary usage')).toBeTruthy()
++        expect(screen.getByText(/27% remaining/)).toBeTruthy()
++        expect(screen.getByText(/0% remaining/)).toBeTruthy()
++        view.rerender(<I18nProvider><CodexUsage usage={null} model="gpt-reserve" /></I18nProvider>)
++        expect(screen.getAllByText('Unknown')).toHaveLength(2)
++        expect(screen.queryByText(/27% remaining/)).toBeNull()
++    })
++})
+diff --git a/web/src/components/AssistantChat/CodexUsage.tsx b/web/src/components/AssistantChat/CodexUsage.tsx
+new file mode 100644
+index 000000000..d04702a8b
+--- /dev/null
++++ b/web/src/components/AssistantChat/CodexUsage.tsx
+@@ -0,0 +1,42 @@
++import * as Popover from '@radix-ui/react-popover'
++import type { CodexAccountUsage } from '@hapi/protocol/apiTypes'
++import { useTranslation } from '@/lib/use-translation'
++
++export function CodexUsage(props: { usage?: CodexAccountUsage | null; model?: string | null }) {
++    const { t } = useTranslation()
++    const inReserve = props.model === 'gpt-reserve'
++    if (!props.usage && !inReserve) return null
++    const buckets = [
++        { label: t('codex.usage.ordinary'), value: props.usage?.ordinary },
++        ...(inReserve ? [{ label: '☾ Luna Reserve', value: props.usage?.reserve }] : [])
++    ]
++    return (
++        <Popover.Root>
++            <Popover.Trigger asChild>
++                <button type="button" className="shrink-0 text-xs text-[var(--app-hint)] hover:text-[var(--app-fg)]" aria-label={t('codex.usage.details')}>
++                    {inReserve ? '☾ Reserve' : t('codex.usage.label')}
++                </button>
++            </Popover.Trigger>
++            <Popover.Portal>
++                <Popover.Content side="top" align="start" sideOffset={8} className="z-[70] max-w-[calc(100vw-2rem)] rounded-lg border border-[var(--app-divider)] bg-[var(--app-bg)] p-3 text-xs shadow-lg">
++                    {buckets.map(({ label, value }) => (
++                        <div key={label} className="mb-2 last:mb-0">
++                            <div className="mb-1 font-medium">{label}</div>
++                            {!value?.primary && !value?.secondary ? <div className="text-[var(--app-hint)]">{t('codex.usage.unknown')}</div> : null}
++                            {[value?.primary, value?.secondary].map((window, index) => window ? (
++                                <div key={index} className="text-[var(--app-hint)]">
++                                    {window.windowDurationMins === null ? t('codex.usage.window')
++                                        : window.windowDurationMins % 1440 === 0 ? t('codex.usage.days', { value: window.windowDurationMins / 1440 })
++                                        : window.windowDurationMins % 60 === 0 ? t('codex.usage.hours', { value: window.windowDurationMins / 60 })
++                                        : t('codex.usage.minutes', { value: window.windowDurationMins })}
++                                    {' · '}{window.remainingPercent === null ? t('codex.usage.unknown') : t('codex.usage.remaining', { value: window.remainingPercent })}
++                                    {window.resetsAt !== null ? <div>{t('codex.usage.resets', { value: new Date(window.resetsAt * 1000).toLocaleString() })}</div> : null}
++                                </div>
++                            ) : null)}
++                        </div>
++                    ))}
++                </Popover.Content>
++            </Popover.Portal>
++        </Popover.Root>
++    )
++}
+diff --git a/web/src/components/AssistantChat/HappyComposer.tsx b/web/src/components/AssistantChat/HappyComposer.tsx
+index 8bd0639fe..6874bfd1c 100644
+--- a/web/src/components/AssistantChat/HappyComposer.tsx
++++ b/web/src/components/AssistantChat/HappyComposer.tsx
+@@ -50,6 +50,7 @@ import { useComposerEnterBehavior } from '@/hooks/useComposerEnterBehavior'
+ import { FloatingOverlay } from '@/components/ChatInput/FloatingOverlay'
+ import { Autocomplete } from '@/components/ChatInput/Autocomplete'
+ import { StatusBar } from '@/components/AssistantChat/StatusBar'
++import type { CodexAccountUsage } from '@hapi/protocol/apiTypes'
+ import {
+     ComposerButtons,
+     UnifiedButton,
+@@ -329,6 +330,8 @@ export function ModelEffortSettingsSection(props: {
+ }
+ 
+ export function HappyComposer(props: {
++    codexUsage?: CodexAccountUsage | null
++    onModelMenuOpen?: () => void
+     sessionId?: string
+     focusInputRef?: MutableRefObject<(() => void) | null>
+     onUploadDraftSnapshot?: (text: string, attachments: AttachmentDraftInput[]) => void
+@@ -1589,6 +1592,7 @@ export function HappyComposer(props: {
+     // instead of closing, so model->effort moves between sections directly.
+     const handleSettingsToggle = useCallback((section: 'model' | 'effort' | null = null) => {
+         haptic('light')
++        if ((!showSettings || section !== settingsSection) && section !== 'effort') props.onModelMenuOpen?.()
+         if (showSettings && section !== settingsSection) {
+             if (section === 'effort') {
+                 setCursorDrillDownBase(null)
+@@ -1607,7 +1611,7 @@ export function HappyComposer(props: {
+         }
+         setSettingsSection(section)
+         setShowSettings(true)
+-    }, [haptic, showSettings, settingsSection])
++    }, [haptic, showSettings, settingsSection, props.onModelMenuOpen])
+ 
+     const clearCursorDrillDown = useCallback(() => {
+         setCursorDrillDownBase(null)
+@@ -2020,6 +2024,7 @@ export function HappyComposer(props: {
+                                                     <span className={isSelected ? 'text-[var(--app-link)]' : ''}>
+                                                         {option.label}
+                                                     </span>
++                                                    {option.value === 'gpt-reserve' && !isSelected ? <span className="ml-auto text-xs text-[var(--app-hint)]">{t('codex.reserve.available')}</span> : null}
+                                                 </button>
+                                             )
+                                         })}
+@@ -2401,6 +2406,7 @@ export function HappyComposer(props: {
+                     {overlays}
+ 
+                     <StatusBar
++                        codexUsage={props.codexUsage}
+                         active={active}
+                         thinking={thinking}
+                         agentState={agentState}
+diff --git a/web/src/components/AssistantChat/StatusBar.tsx b/web/src/components/AssistantChat/StatusBar.tsx
+index 5b1f71cbb..f4a2edfe8 100644
+--- a/web/src/components/AssistantChat/StatusBar.tsx
++++ b/web/src/components/AssistantChat/StatusBar.tsx
+@@ -8,6 +8,8 @@ import {
+ import type { PermissionModeTone } from '@hapi/protocol'
+ import * as Popover from '@radix-ui/react-popover'
+ import { useMemo } from 'react'
++import type { CodexAccountUsage } from '@hapi/protocol/apiTypes'
++import { CodexUsage } from './CodexUsage'
+ import type { AgentState, CodexCollaborationMode, PermissionMode } from '@/types/api'
+ import type { ConversationStatus } from '@/realtime/types'
+ import { getContextBudgetTokens } from '@/chat/modelConfig'
+@@ -192,6 +194,7 @@ export function shouldShowCodexFastBadge(
+ }
+ 
+ export function StatusBar(props: {
++    codexUsage?: CodexAccountUsage | null
+     active: boolean
+     thinking: boolean
+     agentState: AgentState | null | undefined
+@@ -302,6 +305,7 @@ export function StatusBar(props: {
+                         {connectionStatus.text}
+                     </span>
+                 </div>
++                {props.agentFlavor === 'codex' ? <CodexUsage usage={props.codexUsage} model={props.model} /> : null}
+                 {contextUsageLabel ? (
+                     <Popover.Root>
+                         <Popover.Trigger asChild>
+diff --git a/web/src/components/AssistantChat/modelOptions.ts b/web/src/components/AssistantChat/modelOptions.ts
+index a576e3f98..a3b87d54c 100644
+--- a/web/src/components/AssistantChat/modelOptions.ts
++++ b/web/src/components/AssistantChat/modelOptions.ts
+@@ -44,7 +44,7 @@ function withCurrentModelOption(
+     const autoIndex = nextOptions.findIndex((option) => option.value === null || option.value === 'auto')
+     nextOptions.splice(autoIndex >= 0 ? autoIndex + 1 : 0, 0, {
+         value: normalizedCurrentModel,
+-        label: resolveLabel?.(normalizedCurrentModel) ?? normalizedCurrentModel
++        label: normalizedCurrentModel === 'gpt-reserve' ? '☾ Luna Reserve' : resolveLabel?.(normalizedCurrentModel) ?? normalizedCurrentModel
+     })
+     return nextOptions
+ }
+diff --git a/web/src/components/SessionChat.test.ts b/web/src/components/SessionChat.test.ts
+index b11626cce..d4f3f0ae4 100644
+--- a/web/src/components/SessionChat.test.ts
++++ b/web/src/components/SessionChat.test.ts
+@@ -610,3 +610,10 @@ describe('resolveEffortForModelChange', () => {
+         })).toBeUndefined()
+     })
+ })
++
++it('leaves Reserve effort normalization to the atomic native model switch', () => {
++    expect(shouldClearReasoningEffortForModelChange({
++        agentFlavor: 'codex', previousModelReasoningEffort: 'ultra', model: 'gpt-reserve',
++        codexModels: [{ id: 'gpt-reserve', displayName: 'Luna Reserve', isDefault: false, supportedReasoningEfforts: ['high'] }]
++    })).toBe(false)
++})
+diff --git a/web/src/components/SessionChat.tsx b/web/src/components/SessionChat.tsx
+index 97a4ef607..025c557d3 100644
+--- a/web/src/components/SessionChat.tsx
++++ b/web/src/components/SessionChat.tsx
+@@ -233,6 +233,8 @@ export function shouldClearReasoningEffortForModelChange(args: {
+     codexModels: readonly CodexModelSummary[]
+     model: SessionModelSelection
+ }): boolean {
++    // Reserve validates and normalizes effort atomically in the shared runtime.
++    if (args.agentFlavor === 'codex' && args.model === 'gpt-reserve') return false
+     if (!args.previousModelReasoningEffort) {
+         return false
+     }
+@@ -1027,6 +1029,10 @@ function SessionChatInner(props: SessionChatProps) {
+         preferSession: props.session.metadata?.capabilities?.concurrentClients === true,
+         enabled: agentFlavor === 'codex' && props.session.active && !controlledByUser
+     })
++    useEffect(() => {
++        if (agentFlavor !== 'codex' || !props.session.active || !props.session.metadata?.capabilities?.concurrentClients || props.session.thinking) return
++        void queryClient.refetchQueries({ queryKey: queryKeys.sessionCodexModels(sessionId), exact: true }, { cancelRefetch: false })
++    }, [agentFlavor, sessionId, props.session.active, props.session.thinking, props.session.model, props.session.metadata?.capabilities?.concurrentClients, queryClient])
+     const effectiveCodexServiceTier = agentFlavor === 'codex'
+         ? getEffectiveCodexServiceTier(
+             props.session.serviceTier,
+@@ -1043,7 +1049,7 @@ function SessionChatInner(props: SessionChatProps) {
+         for (const codexModel of codexModelsState.models) {
+             options.push({
+                 value: codexModel.id,
+-                label: codexModel.displayName
++                label: codexModel.id === 'gpt-reserve' ? '☾ Luna Reserve' : codexModel.displayName
+             })
+         }
+         return options
+@@ -2170,6 +2176,8 @@ function SessionChatInner(props: SessionChatProps) {
+                         focusInputRef={focusComposerRef}
+                         key={`composer-${props.session.id}`}
+                         sessionId={props.session.id}
++                        codexUsage={codexModelsState.usage}
++                        onModelMenuOpen={agentFlavor === 'codex' ? codexModelsState.refresh : undefined}
+                         canRestoreAttachments={props.session.active}
+                         onUploadDraftSnapshot={(text, attachments) => {
+                             uploadDraftSnapshotRef.current = { text, attachments }
+diff --git a/web/src/hooks/queries/useCodexModels.test.tsx b/web/src/hooks/queries/useCodexModels.test.tsx
+index fc66fe56e..5b91cef72 100644
+--- a/web/src/hooks/queries/useCodexModels.test.tsx
++++ b/web/src/hooks/queries/useCodexModels.test.tsx
+@@ -140,3 +140,22 @@ describe('useCodexModels query scoping', () => {
+         ])
+     })
+ })
++
++describe('shared Codex session catalogs', () => {
++    it('uses the live session account, excludes it from machine caches, and refreshes without polling', async () => {
++        const getMachineCodexModels = vi.fn()
++        const getSessionCodexModels = vi.fn(async (id: string) => ({ success: true, models: [
++            { id: id === 'eligible' ? 'gpt-reserve' : 'gpt-6-astra', displayName: id, isDefault: false }
++        ] }))
++        const api = { getMachineCodexModels, getSessionCodexModels } as unknown as ApiClient
++        const queryClient = createQueryClient()
++        const sharedWrapper = wrapper(queryClient)
++        const first = renderHook(() => useCodexModels({ api, sessionId: 'eligible', machineId: 'm', enabled: true, preferSession: true }), { wrapper: sharedWrapper })
++        const second = renderHook(() => useCodexModels({ api, sessionId: 'ordinary', machineId: 'm', enabled: true, preferSession: true }), { wrapper: sharedWrapper })
++        await waitFor(() => expect(first.result.current.models[0]?.id).toBe('gpt-reserve'))
++        await waitFor(() => expect(second.result.current.models[0]?.id).toBe('gpt-6-astra'))
++        expect(getMachineCodexModels).not.toHaveBeenCalled()
++        first.result.current.refresh()
++        await waitFor(() => expect(getSessionCodexModels).toHaveBeenCalledTimes(3))
++    })
++})
+diff --git a/web/src/hooks/queries/useCodexModels.ts b/web/src/hooks/queries/useCodexModels.ts
+index e28d32c45..9692dcd80 100644
+--- a/web/src/hooks/queries/useCodexModels.ts
++++ b/web/src/hooks/queries/useCodexModels.ts
+@@ -3,6 +3,7 @@ import { RPC_TARGET_MISSING_ERROR_CODE } from '@hapi/protocol/rpcMethods'
+ import { ApiError, type ApiClient } from '@/api/client'
+ import type { CodexModelSummary } from '@/types/api'
+ import { queryKeys } from '@/lib/query-keys'
++import type { CodexAccountUsage } from '@hapi/protocol/apiTypes'
+ 
+ export function useCodexModels(args: {
+     api: ApiClient | null
+@@ -14,6 +15,8 @@ export function useCodexModels(args: {
+     models: CodexModelSummary[]
+     isLoading: boolean
+     error: string | null
++    usage: CodexAccountUsage | null
++    refresh: () => void
+ } {
+     const { api, sessionId, machineId } = args
+     const enabled = Boolean(args.enabled && api && (sessionId || machineId))
+@@ -70,6 +73,8 @@ export function useCodexModels(args: {
+ 
+     return {
+         models: query.data?.models ?? [],
++        usage: query.data?.usage ?? null,
++        refresh: () => { if (enabled) void query.refetch({ cancelRefetch: false }) },
+         isLoading: query.isLoading,
+         error: query.data?.success === false
+             ? (query.data.error ?? 'Failed to load Codex models')
+diff --git a/web/src/hooks/useSSE.ts b/web/src/hooks/useSSE.ts
+index 221801208..eafc93400 100644
+--- a/web/src/hooks/useSSE.ts
++++ b/web/src/hooks/useSSE.ts
+@@ -665,6 +665,8 @@ export function useSSE(options: {
+                 const resumed = data && typeof data === 'object'
+                     && (data as { resume?: unknown }).resume === 'ok'
+                 onConnectRef.current?.({ resumed: Boolean(resumed) })
++                // Account usage is read-only RPC data, not part of the SSE replay log.
++                void queryClient.invalidateQueries({ queryKey: ['session-codex-models'], refetchType: 'active' })
+             }
+ 
+             if (event.type === 'toast') {
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index 12b395bbc..8eef963c5 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -1,4 +1,15 @@
+ export default {
++  'codex.reserve.available': 'Available',
++  'codex.usage.label': 'Usage',
++  'codex.usage.details': 'Codex usage details',
++  'codex.usage.ordinary': 'Ordinary usage',
++  'codex.usage.unknown': 'Unknown',
++  'codex.usage.window': 'Usage window',
++  'codex.usage.minutes': '{value} min',
++  'codex.usage.hours': '{value}h',
++  'codex.usage.days': '{value}d',
++  'codex.usage.remaining': '{value}% remaining',
++  'codex.usage.resets': 'Resets {value}',
+   // Loading states
+   'loading': 'Loading…',
+   'authorizing': 'Authorizing…',
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index 05671bf86..6ce10104a 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -1,4 +1,15 @@
+ export default {
++  'codex.reserve.available': '可用',
++  'codex.usage.label': '额度',
++  'codex.usage.details': 'Codex 额度详情',
++  'codex.usage.ordinary': '普通额度',
++  'codex.usage.unknown': '未知',
++  'codex.usage.window': '额度周期',
++  'codex.usage.minutes': '{value} 分钟',
++  'codex.usage.hours': '{value} 小时',
++  'codex.usage.days': '{value} 天',
++  'codex.usage.remaining': '剩余 {value}%',
++  'codex.usage.resets': '{value} 重置',
+   // Loading states
+   'loading': '加载中…',
+   'authorizing': '认证中…',
+diff --git a/web/src/lib/sessionModelLabel.ts b/web/src/lib/sessionModelLabel.ts
+index def6b2ba7..a8e8931f6 100644
+--- a/web/src/lib/sessionModelLabel.ts
++++ b/web/src/lib/sessionModelLabel.ts
+@@ -13,6 +13,7 @@ export type SessionModelLabel = {
+ }
+ 
+ function getModelLabel(model: string): string | null {
++    if (model === 'gpt-reserve') return '☾ Luna Reserve'
+     return getAgyModelLabel(model) ?? getClaudeModelLabel(model)
+ }
+ 

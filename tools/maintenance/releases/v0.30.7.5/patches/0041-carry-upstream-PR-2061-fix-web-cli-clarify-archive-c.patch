@@ -1,0 +1,427 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Mon, 19 Oct 2026 15:39:30 +0000
+Subject: [PATCH 41/51] carry(upstream): PR #2061 fix(web,cli): clarify archive
+ cleanup progress and bound shutdown waits
+
+Upstream-head: 1c675a90c2c8c5b84573291b3d3c9c205a13fc57
+---
+ cli/src/utils/process.test.ts                 | 44 ++++++++++
+ cli/src/utils/process.ts                      | 23 +++---
+ .../components/ArchiveSessionDialog.test.tsx  | 81 +++++++++++++++++++
+ web/src/components/ArchiveSessionDialog.tsx   | 42 ++++++++++
+ web/src/components/SessionHeader.tsx          | 12 ++-
+ web/src/components/SessionList.tsx            | 12 ++-
+ web/src/components/ui/ConfirmDialog.tsx       | 22 ++++-
+ web/src/lib/locales/en.ts                     |  3 +
+ web/src/lib/locales/ru.ts                     |  3 +
+ web/src/lib/locales/zh-CN.ts                  |  3 +
+ 10 files changed, 218 insertions(+), 27 deletions(-)
+ create mode 100644 web/src/components/ArchiveSessionDialog.test.tsx
+ create mode 100644 web/src/components/ArchiveSessionDialog.tsx
+
+diff --git a/cli/src/utils/process.test.ts b/cli/src/utils/process.test.ts
+index 7c2b15594..bbbcbdecb 100644
+--- a/cli/src/utils/process.test.ts
++++ b/cli/src/utils/process.test.ts
+@@ -226,6 +226,50 @@ describe('getHapiRunnerProcessIdentity on Windows', () => {
+ })
+ 
+ describe('killProcess on Windows (orphanReap / stopSession)', () => {
++    it('includes slow liveness probes in the graceful shutdown deadline', async () => {
++        let graceStarted: number | undefined
++        let alive = true
++        let forcedAt: number | undefined
++        spawnSyncMock.mockImplementation((command: string, args: string[] = []) => {
++            if (command === 'tasklist') {
++                // A synchronous OS query consumes real time even though it is
++                // not part of the timer used to yield between observations.
++                vi.setSystemTime(Date.now() + 400)
++                return completed(alive ? 'hapi.exe 7788 Console' : 'INFO: No tasks')
++            }
++            if (command === 'taskkill' && args.includes('/F')) {
++                forcedAt = Date.now()
++                alive = false
++            } else if (command === 'taskkill') {
++                graceStarted = Date.now()
++            }
++            return completed('')
++        })
++        const stopped = killProcess(7788)
++        await vi.runAllTimersAsync()
++        await expect(stopped).resolves.toBe(true)
++        expect(forcedAt).toBeDefined()
++        expect(graceStarted).toBeDefined()
++        // The two-second wait plus the final observation and taskkill's own
++        // liveness recheck, each taking 400ms in this scenario.
++        expect(forcedAt! - graceStarted!).toBeLessThanOrEqual(2_800)
++    })
++
++    it('bounds slow probes after forced shutdown without treating a live process as stopped', async () => {
++        const started = Date.now()
++        spawnSyncMock.mockImplementation((command: string) => {
++            if (command === 'tasklist') {
++                vi.setSystemTime(Date.now() + 400)
++                return completed('hapi.exe 7788 Console')
++            }
++            return completed('')
++        })
++        const stopped = killProcess(7788, true)
++        await vi.runAllTimersAsync()
++        await expect(stopped).resolves.toBe(false)
++        expect(Date.now() - started).toBeLessThanOrEqual(3_200)
++    })
++
+     beforeAll(() => {
+         if (!originalPlatformDescriptor?.configurable) {
+             throw new Error('process.platform is not configurable in this runtime')
+diff --git a/cli/src/utils/process.ts b/cli/src/utils/process.ts
+index 3786e7602..1842e0369 100644
+--- a/cli/src/utils/process.ts
++++ b/cli/src/utils/process.ts
+@@ -573,11 +573,15 @@ async function waitForProcessToDie(pid: number, force: boolean): Promise<void> {
+   // Windows isProcessAlive shells out to tasklist; keep the poll coarse so a
+   // stop cannot burn the runner event loop for seconds (#1911 Overseer).
+   const pollInterval = isWindows() ? 100 : 20;
+-  let waited = 0;
+-
+-  while (isProcessAlive(pid) && waited < maxWait) {
+-    await new Promise(r => setTimeout(r, pollInterval));
+-    waited += pollInterval;
++  let deadline = Date.now() + maxWait;
++
++  // OS probes are synchronous on Windows. Count their time against the
++  // grace period too, otherwise twenty slow tasklist calls can turn two
++  // seconds of graceful shutdown into a much longer archive request.
++  while (Date.now() < deadline && isProcessAlive(pid)) {
++    const remaining = deadline - Date.now();
++    if (remaining <= 0) break;
++    await new Promise(r => setTimeout(r, Math.min(pollInterval, remaining)));
+   }
+ 
+   // Graceful kill didn't finish — escalate (same structure on both platforms).
+@@ -591,10 +595,11 @@ async function waitForProcessToDie(pid: number, force: boolean): Promise<void> {
+     } catch {
+       return;
+     }
+-    waited = 0;
+-    while (isProcessAlive(pid) && waited < 1000) {
+-      await new Promise(r => setTimeout(r, pollInterval));
+-      waited += pollInterval;
++    deadline = Date.now() + 1000;
++    while (Date.now() < deadline && isProcessAlive(pid)) {
++      const remaining = deadline - Date.now();
++      if (remaining <= 0) break;
++      await new Promise(r => setTimeout(r, Math.min(pollInterval, remaining)));
+     }
+   }
+ }
+diff --git a/web/src/components/ArchiveSessionDialog.test.tsx b/web/src/components/ArchiveSessionDialog.test.tsx
+new file mode 100644
+index 000000000..945fa5556
+--- /dev/null
++++ b/web/src/components/ArchiveSessionDialog.test.tsx
+@@ -0,0 +1,81 @@
++import { StrictMode, useState } from 'react'
++import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import { I18nProvider } from '@/lib/i18n-context'
++import { ToastProvider, useToast } from '@/lib/toast-context'
++import { ArchiveSessionDialog } from './ArchiveSessionDialog'
++
++afterEach(cleanup)
++
++function pendingArchive() {
++    let resolve!: () => void
++    let reject!: (error: Error) => void
++    const promise = new Promise<void>((done, fail) => { resolve = done; reject = fail })
++    return { promise, resolve, reject }
++}
++
++function Harness(props: { active: boolean; confirm: () => Promise<void>; unmountOnClose?: boolean }) {
++    const [open, setOpen] = useState(true)
++    const [pending, setPending] = useState(false)
++    const { toasts } = useToast()
++    return <>
++        {open || !props.unmountOnClose ? <ArchiveSessionDialog
++            isOpen={open} onClose={() => setOpen(false)}
++            sessionId="session-1" sessionName="My session" active={props.active}
++            isPending={pending} onConfirm={async () => {
++                setPending(true)
++                try { await props.confirm() } finally { setPending(false) }
++            }}
++        /> : null}
++        {toasts.map(toast => <div key={toast.id} role="alert">{toast.title}: {toast.body}</div>)}
++    </>
++}
++
++function view(active: boolean, confirm: () => Promise<void>, unmountOnClose = false) {
++    return <StrictMode><I18nProvider><ToastProvider>
++        <Harness active={active} confirm={confirm} unmountOnClose={unmountOnClose} />
++    </ToastProvider></I18nProvider></StrictMode>
++}
++
++describe('ArchiveSessionDialog', () => {
++    it('shows cleanup progress after inactive SSE and still waits for HTTP success', async () => {
++        const archive = pendingArchive()
++        const confirm = vi.fn(() => archive.promise)
++        const rendered = render(view(true, confirm))
++        fireEvent.click(screen.getByRole('button', { name: 'Archive' }))
++        expect(screen.getByRole('button', { name: 'Archiving…' })).toBeDisabled()
++        expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled()
++        rendered.rerender(view(false, confirm))
++        expect(screen.getByText(/Session disconnected\. Confirming archive/)).toBeVisible()
++        expect(screen.getByRole('button', { name: 'Confirming cleanup…' })).toBeDisabled()
++        expect(within(screen.getByRole('dialog')).getAllByRole('button', { name: 'Close' })[0]).toBeEnabled()
++        expect(confirm).toHaveBeenCalledTimes(1)
++        await act(async () => archive.resolve())
++        await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
++        expect(screen.queryByRole('alert')).not.toBeInTheDocument()
++    })
++
++    it.each([false, true])('surfaces a cleanup failure after dismissal (unmount=%s)', async unmountOnClose => {
++        const archive = pendingArchive()
++        const confirm = vi.fn(() => archive.promise)
++        const rendered = render(view(true, confirm, unmountOnClose))
++        fireEvent.click(screen.getByRole('button', { name: 'Archive' }))
++        rendered.rerender(view(false, confirm, unmountOnClose))
++        fireEvent.click(within(screen.getByRole('dialog')).getAllByRole('button', { name: 'Close' })[0]!)
++        expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
++        await act(async () => archive.reject(new Error('Session process is still running')))
++        expect(await screen.findByRole('alert')).toHaveTextContent('Archive could not be confirmed: Session process is still running')
++        expect(confirm).toHaveBeenCalledTimes(1)
++    })
++
++    it('keeps failures visible in an open dialog without claiming success', async () => {
++        const archive = pendingArchive()
++        render(view(false, () => archive.promise))
++        fireEvent.click(screen.getByRole('button', { name: 'Archive' }))
++        await act(async () => archive.reject(new Error('Stop not confirmed')))
++        expect(screen.getByRole('dialog')).toBeVisible()
++        expect(screen.getByText('Stop not confirmed')).toBeVisible()
++        expect(screen.getByRole('button', { name: 'Archive' })).toBeEnabled()
++        expect(screen.queryByRole('alert')).not.toBeInTheDocument()
++    })
++})
+diff --git a/web/src/components/ArchiveSessionDialog.tsx b/web/src/components/ArchiveSessionDialog.tsx
+new file mode 100644
+index 000000000..f6157faea
+--- /dev/null
++++ b/web/src/components/ArchiveSessionDialog.tsx
+@@ -0,0 +1,42 @@
++import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
++import { useTranslation } from '@/lib/use-translation'
++import { useToast } from '@/lib/toast-context'
++
++type ArchiveSessionDialogProps = {
++    isOpen: boolean
++    onClose: () => void
++    sessionId: string
++    sessionName: string
++    active: boolean
++    onConfirm: () => Promise<void>
++    isPending: boolean
++}
++
++export function ArchiveSessionDialog(props: ArchiveSessionDialogProps) {
++    const { t } = useTranslation()
++    const { addToast } = useToast()
++    // Inactive SSE can arrive before the archive request has finished its
++    // process checks. It is progress, not proof that cleanup succeeded.
++    const confirmingCleanup = props.isPending && !props.active
++    return (
++        <ConfirmDialog
++            isOpen={props.isOpen}
++            onClose={props.onClose}
++            title={t('dialog.archive.title')}
++            description={confirmingCleanup
++                ? t('dialog.archive.cleanupDescription')
++                : t('dialog.archive.description', { name: props.sessionName })}
++            confirmLabel={t('dialog.archive.confirm')}
++            confirmingLabel={t(confirmingCleanup ? 'dialog.archive.cleaning' : 'dialog.archive.confirming')}
++            onConfirm={props.onConfirm}
++            isPending={props.isPending}
++            allowDismissWhilePending={confirmingCleanup}
++            onBackgroundError={(message) => addToast({
++                title: t('dialog.archive.error'), body: message,
++                sessionId: props.sessionId, url: `/sessions/${props.sessionId}`
++            })}
++            destructive
++            centerTitle
++        />
++    )
++}
+diff --git a/web/src/components/SessionHeader.tsx b/web/src/components/SessionHeader.tsx
+index 0685557f6..01c881021 100644
+--- a/web/src/components/SessionHeader.tsx
++++ b/web/src/components/SessionHeader.tsx
+@@ -8,6 +8,7 @@ import { SessionActionMenu } from '@/components/SessionActionMenu'
+ import { SessionExportDialog } from '@/components/SessionExportDialog'
+ import { RenameSessionDialog } from '@/components/RenameSessionDialog'
+ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
++import { ArchiveSessionDialog } from '@/components/ArchiveSessionDialog'
+ import { useScratchlistCount } from '@/lib/use-scratchlist-count'
+ import { formatReopenError } from '@/lib/reopenError'
+ import { formatReasoningLabel, getReasoningEffortForFlavor } from '@/lib/codexStatusLabels'
+@@ -608,17 +609,14 @@ export function SessionHeader(props: {
+                 api={api}
+             />
+ 
+-            <ConfirmDialog
++            <ArchiveSessionDialog
+                 isOpen={archiveOpen}
+                 onClose={() => setArchiveOpen(false)}
+-                title={t('dialog.archive.title')}
+-                description={t('dialog.archive.description', { name: title })}
+-                confirmLabel={t('dialog.archive.confirm')}
+-                confirmingLabel={t('dialog.archive.confirming')}
++                sessionId={session.id}
++                sessionName={title}
++                active={session.active}
+                 onConfirm={archiveSession}
+                 isPending={isPending}
+-                destructive
+-                centerTitle
+             />
+ 
+             <ConfirmDialog
+diff --git a/web/src/components/SessionList.tsx b/web/src/components/SessionList.tsx
+index 07815b949..022508134 100644
+--- a/web/src/components/SessionList.tsx
++++ b/web/src/components/SessionList.tsx
+@@ -18,6 +18,7 @@ import { SessionActionMenu } from '@/components/SessionActionMenu'
+ import { SessionExportDialog } from '@/components/SessionExportDialog'
+ import { RenameSessionDialog } from '@/components/RenameSessionDialog'
+ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
++import { ArchiveSessionDialog } from '@/components/ArchiveSessionDialog'
+ import { CopyIcon, CheckIcon, MarkAllReadIcon } from '@/components/icons'
+ 
+ function PinnedSectionIcon(props: { className?: string }) {
+@@ -1406,17 +1407,14 @@ function SessionItem(props: {
+             ) : null}
+ 
+             {archiveOpen ? (
+-                <ConfirmDialog
++                <ArchiveSessionDialog
+                     isOpen={true}
+                     onClose={() => setArchiveOpen(false)}
+-                    title={t('dialog.archive.title')}
+-                    description={t('dialog.archive.description', { name: sessionName })}
+-                    confirmLabel={t('dialog.archive.confirm')}
+-                    confirmingLabel={t('dialog.archive.confirming')}
++                    sessionId={s.id}
++                    sessionName={sessionName}
++                    active={s.active}
+                     onConfirm={archiveSession}
+                     isPending={isPending}
+-                    destructive
+-                    centerTitle
+                 />
+             ) : null}
+ 
+diff --git a/web/src/components/ui/ConfirmDialog.tsx b/web/src/components/ui/ConfirmDialog.tsx
+index 21234e1c5..cdf031a7e 100644
+--- a/web/src/components/ui/ConfirmDialog.tsx
++++ b/web/src/components/ui/ConfirmDialog.tsx
+@@ -1,4 +1,4 @@
+-import { useState, useEffect } from 'react'
++import { useState, useEffect, useRef } from 'react'
+ import {
+     Dialog,
+     DialogContent,
+@@ -18,6 +18,8 @@ type ConfirmDialogProps = {
+     confirmingLabel: string
+     onConfirm: () => Promise<void>
+     isPending: boolean
++    allowDismissWhilePending?: boolean
++    onBackgroundError?: (message: string) => void
+     destructive?: boolean
+     centerTitle?: boolean
+ }
+@@ -33,11 +35,19 @@ export function ConfirmDialog(props: ConfirmDialogProps) {
+         confirmingLabel,
+         onConfirm,
+         isPending,
++        allowDismissWhilePending = false,
++        onBackgroundError,
+         destructive = false,
+         centerTitle = false
+     } = props
+ 
+     const [error, setError] = useState<string | null>(null)
++    const openRef = useRef(isOpen)
++    openRef.current = isOpen
++    useEffect(() => {
++        openRef.current = isOpen
++        return () => { openRef.current = false }
++    }, [isOpen])
+ 
+     // Clear error when dialog opens/closes
+     useEffect(() => {
+@@ -56,7 +66,11 @@ export function ConfirmDialog(props: ConfirmDialogProps) {
+                 err instanceof Error && err.message
+                     ? err.message
+                     : t('dialog.error.default')
+-            setError(message)
++            if (openRef.current) {
++                setError(message)
++            } else {
++                onBackgroundError?.(message)
++            }
+         }
+     }
+ 
+@@ -87,9 +101,9 @@ export function ConfirmDialog(props: ConfirmDialogProps) {
+                         type="button"
+                         variant="secondary"
+                         onClick={onClose}
+-                        disabled={isPending}
++                        disabled={isPending && !allowDismissWhilePending}
+                     >
+-                        {t('button.cancel')}
++                        {t(isPending && allowDismissWhilePending ? 'button.close' : 'button.cancel')}
+                     </Button>
+                     <Button
+                         type="button"
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index 188cfcb06..b67e7d35b 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -298,6 +298,9 @@ export default {
+   'dialog.archive.description': 'Are you sure you want to archive "{name}"? This will disconnect active session.',
+   'dialog.archive.confirm': 'Archive',
+   'dialog.archive.confirming': 'Archiving…',
++  'dialog.archive.cleaning': 'Confirming cleanup…',
++  'dialog.archive.cleanupDescription': 'Session disconnected. Confirming archive and background cleanup. You can close this window; archiving will continue.',
++  'dialog.archive.error': 'Archive could not be confirmed',
+   'dialog.reopen.errorTitle': 'Could not reopen session',
+   'dialog.reopen.dismiss': 'Dismiss',
+   'dialog.delete.title': 'Delete Session',
+diff --git a/web/src/lib/locales/ru.ts b/web/src/lib/locales/ru.ts
+index 61f137722..310c7ad13 100644
+--- a/web/src/lib/locales/ru.ts
++++ b/web/src/lib/locales/ru.ts
+@@ -297,6 +297,9 @@ export default {
+   'dialog.archive.description': 'Вы уверены, что хотите архивировать «{name}»? Активная сессия будет отключена.',
+   'dialog.archive.confirm': 'Архивировать',
+   'dialog.archive.confirming': 'Архивирование…',
++  'dialog.archive.cleaning': 'Проверка завершения…',
++  'dialog.archive.cleanupDescription': 'Сессия отключена. Проверяем архивирование и завершение фоновых процессов. Это окно можно закрыть: архивирование продолжится.',
++  'dialog.archive.error': 'Не удалось подтвердить архивирование',
+   'dialog.reopen.errorTitle': 'Не удалось открыть сессию заново',
+   'dialog.reopen.dismiss': 'Закрыть',
+   'dialog.delete.title': 'Удалить сессию',
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index 816320504..40de10aa8 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -299,6 +299,9 @@ export default {
+   'dialog.archive.description': '确定要归档 "{name}" 吗？这将断开活动会话。',
+   'dialog.archive.confirm': '归档',
+   'dialog.archive.confirming': '归档中…',
++  'dialog.archive.cleaning': '正在确认清理…',
++  'dialog.archive.cleanupDescription': '会话已断开，正在确认归档和后台清理。关闭此窗口不会取消归档。',
++  'dialog.archive.error': '归档尚未确认完成',
+ 
+   'dialog.reopen.errorTitle': '无法重新打开会话',
+   'dialog.reopen.dismiss': '关闭',

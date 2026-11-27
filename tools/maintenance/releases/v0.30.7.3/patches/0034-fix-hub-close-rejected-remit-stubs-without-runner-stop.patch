@@ -1,0 +1,68 @@
+From 834f40a657f142e0e6aa9926412b5680dcf1437c Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 26 Sep 2026 16:51:22 +0800
+Subject: [PATCH] fix(hub): close rejected remit stubs without runner stop
+
+---
+ cli/src/runner/runner.integration.test.ts |  2 +-
+ hub/src/sync/syncEngine.ts                | 17 ++++++++++++++---
+ 2 files changed, 15 insertions(+), 4 deletions(-)
+
+diff --git a/cli/src/runner/runner.integration.test.ts b/cli/src/runner/runner.integration.test.ts
+index 42cfc41bb..4e5f3b714 100644
+--- a/cli/src/runner/runner.integration.test.ts
++++ b/cli/src/runner/runner.integration.test.ts
+@@ -276,7 +276,7 @@ describe.skipIf(!await isServerHealthy())('Runner Integration Tests', { timeout:
+     expect(response.status).toBe(502);
+     expect(result).toMatchObject({ type: 'error', code: 'outside_workspace_roots', cleanedUp: true });
+     expect(result.childSessionId).toBeTruthy();
+-    expect(await stopRunnerSession(result.childSessionId!)).toBe('already_gone');
++    expect(await stopRunnerSession(result.childSessionId!)).toBe('unknown');
+     expect(await listRunnerSessions()).toEqual([]);
+     expect(existsSync(directory)).toBe(false);
+     const archived = await fetch(`${configuration.apiUrl}/api/sessions/${result.childSessionId}`, { headers });
+diff --git a/hub/src/sync/syncEngine.ts b/hub/src/sync/syncEngine.ts
+index adcd8409c..65fce3847 100644
+--- a/hub/src/sync/syncEngine.ts
++++ b/hub/src/sync/syncEngine.ts
+@@ -2523,7 +2523,8 @@ export class SyncEngine {
+         const fail = async (
+             code: string,
+             message: string,
+-            orphanSessionId?: string
++            orphanSessionId?: string,
++            cleanedUp = false
+         ): Promise<SpawnSessionWithRemitResult> => {
+             const cleanupOperation: SpawnRemitOperation = {
+                 ...operation,
+@@ -2531,7 +2532,7 @@ export class SyncEngine {
+                 updatedAt: Date.now(),
+                 code,
+                 error: message.slice(0, 500),
+-                cleanedUp: false,
++                cleanedUp,
+                 orphanSessionId
+             }
+             if (!this.persistSpawnRemitOperation(sessionId, namespace, operation, cleanupOperation)) {
+@@ -2575,7 +2576,17 @@ export class SyncEngine {
+                     error instanceof Error ? error.message : 'Runner failed to create a session'
+                 )
+             }
+-            if (result.type === 'error') return await fail(result.code ?? 'spawn_failed', result.message)
++            if (result.type === 'error') {
++                if (result.childStarted === false) {
++                    try {
++                        this.sessionCache.markSessionArchivedFromHub(sessionId, 'Spawn rejected before execution')
++                        return await fail(result.code ?? 'spawn_failed', result.message, undefined, true)
++                    } catch {
++                        // Unknown cleanup state falls through to the runner stop check.
++                    }
++                }
++                return await fail(result.code ?? 'spawn_failed', result.message)
++            }
+             if (result.sessionId !== sessionId) {
+                 return await fail(
+                     'spawn_not_fresh',
+-- 
+2.54.0 (Apple Git-157)
+

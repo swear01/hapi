@@ -1,0 +1,175 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 14 Nov 2026 02:49:34 +0800
+Subject: [PATCH 20/29] carry(upstream): PR #2432
+
+---
+ .../claude/claudeRemoteLauncher.steer.test.ts |  7 ++-
+ cli/src/claude/claudeRemoteLauncher.ts        |  1 +
+ .../claude/utils/permissionHandler.test.ts    | 46 +++++++++++++++++++
+ cli/src/claude/utils/permissionHandler.ts     | 21 +++++++++
+ 4 files changed, 74 insertions(+), 1 deletion(-)
+
+diff --git a/cli/src/claude/claudeRemoteLauncher.steer.test.ts b/cli/src/claude/claudeRemoteLauncher.steer.test.ts
+index 9954c6dd6..6f1ac8dfe 100644
+--- a/cli/src/claude/claudeRemoteLauncher.steer.test.ts
++++ b/cli/src/claude/claudeRemoteLauncher.steer.test.ts
+@@ -10,7 +10,8 @@ const harness = vi.hoisted(() => ({
+     steered: [] as string[],
+     deliveries: [] as Array<(delivered: boolean) => void>,
+     endTurn: null as (() => void) | null,
+-    signal: null as AbortSignal | null
++    signal: null as AbortSignal | null,
++    denyPendingForSteer: vi.fn()
+ }))
+ 
+ vi.mock('./claudeRemote', () => ({
+@@ -45,6 +46,7 @@ vi.mock('./utils/permissionHandler', () => ({
+         reset(): void {}
+         isAborted(): boolean { return false }
+         handleModeChange(): void {}
++        denyPendingForSteer = harness.denyPendingForSteer
+     }
+ }))
+ 
+@@ -141,6 +143,7 @@ describe('claudeRemoteLauncher steer', () => {
+         harness.deliveries = []
+         harness.endTurn = null
+         harness.signal = null
++        harness.denyPendingForSteer.mockClear()
+     })
+ 
+     it('writes the queued row into the running turn and acks it once Claude picks it up', async () => {
+@@ -150,6 +153,7 @@ describe('claudeRemoteLauncher steer', () => {
+ 
+             await expect(steer('steer-1')).resolves.toEqual({ steered: true })
+             expect(harness.steered).toEqual(['Also run lint'])
++            expect(harness.denyPendingForSteer).toHaveBeenCalledOnce()
+             expect(client.setSteerDeliveryState).toHaveBeenCalledWith(['steer-1'], 'dispatching')
+             expect(client.notePendingHubPromptEcho).toHaveBeenCalledWith('Also run lint', ['steer-1'])
+             expect(queue.size()).toBe(0)
+@@ -179,6 +183,7 @@ describe('claudeRemoteLauncher steer', () => {
+             })
+             await expect(steer('missing')).resolves.toEqual({ steered: false, error: 'Message not in queue' })
+             expect(harness.steered).toEqual([])
++            expect(harness.denyPendingForSteer).not.toHaveBeenCalled()
+             expect(queue.pendingLocalIds()).toEqual(['other-mode', 'command'])
+         } finally {
+             await stop()
+diff --git a/cli/src/claude/claudeRemoteLauncher.ts b/cli/src/claude/claudeRemoteLauncher.ts
+index e0d10b770..9a7a9a17d 100644
+--- a/cli/src/claude/claudeRemoteLauncher.ts
++++ b/cli/src/claude/claudeRemoteLauncher.ts
+@@ -221,6 +221,7 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
+                     await restoreQueuedReservation();
+                     return { steered: false, error: 'Active turn changed' };
+                 }
++                permissionHandler.denyPendingForSteer();
+                 void delivery.delivered.then(async (delivered) => {
+                     if (delivered) {
+                         // Agent output preceding the pickup is already in the
+diff --git a/cli/src/claude/utils/permissionHandler.test.ts b/cli/src/claude/utils/permissionHandler.test.ts
+index c5954f0cd..d5ee4f482 100644
+--- a/cli/src/claude/utils/permissionHandler.test.ts
++++ b/cli/src/claude/utils/permissionHandler.test.ts
+@@ -194,3 +194,49 @@ describe('PermissionHandler — canceled request finalization', () => {
+         );
+     });
+ });
++
++describe('PermissionHandler — steer while a request is pending', () => {
++    it('denies the pending question so the turn reaches a tool boundary, without aborting the turn', async () => {
++        const { session, getAgentState } = createFakeSession();
++        const handler = new PermissionHandler(session);
++
++        handler.onMessage({
++            type: 'assistant',
++            message: { role: 'assistant', content: [{ type: 'tool_use', id: 'tc-1', name: 'AskUserQuestion', input: { questions: [] } }] },
++        } as any);
++        const resultPromise = handler.handleToolCall(
++            'AskUserQuestion',
++            { questions: [] },
++            { permissionMode: 'default' } as any,
++            { signal: new AbortController().signal }
++        );
++
++        handler.denyPendingForSteer();
++
++        await expect(resultPromise).resolves.toMatchObject({ behavior: 'deny' });
++        expect(getAgentState().requests?.['tc-1']).toBeUndefined();
++        expect(getAgentState().completedRequests?.['tc-1']).toMatchObject({ status: 'denied' });
++        expect(handler.isAborted('tc-1')).toBe(false);
++    });
++
++    it('keeps the turn running when the pending request is a plan exit', async () => {
++        const { session } = createFakeSession();
++        const handler = new PermissionHandler(session);
++
++        handler.onMessage({
++            type: 'assistant',
++            message: { role: 'assistant', content: [{ type: 'tool_use', id: 'tc-plan', name: 'ExitPlanMode', input: {} }] },
++        } as any);
++        const resultPromise = handler.handleToolCall(
++            'ExitPlanMode',
++            {},
++            { permissionMode: 'plan' } as any,
++            { signal: new AbortController().signal }
++        );
++
++        handler.denyPendingForSteer();
++
++        await expect(resultPromise).resolves.toMatchObject({ behavior: 'deny' });
++        expect(handler.isAborted('tc-plan')).toBe(false);
++    });
++});
+diff --git a/cli/src/claude/utils/permissionHandler.ts b/cli/src/claude/utils/permissionHandler.ts
+index f5d3a3773..ed7ef7738 100644
+--- a/cli/src/claude/utils/permissionHandler.ts
++++ b/cli/src/claude/utils/permissionHandler.ts
+@@ -124,6 +124,7 @@ export class PermissionHandler extends BasePermissionHandler<PermissionResponse,
+     private allowedTools = new Set<string>();
+     private allowedBashLiterals = new Set<string>();
+     private allowedBashPrefixes = new Set<string>();
++    private steerDenied = new Set<string>();
+     private onPermissionRequestCallback?: (toolCallId: string) => void;
+ 
+     constructor(session: Session) {
+@@ -438,6 +439,10 @@ export class PermissionHandler extends BasePermissionHandler<PermissionResponse,
+      * Checks if a tool call is rejected
+      */
+     isAborted(toolCallId: string): boolean {
++        // A steer denial must keep the turn running so Claude reads the steer
++        if (this.steerDenied.has(toolCallId)) {
++            return false;
++        }
+ 
+         // If tool not approved, it's aborted
+         if (this.responses.get(toolCallId)?.approved === false) {
+@@ -454,11 +459,27 @@ export class PermissionHandler extends BasePermissionHandler<PermissionResponse,
+         return false;
+     }
+ 
++    /**
++     * Deny every pending request so a steered message can reach Claude, which
++     * only folds steers in at a tool boundary that a pending request blocks.
++     * isAborted() reports these as not aborted, so the turn keeps running.
++     */
++    denyPendingForSteer(): void {
++        const reason = 'The user sent a new message instead of answering. Read it and continue from there.';
++        for (const [id, pending] of this.pendingRequests) {
++            this.pendingRequests.delete(id);
++            this.steerDenied.add(id);
++            pending.resolve({ behavior: 'deny', message: reason });
++            this.finalizeRequest(id, { status: 'denied', reason });
++        }
++    }
++
+     /**
+      * Resets all state for new sessions
+      */
+     reset(): void {
+         this.toolCalls = [];
++        this.steerDenied.clear();
+         this.responses.clear();
+         this.allowedTools.clear();
+         this.allowedBashLiterals.clear();

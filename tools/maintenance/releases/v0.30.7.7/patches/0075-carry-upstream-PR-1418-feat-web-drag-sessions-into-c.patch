@@ -1,0 +1,568 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Fri, 23 Oct 2026 18:53:16 +0000
+Subject: [PATCH 75/94] carry(upstream): PR #1418 feat(web): drag sessions into
+ composer mentions
+
+---
+ .github/workflows/test.yml                    |  2 +-
+ e2e/session-mention-drag.spec.ts              | 67 +++++++++++++++++++
+ web/README.md                                 |  1 +
+ .../session-mention-drag-fixture.html         |  5 ++
+ .../session-mention-drag-fixture.tsx          | 63 +++++++++++++++++
+ .../AssistantChat/HappyComposer.tsx           |  8 +++
+ .../AssistantChat/RichComposerInput.test.tsx  | 33 +++++++++
+ .../AssistantChat/RichComposerInput.tsx       | 21 +++++-
+ .../SessionList.directory-action.test.tsx     | 22 ++++++
+ web/src/components/SessionList.tsx            | 15 ++++-
+ web/src/hooks/useLongPress.test.tsx           | 30 +++++++++
+ web/src/hooks/useLongPress.ts                 | 24 +++++++
+ web/src/lib/sessionMentionDrag.test.ts        | 24 +++++++
+ web/src/lib/sessionMentionDrag.ts             | 22 ++++++
+ 14 files changed, 333 insertions(+), 4 deletions(-)
+ create mode 100644 e2e/session-mention-drag.spec.ts
+ create mode 100644 web/e2e-fixtures/session-mention-drag-fixture.html
+ create mode 100644 web/e2e-fixtures/session-mention-drag-fixture.tsx
+ create mode 100644 web/src/lib/sessionMentionDrag.test.ts
+ create mode 100644 web/src/lib/sessionMentionDrag.ts
+
+diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
+index 0eb89d76c..d0933e5f8 100644
+--- a/.github/workflows/test.yml
++++ b/.github/workflows/test.yml
+@@ -18,7 +18,7 @@ jobs:
+             # Required by cli/src/utils/windowsProcessTree.pwsh.test.ts — image
+             # inspect alone does not pull; silent skip was fake B1 coverage (#1911).
+             - run: docker pull mcr.microsoft.com/powershell:latest
+-            - run: bun run test:e2e -- terminal-wrap-fidelity.spec.ts composer-copy.spec.ts session-list-scroll.spec.ts cold-initial-tail.spec.ts scrollbar-auto-hide.spec.ts attachment-removal.spec.ts abort-retry.spec.ts load-earlier-running-session.spec.ts
++            - run: bun run test:e2e -- terminal-wrap-fidelity.spec.ts composer-copy.spec.ts session-list-scroll.spec.ts cold-initial-tail.spec.ts scrollbar-auto-hide.spec.ts attachment-removal.spec.ts abort-retry.spec.ts load-earlier-running-session.spec.ts session-mention-drag.spec.ts
+             - run: bun run test
+ 
+     # Serial runner-integration suite: starts real detached runner/session
+diff --git a/e2e/session-mention-drag.spec.ts b/e2e/session-mention-drag.spec.ts
+new file mode 100644
+index 000000000..b86fd56dd
+--- /dev/null
++++ b/e2e/session-mention-drag.spec.ts
+@@ -0,0 +1,67 @@
++import { expect, test } from '@playwright/test'
++
++test('a session drop without an editor selection appends its full reference without navigating', async ({ page }) => {
++    await page.goto('/e2e-fixtures/session-mention-drag-fixture.html')
++    const editor = page.getByTestId('rich-composer-input')
++    await editor.fill('Compare: ')
++    await page.evaluate(() => {
++        // Clear at drop time: Chromium can recreate a selection when the
++        // source button takes focus, before the native drag even starts.
++        document.addEventListener('drop', () => window.getSelection()?.removeAllRanges(), {
++            capture: true, once: true,
++        })
++    })
++    await page.getByRole('button', { name: /^Peer session / }).dragTo(editor)
++
++    await expect(editor.locator('[data-session-id="peer-session"]')).toBeVisible()
++    await expect(page.getByTestId('selected-session')).toHaveText('current-session')
++    await expect(page.getByRole('menu')).toHaveCount(0)
++    await editor.press('Enter')
++    await expect(page.getByTestId('sent-message')).toHaveText('Compare: [Peer session](/sessions/peer-session)')
++})
++
++test('untitled conversations are draggable, named empty sessions are not', async ({ page }) => {
++    await page.goto('/e2e-fixtures/session-mention-drag-fixture.html')
++    const editor = page.getByTestId('rich-composer-input')
++    await expect(page.getByRole('button', { name: /^Named empty / })).toHaveAttribute('draggable', 'false')
++    const untitled = page.getByRole('button', { name: /^untitled-project / })
++    await expect(untitled).toHaveAttribute('draggable', 'true')
++    await untitled.dragTo(editor)
++    await editor.press('Enter')
++    await expect(page.getByTestId('sent-message')).toHaveText('[untitled-project](/sessions/untitled-session)')
++})
++
++test('a session drop preserves the existing editor caret', async ({ page }) => {
++    await page.goto('/e2e-fixtures/session-mention-drag-fixture.html')
++    const editor = page.getByTestId('rich-composer-input')
++    await editor.fill('Compare: details')
++    await editor.evaluate(element => {
++        const range = document.createRange()
++        range.setStart(element.firstChild!, 9)
++        range.collapse(true)
++        const selection = window.getSelection()!
++        selection.removeAllRanges()
++        selection.addRange(range)
++    })
++    await page.getByRole('button', { name: /^Peer session / }).dragTo(editor)
++    await editor.press('Enter')
++    await expect(page.getByTestId('sent-message')).toHaveText('Compare: [Peer session](/sessions/peer-session) details')
++})
++
++test('dropping the current session leaves the draft unchanged', async ({ page }) => {
++    await page.goto('/e2e-fixtures/session-mention-drag-fixture.html')
++    const editor = page.getByTestId('rich-composer-input')
++    await editor.fill('Keep this draft')
++    await page.getByRole('button', { name: /^Current session / }).dragTo(editor)
++    await expect(editor.locator('[data-session-id]')).toHaveCount(0)
++    await expect(editor).toHaveText('Keep this draft')
++    await expect(page.getByTestId('selected-session')).toHaveText('current-session')
++})
++
++test('a disabled composer does not accept session drops', async ({ page }) => {
++    await page.goto('/e2e-fixtures/session-mention-drag-fixture.html?disabled')
++    const editor = page.getByTestId('rich-composer-input')
++    await page.getByRole('button', { name: /^Peer session / }).dragTo(editor)
++    await expect(editor.locator('[data-session-id]')).toHaveCount(0)
++    await expect(page.getByTestId('sent-message')).toBeEmpty()
++})
+diff --git a/web/README.md b/web/README.md
+index 77256b2e1..eae7dd10f 100644
+--- a/web/README.md
++++ b/web/README.md
+@@ -24,6 +24,7 @@ React Mini App / PWA for monitoring and controlling hapi sessions.
+ - The login screen includes a top-right hub picker; if unset, the app uses the same origin it was loaded from.
+ - Live updates come from the hub via SSE.
+ - Session `@` suggestions require conversation content, including untitled conversations. Names and directory labels affect display/search, not eligibility; empty stubs stay excluded.
++- On desktop, drag a session with conversation content from the sidebar into the rich composer to insert the same session mention as `@`. It uses the current caret, or the end of the draft when no editor selection exists. The current session cannot reference itself.
+ 
+ ## Routes
+ 
+diff --git a/web/e2e-fixtures/session-mention-drag-fixture.html b/web/e2e-fixtures/session-mention-drag-fixture.html
+new file mode 100644
+index 000000000..fbbd2e864
+--- /dev/null
++++ b/web/e2e-fixtures/session-mention-drag-fixture.html
+@@ -0,0 +1,5 @@
++<!doctype html>
++<html lang="en">
++<head><meta charset="UTF-8" /><title>Session mention drag fixture</title></head>
++<body><div id="root"></div><script type="module" src="./session-mention-drag-fixture.tsx"></script></body>
++</html>
+diff --git a/web/e2e-fixtures/session-mention-drag-fixture.tsx b/web/e2e-fixtures/session-mention-drag-fixture.tsx
+new file mode 100644
+index 000000000..887211302
+--- /dev/null
++++ b/web/e2e-fixtures/session-mention-drag-fixture.tsx
+@@ -0,0 +1,63 @@
++import { useState } from 'react'
++import { createRoot } from 'react-dom/client'
++import { AssistantRuntimeProvider } from '@assistant-ui/react'
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
++import { SessionSchema } from '@hapi/protocol/schemas'
++import { toSessionSummary } from '@hapi/protocol'
++import { SessionList } from '../src/components/SessionList'
++import { HappyComposer } from '../src/components/AssistantChat/HappyComposer'
++import { DragDropZone } from '../src/components/AssistantChat/DragDropZone'
++import { useHappyRuntime } from '../src/lib/assistant-runtime'
++import { I18nProvider } from '../src/lib/i18n-context'
++import { ToastProvider } from '../src/lib/toast-context'
++import '../src/index.css'
++
++localStorage.setItem('hapi.fue.v1.rich-composer-mentions', '1')
++
++const current = SessionSchema.parse({
++    id: 'current-session', namespace: 'fixture', seq: 1,
++    createdAt: 1, updatedAt: 1, active: true, activeAt: 1,
++    thinking: false, thinkingAt: 0, agentState: null,
++    agentStateVersion: 0, metadataVersion: 0, hasConversationContent: true,
++    metadata: { path: '/project', host: 'fixture', name: 'Current session', flavor: 'codex' },
++})
++const sessions = [
++    current,
++    { ...current, id: 'peer-session', metadata: { ...current.metadata!, name: 'Peer session' } },
++    { ...current, id: 'untitled-session', metadata: { ...current.metadata!, name: undefined, path: '/untitled-project' } },
++    { ...current, id: 'empty-session', hasConversationContent: false, metadata: { ...current.metadata!, name: 'Named empty' } },
++].map(toSessionSummary)
++const disabled = new URLSearchParams(location.search).has('disabled')
++
++function Fixture() {
++    const [selected, setSelected] = useState(current.id)
++    const [sent, setSent] = useState('')
++    const runtime = useHappyRuntime({
++        session: current, blocks: [], messagesVersion: 0, historyVersion: 0,
++        isSending: false, onSendMessage: setSent, onAbort: async () => {},
++    })
++    return (
++        <AssistantRuntimeProvider runtime={runtime}>
++            <div style={{ display: 'flex', height: 600, gap: 24, padding: 24 }}>
++                <aside style={{ width: 320, display: 'flex', flexDirection: 'column' }}>
++                    <SessionList sessions={sessions} selectedSessionId={selected}
++                        onSelect={setSelected} onNewSession={() => {}}
++                        isLoading={false} renderHeader={false} api={null} />
++                </aside>
++                <main style={{ width: 600 }}>
++                    <output data-testid="selected-session">{selected}</output>
++                    <DragDropZone disabled={disabled}>
++                        <HappyComposer sessionId={current.id} disabled={disabled} agentFlavor="codex" />
++                    </DragDropZone>
++                    <output data-testid="sent-message">{sent}</output>
++                </main>
++            </div>
++        </AssistantRuntimeProvider>
++    )
++}
++
++createRoot(document.getElementById('root')!).render(
++    <QueryClientProvider client={new QueryClient()}>
++        <ToastProvider><I18nProvider><Fixture /></I18nProvider></ToastProvider>
++    </QueryClientProvider>,
++)
+diff --git a/web/src/components/AssistantChat/HappyComposer.tsx b/web/src/components/AssistantChat/HappyComposer.tsx
+index 09e72df76..2fa5d5179 100644
+--- a/web/src/components/AssistantChat/HappyComposer.tsx
++++ b/web/src/components/AssistantChat/HappyComposer.tsx
+@@ -1038,6 +1038,13 @@ export function HappyComposer(props: {
+         haptic('light')
+     }, [api, suggestions, inputState, autocompletePrefixes, haptic, richMentionsEnabled, handleUserEdit])
+ 
++    const handleSessionMentionDrop = useCallback((mention: { id: string; title: string }) => {
++        if (mention.id === sessionId) return
++        handleUserEdit()
++        richInputRef.current?.insertSessionMention(mention, [])
++        richInputRef.current?.focus()
++    }, [handleUserEdit, sessionId])
++
+     const abortDisabled = controlsDisabled || isAborting || !threadIsRunning
+     const switchDisabled = controlsDisabled || isSwitching || !controlledByUser
+     const showSwitchButton = Boolean(controlledByUser && onSwitchToRemote)
+@@ -2509,6 +2516,7 @@ export function HappyComposer(props: {
+                                             onMirrorChange={handleRichMirrorChange}
+                                             onKeyDown={handleKeyDown}
+                                             onPaste={handlePaste}
++                                            onSessionMentionDrop={handleSessionMentionDrop}
+                                             onFocus={() => engageRichComposerFue()}
+                                             resolveSessionMentionTooltip={resolveSessionMentionTooltip}
+                                             onEdit={handleRichEdit}
+diff --git a/web/src/components/AssistantChat/RichComposerInput.test.tsx b/web/src/components/AssistantChat/RichComposerInput.test.tsx
+index 82037ecfe..b9f8e9b5a 100644
+--- a/web/src/components/AssistantChat/RichComposerInput.test.tsx
++++ b/web/src/components/AssistantChat/RichComposerInput.test.tsx
+@@ -513,3 +513,36 @@ describe('RichComposerInput undo history', () => {
+         expect(value.textContent).toBe('ab')
+     })
+ })
++
++describe('RichComposerInput session drops', () => {
++    it('forwards a HAPI session drag payload', () => {
++        const onSessionMentionDrop = vi.fn()
++        render(
++            <RichComposerInput
++                value=""
++                onValueChange={() => {}}
++                onMirrorChange={() => {}}
++                onSessionMentionDrop={onSessionMentionDrop}
++            />
++        )
++
++        const editor = screen.getByRole('textbox')
++        expect(fireEvent.dragOver(editor, {
++            dataTransfer: { types: ['application/x-hapi-session-mention'] },
++        })).toBe(false)
++
++        fireEvent.drop(editor, {
++            dataTransfer: {
++                types: ['application/x-hapi-session-mention'],
++                getData: (type: string) => type === 'application/x-hapi-session-mention'
++                    ? '{"id":"peer-1","title":"Peer session"}'
++                    : '',
++            },
++        })
++
++        expect(onSessionMentionDrop).toHaveBeenCalledWith({
++            id: 'peer-1',
++            title: 'Peer session',
++        })
++    })
++})
+diff --git a/web/src/components/AssistantChat/RichComposerInput.tsx b/web/src/components/AssistantChat/RichComposerInput.tsx
+index 9966617d2..30c065b8d 100644
+--- a/web/src/components/AssistantChat/RichComposerInput.tsx
++++ b/web/src/components/AssistantChat/RichComposerInput.tsx
+@@ -34,6 +34,7 @@ import {
+ } from '@/lib/sessionReference'
+ import { SessionRowSummary } from '@/components/SessionRowSummary'
+ import type { SessionSummary } from '@/types/api'
++import { parseSessionMentionDrag, SESSION_MENTION_DRAG_MIME } from '@/lib/sessionMentionDrag'
+ 
+ export type RichComposerInputHandle = {
+     focus: () => void
+@@ -76,6 +77,7 @@ type Props = {
+     onPaste?: (e: ReactClipboardEvent<HTMLDivElement>) => void
+     onFocus?: (e: ReactFocusEvent<HTMLDivElement>) => void
+     onEdit?: () => void
++    onSessionMentionDrop?: (mention: { id: string; title: string }) => void
+     /** Live session meta for chip hover / aria-label (from useSessions). */
+     resolveSessionMentionTooltip?: ResolveSessionMentionTooltip
+ }
+@@ -687,6 +689,7 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
+         onPaste,
+         onFocus,
+         onEdit,
++        onSessionMentionDrop,
+         resolveSessionMentionTooltip,
+     },
+     ref
+@@ -1028,6 +1031,19 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
+         insertPlainClipboardText(e.clipboardData?.getData('text/plain') ?? '')
+     }, [insertPlainClipboardText, onPaste])
+ 
++    const handleDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => {
++        if (disabled || !e.dataTransfer.types.includes(SESSION_MENTION_DRAG_MIME)) return
++        e.preventDefault()
++        e.dataTransfer.dropEffect = 'copy'
++    }, [disabled])
++
++    const handleDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
++        const mention = parseSessionMentionDrag(e.dataTransfer)
++        if (!mention || disabled) return
++        e.preventDefault()
++        onSessionMentionDrop?.(mention)
++    }, [disabled, onSessionMentionDrop])
++
+     const applyBackwardDelete = useCallback((
+         root: HTMLElement,
+         segments: readonly ComposerSegment[],
+@@ -1068,8 +1084,7 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
+         return () => root.removeEventListener('beforeinput', handleBeforeInput)
+     }, [applyBackwardDelete, applyHistory, recordNativeEdit])
+ 
+-    // No onDrop: intercepting without caretRangeFromPoint appends at EOF / no-ops
+-    // in-editor moves. Native CE drop + plaintext-only / paste path is enough for #1215.
++    // Session drops use the current editor selection; without one, insertion falls back to EOF.
+ 
+     const placeholderRef = useRef<HTMLDivElement>(null)
+ 
+@@ -1200,6 +1215,8 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
+                 onCopy={(e) => handleCopyOrCut(e, false)}
+                 onCut={(e) => handleCopyOrCut(e, true)}
+                 onPaste={handlePaste}
++                onDragOver={handleDragOver}
++                onDrop={handleDrop}
+                 onCompositionStart={() => {
+                     const root = rootRef.current
+                     if (root) recordUndo(segmentsFromEditor(root), getMirrorSelection(root))
+diff --git a/web/src/components/SessionList.directory-action.test.tsx b/web/src/components/SessionList.directory-action.test.tsx
+index 4dbea632b..10b080448 100644
+--- a/web/src/components/SessionList.directory-action.test.tsx
++++ b/web/src/components/SessionList.directory-action.test.tsx
+@@ -68,6 +68,28 @@ function getSessionPath(label: string) {
+ }
+ 
+ describe('SessionList directory action', () => {
++    it('only makes mentionable session rows draggable', () => {
++        renderWithProviders(
++            <SessionList
++                sessions={[
++                    makeSession({ id: 'untitled', updatedAt: 2, hasConversationContent: true, metadata: { path: '/work' } }),
++                    makeSession({ id: 'husk', updatedAt: 1, hasConversationContent: false, metadata: { path: '/work', name: 'Named empty', agentSessionId: 'thread-husk' } }),
++                ]}
++                selectedSessionId={null}
++                onSelect={vi.fn()}
++                onNewSession={vi.fn()}
++                onRefresh={vi.fn()}
++                isLoading={false}
++                renderHeader={false}
++                api={null}
++            />
++        )
++
++        const rows = document.querySelectorAll<HTMLButtonElement>('.session-list-item')
++        expect(rows[0].draggable).toBe(true)
++        expect(rows[1].draggable).toBe(false)
++    })
++
+     it.each(['Enter', ' '])('preserves native directory-button activation for %s', (key) => {
+         const onNewSessionInDirectory = vi.fn()
+         const writeText = vi.fn(async () => {})
+diff --git a/web/src/components/SessionList.tsx b/web/src/components/SessionList.tsx
+index e3952b57c..f1fdc97e8 100644
+--- a/web/src/components/SessionList.tsx
++++ b/web/src/components/SessionList.tsx
+@@ -148,6 +148,7 @@ export type SessionToolbarExtra = {
+     node: ReactNode
+     widthPx?: number
+ }
++import { SESSION_MENTION_DRAG_MIME } from '@/lib/sessionMentionDrag'
+ 
+ export { getWorktreeSessionLabel } from '@/lib/sessionWorktreeLabel'
+ 
+@@ -1369,7 +1370,7 @@ function SessionItem(props: {
+         machineLabel,
+         lastSeenVersion
+     } = props
+-    const { haptic } = usePlatform()
++    const { haptic, isTouch } = usePlatform()
+     const [menuOpen, setMenuOpen] = useState(false)
+     const [menuAnchorPoint, setMenuAnchorPoint] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
+     const [renameOpen, setRenameOpen] = useState(false)
+@@ -1476,6 +1477,18 @@ function SessionItem(props: {
+                 type="button"
+                 {...longPressHandlers}
+                 data-session-scroll-anchor
++                draggable={!isTouch && s.hasConversationContent === true}
++                onDragStart={(event) => {
++                    // A drag supersedes the press gesture: cancel any pending
++                    // long-press and close a menu already opened by a slow grab.
++                    longPressHandlers.onDragStart(event)
++                    setMenuOpen(false)
++                    event.dataTransfer.effectAllowed = 'copy'
++                    event.dataTransfer.setData(SESSION_MENTION_DRAG_MIME, JSON.stringify({
++                        id: s.id,
++                        title: sessionName || s.id.slice(0, 8),
++                    }))
++                }}
+                 className={`session-list-item group/session-row flex w-full flex-col gap-1 py-2 pl-2.5 pr-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)] select-none rounded-lg ${selected ? 'bg-[var(--app-secondary-bg)]' : ''}`}
+                 style={{ WebkitTouchCallout: 'none' }}
+                 aria-current={selected ? 'page' : undefined}
+diff --git a/web/src/hooks/useLongPress.test.tsx b/web/src/hooks/useLongPress.test.tsx
+index 2dd1d0cc6..7f8434ee3 100644
+--- a/web/src/hooks/useLongPress.test.tsx
++++ b/web/src/hooks/useLongPress.test.tsx
+@@ -124,6 +124,36 @@ describe('useLongPress', () => {
+         expect(onClick).not.toHaveBeenCalled()
+     })
+ 
++    it('cancels the long-press timer once an HTML5 drag starts (hold-then-drag must not open the menu)', () => {
++        const onClick = vi.fn()
++        const onLongPress = vi.fn()
++        const { getByTestId } = render(<Probe onClick={onClick} onLongPress={onLongPress} />)
++        const row = getByTestId('row')
++
++        // Desktop: press the row, then the pointer turns into a drag before
++        // the 500ms long-press threshold elapses.
++        fireEvent.mouseDown(row, { button: 0, clientX: 10, clientY: 10 })
++        fireEvent.dragStart(row)
++        act(() => {
++            now += 500
++            vi.advanceTimersByTime(500)
++        })
++        fireEvent.dragEnd(row)
++
++        expect(onLongPress).not.toHaveBeenCalled()
++
++        // The drag consumed the gesture: the drop must not navigate, and the
++        // next plain tap still works (no poisoned long-press state).
++        fireEvent.mouseUp(row, { button: 0, clientX: 10, clientY: 10 })
++        fireEvent.click(row)
++        expect(onClick).not.toHaveBeenCalled()
++
++        fireEvent.mouseDown(row, { button: 0, clientX: 10, clientY: 10 })
++        fireEvent.mouseUp(row, { button: 0, clientX: 10, clientY: 10 })
++        fireEvent.click(row)
++        expect(onClick).toHaveBeenCalledTimes(1)
++    })
++
+     it('still fires onLongPress (and not onClick) for a touch long-press', () => {
+         const onClick = vi.fn()
+         const onLongPress = vi.fn()
+diff --git a/web/src/hooks/useLongPress.ts b/web/src/hooks/useLongPress.ts
+index da6568d1c..8c8ae17ae 100644
+--- a/web/src/hooks/useLongPress.ts
++++ b/web/src/hooks/useLongPress.ts
+@@ -32,6 +32,8 @@ type UseLongPressHandlers = {
+     onMouseDown: React.MouseEventHandler
+     onMouseUp: React.MouseEventHandler
+     onMouseLeave: React.MouseEventHandler
++    onDragStart: React.DragEventHandler
++    onDragEnd: React.DragEventHandler
+     onTouchStart: React.TouchEventHandler
+     onTouchEnd: React.TouchEventHandler
+     onTouchMove: React.TouchEventHandler
+@@ -173,6 +175,24 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressHandlers
+         clearTimer()
+     }, [clearTimer, isGhostMouseEvent])
+ 
++    // HTML5 drag supersedes the press gesture: once the pointer turns into a
++    // drag, the long-press timer must not fire mid-drag (that would pop the
++    // action menu while the user is dragging a row). Mark the gesture as moved
++    // so a stray end event cannot also turn the drop into a click.
++    const onDragStart = useCallback<React.DragEventHandler>(() => {
++        clearTimer()
++        isLongPressRef.current = false
++        touchMoved.current = true
++    }, [clearTimer])
++
++    const onDragEnd = useCallback<React.DragEventHandler>(() => {
++        clearTimer()
++        isLongPressRef.current = false
++        // Leave touchMoved set: the gesture was a drag, so a trailing mouseup
++        // on the source row must not be interpreted as a click. A later genuine
++        // click starts a fresh gesture via startTimer.
++    }, [clearTimer])
++
+     const onTouchStart = useCallback<React.TouchEventHandler>((e) => {
+         lastTouchAtRef.current = Date.now()
+         const touch = e.touches[0]
+@@ -287,6 +307,8 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressHandlers
+             onMouseDown: () => {},
+             onMouseUp: () => {},
+             onMouseLeave: () => {},
++            onDragStart,
++            onDragEnd,
+             onTouchStart: onNativeTouchStart,
+             onTouchEnd: onNativeTouchEnd,
+             onTouchMove: onNativeTouchMove,
+@@ -301,6 +323,8 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressHandlers
+         onMouseDown,
+         onMouseUp,
+         onMouseLeave,
++        onDragStart,
++        onDragEnd,
+         onTouchStart,
+         onTouchEnd,
+         onTouchMove,
+diff --git a/web/src/lib/sessionMentionDrag.test.ts b/web/src/lib/sessionMentionDrag.test.ts
+new file mode 100644
+index 000000000..81f480c38
+--- /dev/null
++++ b/web/src/lib/sessionMentionDrag.test.ts
+@@ -0,0 +1,24 @@
++import { describe, expect, it } from 'vitest'
++import {
++    SESSION_MENTION_DRAG_MIME,
++    parseSessionMentionDrag,
++} from './sessionMentionDrag'
++
++describe('parseSessionMentionDrag', () => {
++    it('reads a session mention drag payload', () => {
++        const transfer = {
++            getData: (type: string) => type === SESSION_MENTION_DRAG_MIME
++                ? '{"id":"peer-1","title":"Peer session"}'
++                : '',
++        }
++
++        expect(parseSessionMentionDrag(transfer)).toEqual({
++            id: 'peer-1',
++            title: 'Peer session',
++        })
++    })
++
++    it('rejects malformed drag payloads', () => {
++        expect(parseSessionMentionDrag({ getData: () => '{"id":1}' })).toBeNull()
++    })
++})
+diff --git a/web/src/lib/sessionMentionDrag.ts b/web/src/lib/sessionMentionDrag.ts
+new file mode 100644
+index 000000000..de8cd233c
+--- /dev/null
++++ b/web/src/lib/sessionMentionDrag.ts
+@@ -0,0 +1,22 @@
++export const SESSION_MENTION_DRAG_MIME = 'application/x-hapi-session-mention'
++
++export type SessionMentionDrag = {
++    id: string
++    title: string
++}
++
++export function parseSessionMentionDrag(dataTransfer: Pick<DataTransfer, 'getData'>): SessionMentionDrag | null {
++    try {
++        const payload: unknown = JSON.parse(dataTransfer.getData(SESSION_MENTION_DRAG_MIME))
++        if (
++            !payload
++            || typeof payload !== 'object'
++            || typeof (payload as SessionMentionDrag).id !== 'string'
++            || typeof (payload as SessionMentionDrag).title !== 'string'
++        ) return null
++        const { id, title } = payload as SessionMentionDrag
++        return id.trim() ? { id, title } : null
++    } catch {
++        return null
++    }
++}

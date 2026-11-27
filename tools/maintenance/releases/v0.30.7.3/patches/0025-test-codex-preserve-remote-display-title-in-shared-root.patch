@@ -1,0 +1,37 @@
+From fc46104e09fa344258a5bc32dddfad6a8236f32c Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 26 Sep 2026 16:36:07 +0800
+Subject: [PATCH] test(codex): preserve remote display title in shared root
+
+---
+ cli/src/codex/shared/root.test.ts | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/cli/src/codex/shared/root.test.ts b/cli/src/codex/shared/root.test.ts
+index c2267f4b5..5e4e20150 100644
+--- a/cli/src/codex/shared/root.test.ts
++++ b/cli/src/codex/shared/root.test.ts
+@@ -116,16 +116,17 @@ async function completePlan(f: Awaited<ReturnType<typeof fixture>>, status = 'co
+ }
+ 
+ describe('shared plan actions', () => {
+-    it('applies remote change_title as metadata.name then lets native terminal rename win', async () => {
++    it('keeps the remote display title while recording a native terminal rename', async () => {
+         const f = await fixture();
+         const item = { id: 'title', type: 'mcpToolCall', server: 'hapi', tool: 'change_title',
+             arguments: { title: 'Remote title' }, status: 'completed', result: { content: [], isError: false } };
+         f.native.notify('item/completed', { threadId: 'thread', turnId: 'turn', item });
+         await vi.waitFor(() => expect(f.metadata().name).toBe('Remote title'));
+         f.native.notify('thread/name/updated', { threadId: 'thread', threadName: 'Terminal title' });
+-        await vi.waitFor(() => expect(f.metadata().name).toBe('Terminal title'));
++        await vi.waitFor(() => expect(f.metadata().summary?.text).toBe('Terminal title'));
+         await f.root.refresh();
+-        expect(f.metadata().name).toBe('Terminal title');
++        expect(f.metadata().name).toBe('Remote title');
++        expect(f.metadata().summary?.text).toBe('Terminal title');
+     });
+ 
+     it('preserves content while native turns, mode changes and disconnects withdraw controls', async () => {
+-- 
+2.54.0 (Apple Git-157)
+

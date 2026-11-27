@@ -1,0 +1,454 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Thu, 22 Oct 2026 12:02:43 +0000
+Subject: [PATCH 57/95] carry(upstream): PR #2095 feat(cli): add hapi set-mode
+ to change a session's permission mode (#2094)
+
+---
+ cli/README.md                                 |   1 +
+ cli/src/commands/help.ts                      |   1 +
+ cli/src/commands/registry.ts                  |   4 +-
+ cli/src/commands/setMode.test.ts              |  15 +++
+ cli/src/commands/setMode.ts                   | 102 ++++++++++++++++++
+ cli/src/modules/pingPeer/pingPeer.ts          |  86 ++++++++++++++-
+ .../pingPeer/setPeerPermissionMode.test.ts    |  82 ++++++++++++++
+ hub/src/web/routes/sessions.test.ts           |  18 ++++
+ hub/src/web/routes/sessions.ts                |   3 +
+ 9 files changed, 307 insertions(+), 5 deletions(-)
+ create mode 100644 cli/src/commands/setMode.test.ts
+ create mode 100644 cli/src/commands/setMode.ts
+ create mode 100644 cli/src/modules/pingPeer/setPeerPermissionMode.test.ts
+
+diff --git a/cli/README.md b/cli/README.md
+index b2707fefa..f962ef4dd 100644
+--- a/cli/README.md
++++ b/cli/README.md
+@@ -53,6 +53,7 @@ Choose a supported coding agent from your terminal and control its sessions remo
+ - `hapi delete-peer <exact-session-id> --json` - Delete an inactive session record after confirming runner process exit; failed confirmation preserves the record.
+ 
+ The peer commands reject prefixes. Successful `--json` output has `ok: true`; errors use `ok: false`, a stable error code, and a non-zero exit status.
++- `hapi set-mode <exact-session-id> <mode>` - Change the permission mode of an existing session, like the web permission picker. Active sessions switch immediately; inactive ones use it on next resume. An invalid mode prints the modes allowed for that agent.
+ 
+ The picker lists agents alphabetically by command name. Use Up/Down and Enter
+ to choose; Esc or Ctrl-C cancels. It appears on every bare invocation, even
+diff --git a/cli/src/commands/help.ts b/cli/src/commands/help.ts
+index 9f18a6ccb..87e06479f 100644
+--- a/cli/src/commands/help.ts
++++ b/cli/src/commands/help.ts
+@@ -31,6 +31,7 @@ Commands:
+   hapi stop-peer <id>         Stop a session without archiving
+   hapi archive-peer <id>      Stop and archive a session
+   hapi delete-peer <id>       Delete an inactive session
++  hapi set-mode <id> <mode>   Change a session's permission mode
+   hapi mcp                   Start the MCP stdio bridge
+ 
+ Options:
+diff --git a/cli/src/commands/registry.ts b/cli/src/commands/registry.ts
+index ee675810b..61c49674f 100644
+--- a/cli/src/commands/registry.ts
++++ b/cli/src/commands/registry.ts
+@@ -25,6 +25,7 @@ import { spawnPeerCommand } from './spawnPeer'
+ import { abortPeerCommand, archivePeerCommand, deletePeerCommand, stopPeerCommand } from './stopPeer'
+ import { waitPeerCommand } from './waitPeer'
+ import { machinesCommand } from './machines'
++import { setModeCommand } from './setMode'
+ import type { CommandContext, CommandDefinition } from './types'
+ 
+ // Gemini CLI was sunset (Google stopped serving the consumer Gemini CLI on
+@@ -73,7 +74,8 @@ const COMMANDS: CommandDefinition[] = [
+     stopPeerCommand,
+     archivePeerCommand,
+     deletePeerCommand,
+-    waitPeerCommand
++    waitPeerCommand,
++    setModeCommand
+ ]
+ 
+ const commandMap = new Map<string, CommandDefinition>()
+diff --git a/cli/src/commands/setMode.test.ts b/cli/src/commands/setMode.test.ts
+new file mode 100644
+index 000000000..6417b1abc
+--- /dev/null
++++ b/cli/src/commands/setMode.test.ts
+@@ -0,0 +1,15 @@
++import { describe, expect, it } from 'vitest'
++import { PingPeerError } from '@/modules/pingPeer/pingPeer'
++import { parseSetModeArgs } from './setMode'
++
++describe('parseSetModeArgs', () => {
++    it('parses session id and mode', () => {
++        expect(parseSetModeArgs(['7d55ed21', 'plan'])).toEqual({ help: false, sessionId: '7d55ed21', mode: 'plan' })
++        expect(parseSetModeArgs(['-h'])).toEqual({ help: true })
++    })
++
++    it('rejects flags and extra args', () => {
++        expect(() => parseSetModeArgs(['7d55ed21', '--yolo'])).toThrow(PingPeerError)
++        expect(() => parseSetModeArgs(['7d55ed21', 'plan', 'extra'])).toThrow(PingPeerError)
++    })
++})
+diff --git a/cli/src/commands/setMode.ts b/cli/src/commands/setMode.ts
+new file mode 100644
+index 000000000..2b82fce72
+--- /dev/null
++++ b/cli/src/commands/setMode.ts
+@@ -0,0 +1,102 @@
++import chalk from 'chalk'
++import { initializeToken } from '@/ui/tokenInit'
++import {
++    PingPeerError,
++    exitCodeForPingPeerError,
++    setPeerPermissionMode
++} from '@/modules/pingPeer/pingPeer'
++import type { CommandDefinition } from './types'
++
++type ParsedSetModeArgs = {
++    help: boolean
++    sessionId?: string
++    mode?: string
++}
++
++function showHelp(): void {
++    console.log(`
++${chalk.bold('hapi set-mode')} - Change the permission mode of an existing HAPI session
++
++${chalk.bold('Usage:')}
++  hapi set-mode <exact-session-id> <mode>
++
++${chalk.bold('Notes:')}
++  Same as the web permission picker. Active sessions switch immediately;
++  inactive sessions use the mode on their next resume.
++  Allowed modes depend on the agent; an invalid mode prints the allowed list.
++  Requires the exact session UUID. Same hub token/namespace as this CLI.
++
++${chalk.bold('Env:')}
++  HAPI_API_URL / CLI_API_TOKEN (or ~/.hapi/settings.json via \`hapi auth login\`)
++`)
++}
++
++export function parseSetModeArgs(args: string[]): ParsedSetModeArgs {
++    const result: ParsedSetModeArgs = { help: false }
++
++    for (const arg of args) {
++        if (arg === '--help' || arg === '-h') {
++            result.help = true
++            continue
++        }
++        if (arg.startsWith('-')) {
++            throw new PingPeerError('bad_args', `unexpected flag: ${arg}`)
++        }
++        if (!result.sessionId) {
++            result.sessionId = arg
++            continue
++        }
++        if (!result.mode) {
++            result.mode = arg
++            continue
++        }
++        throw new PingPeerError('bad_args', `unexpected arg: ${arg}`)
++    }
++
++    return result
++}
++
++export async function handleSetModeCommand(args: string[]): Promise<void> {
++    const parsed = parseSetModeArgs(args)
++    if (parsed.help) {
++        showHelp()
++        return
++    }
++
++    if (!parsed.sessionId || !parsed.mode) {
++        showHelp()
++        throw new PingPeerError('bad_args', 'usage: hapi set-mode <session-id> <mode>')
++    }
++
++    await initializeToken()
++
++    const result = await setPeerPermissionMode({
++        sessionId: parsed.sessionId,
++        mode: parsed.mode
++    })
++    const when = result.active ? '' : ' (applies on next resume)'
++    console.log(chalk.green(`hapi set-mode: OK - ${result.sessionId} (${result.flavor}) is now ${result.mode}${when}`))
++}
++
++export const setModeCommand: CommandDefinition = {
++    name: 'set-mode',
++    requiresRuntimeAssets: false,
++    run: async ({ commandArgs }) => {
++        try {
++            await handleSetModeCommand(commandArgs)
++        } catch (error) {
++            if (error instanceof PingPeerError) {
++                console.error(chalk.red('hapi set-mode:'), error.message)
++                process.exit(exitCodeForPingPeerError(error))
++            }
++            console.error(
++                chalk.red('hapi set-mode:'),
++                error instanceof Error ? error.message : 'Unknown error'
++            )
++            if (process.env.DEBUG) {
++                console.error(error)
++            }
++            process.exit(1)
++        }
++    }
++}
+diff --git a/cli/src/modules/pingPeer/pingPeer.ts b/cli/src/modules/pingPeer/pingPeer.ts
+index 331c7fecf..b7b6bed78 100644
+--- a/cli/src/modules/pingPeer/pingPeer.ts
++++ b/cli/src/modules/pingPeer/pingPeer.ts
+@@ -1,15 +1,15 @@
+ /**
+- * Exact-id message, wait, inspect, stop, and archive operations.
++ * Exact-id message, wait, inspect, stop, archive, and set-mode operations.
+  *
+- * Shared by `hapi ping-peer` / `hapi inspect-peer` and MCP `ping_peer` /
+- * `inspect_peer`. Uses the same hub JWT flow as the web app
++ * Shared by `hapi ping-peer` / `hapi inspect-peer` / `hapi set-mode` and MCP
++ * `ping_peer` / `inspect_peer`. Uses the same hub JWT flow as the web app
+  * (`POST /api/auth` with CLI_API_TOKEN), scoped to the token's namespace.
+  * Callers must not invent parallel auth or arbitrary hosts.
+  */
+ 
+ import axios, { type AxiosInstance, type AxiosResponse } from 'axios'
+ import { randomUUID } from 'node:crypto'
+-import { extractAssistantPlainText, isObject } from '@hapi/protocol'
++import { extractAssistantPlainText, getPermissionModesForFlavor, isObject } from '@hapi/protocol'
+ import { normalizeSessionIdPrefix } from '@hapi/protocol/sessionCitation'
+ import { configuration } from '@/configuration'
+ import { getAuthToken } from '@/api/auth'
+@@ -25,6 +25,7 @@ export type PingPeerErrorCode =
+     | 'send_failed'
+     | 'session_ended'
+     | 'lifecycle_failed'
++    | 'apply_failed'
+ 
+ export class PingPeerError extends Error {
+     readonly code: PingPeerErrorCode
+@@ -50,6 +51,7 @@ export type PingPeerSessionSummary = {
+         lifecycleState?: string | null
+         piSessionId?: string
+         summary?: { text?: string } | null
++        capabilities?: { concurrentClients?: boolean } | null
+     } | null
+ }
+ 
+@@ -421,6 +423,7 @@ export function exitCodeForPingPeerError(error: PingPeerError): number {
+         case 'send_failed':
+         case 'session_ended':
+         case 'lifecycle_failed':
++        case 'apply_failed':
+             return 4
+         default:
+             return 1
+@@ -806,3 +809,78 @@ export function formatInspectPeerReport(result: InspectPeerResult): string {
+     }
+     return lines.join('\n')
+ }
++
++// ── set-mode (permission mode of an existing session) ──────────────────────
++
++export type SetPeerPermissionModeOptions = {
++    sessionId: string
++    mode: string
++    apiUrl?: string
++    accessToken?: string
++    http?: AxiosInstance
++}
++
++export type SetPeerPermissionModeResult = {
++    sessionId: string
++    name: string
++    flavor: string
++    mode: string
++    active: boolean
++}
++
++/**
++ * Same route the web permission picker uses. Active sessions apply it live;
++ * inactive ones keep it for the next resume (hub SyncEngine.applySessionConfig).
++ */
++export async function setPeerPermissionMode(options: SetPeerPermissionModeOptions): Promise<SetPeerPermissionModeResult> {
++    const sessionId = requireExactSessionId(options.sessionId)
++    const mode = (options.mode ?? '').trim()
++    if (!mode) {
++        throw new PingPeerError('bad_args', 'mode is required')
++    }
++
++    const apiUrl = resolveApiUrl(options.apiUrl)
++    const accessToken = resolveAccessToken(options.accessToken)
++    const http = options.http ?? axios
++
++    const jwt = await exchangeJwt(apiUrl, accessToken, http)
++    const live = await getSession(apiUrl, jwt, sessionId, http)
++    // Hub treats a missing flavor as claude; mirror it so the allowed list matches.
++    const flavor = live.metadata?.flavor ?? 'claude'
++    // Shared (concurrentClients) sessions cannot launch with Safe Yolo; same filter as the web picker.
++    const shared = Boolean(live.metadata?.capabilities?.concurrentClients)
++    const allowed: readonly string[] = getPermissionModesForFlavor(flavor).filter((m) => !shared || m !== 'safe-yolo')
++    if (allowed.length === 0) {
++        throw new PingPeerError('bad_args', `${flavor} sessions do not support permission modes`)
++    }
++    if (!allowed.includes(mode)) {
++        throw new PingPeerError(
++            'bad_args',
++            `invalid mode '${mode}' for ${flavor}; allowed: ${allowed.join(', ')}`
++        )
++    }
++
++    const response = await http.post(
++        `${apiUrl}/api/sessions/${encodeURIComponent(sessionId)}/permission-mode`,
++        { mode },
++        {
++            headers: authHeaders(jwt),
++            timeout: 30_000,
++            validateStatus: () => true
++        }
++    )
++    if (response.status < 200 || response.status >= 300 || response.data?.ok !== true) {
++        const detail = typeof response.data?.error === 'string'
++            ? response.data.error
++            : `HTTP ${response.status}`
++        throw new PingPeerError('apply_failed', `set-mode failed: ${detail}`)
++    }
++
++    return {
++        sessionId,
++        name: resolvePeerSessionLabel(live),
++        flavor,
++        mode,
++        active: live.active
++    }
++}
+diff --git a/cli/src/modules/pingPeer/setPeerPermissionMode.test.ts b/cli/src/modules/pingPeer/setPeerPermissionMode.test.ts
+new file mode 100644
+index 000000000..f58f25b70
+--- /dev/null
++++ b/cli/src/modules/pingPeer/setPeerPermissionMode.test.ts
+@@ -0,0 +1,82 @@
++import { describe, expect, it, vi } from 'vitest'
++import { PingPeerError, setPeerPermissionMode } from './pingPeer'
++
++const sessionId = '7d55ed21-8a9f-4309-b4f8-30069df36b4b'
++
++function createHttpMock(options: { flavor: string; active: boolean; shared?: boolean; modeResponse?: { status: number; data: unknown } }) {
++    const session = {
++        id: sessionId,
++        active: options.active,
++        metadata: { name: 'worker', flavor: options.flavor, capabilities: { concurrentClients: options.shared ?? false } }
++    }
++    return {
++        post: vi.fn(async (url: string, _body?: unknown) => {
++            if (url.endsWith('/api/auth')) {
++                return { status: 200, data: { token: 'jwt' } }
++            }
++            if (url.endsWith(`/api/sessions/${sessionId}/permission-mode`)) {
++                return options.modeResponse ?? { status: 200, data: { ok: true } }
++            }
++            throw new Error(`unexpected POST ${url}`)
++        }),
++        get: vi.fn(async (url: string) => {
++            if (url.endsWith('/api/sessions')) {
++                return { status: 200, data: { sessions: [session] } }
++            }
++            if (url.endsWith(`/api/sessions/${sessionId}`)) {
++                return { status: 200, data: { session } }
++            }
++            throw new Error(`unexpected GET ${url}`)
++        })
++    }
++}
++
++const base = { accessToken: 'tok', apiUrl: 'http://hub.test' }
++
++describe('setPeerPermissionMode', () => {
++    it('posts the mode for an exact session id to the permission-mode route', async () => {
++        const http = createHttpMock({ flavor: 'codex', active: true })
++
++        await expect(setPeerPermissionMode({ ...base, sessionId: '7d55ed21', mode: 'yolo', http: http as never }))
++            .rejects.toMatchObject({ code: 'bad_args' })
++        const result = await setPeerPermissionMode({ ...base, sessionId, mode: 'yolo', http: http as never })
++
++        expect(result).toEqual({ sessionId, name: 'worker', flavor: 'codex', mode: 'yolo', active: true })
++        expect(http.post).toHaveBeenCalledWith(
++            `http://hub.test/api/sessions/${sessionId}/permission-mode`,
++            { mode: 'yolo' },
++            expect.anything()
++        )
++    })
++
++    it('rejects a mode the flavor does not allow without calling the hub', async () => {
++        const http = createHttpMock({ flavor: 'codex', active: false })
++
++        const error = await setPeerPermissionMode({ ...base, sessionId: sessionId, mode: 'bypassPermissions', http: http as never })
++            .catch((e: unknown) => e)
++
++        expect(error).toBeInstanceOf(PingPeerError)
++        expect((error as PingPeerError).code).toBe('bad_args')
++        expect((error as PingPeerError).message).toContain('allowed: default, read-only, safe-yolo, autoReview, yolo')
++        expect(http.post).toHaveBeenCalledTimes(1)
++    })
++
++    it('rejects Safe Yolo for a shared session without calling the hub', async () => {
++        const http = createHttpMock({ flavor: 'codex', active: false, shared: true })
++
++        await expect(setPeerPermissionMode({ ...base, sessionId: sessionId, mode: 'safe-yolo', http: http as never }))
++            .rejects.toMatchObject({ code: 'bad_args', message: "invalid mode 'safe-yolo' for codex; allowed: default, read-only, autoReview, yolo" })
++        expect(http.post).toHaveBeenCalledTimes(1)
++    })
++
++    it('surfaces the hub error', async () => {
++        const http = createHttpMock({
++            flavor: 'opencode',
++            active: true,
++            modeResponse: { status: 409, data: { error: 'OpenCode plan mode is only supported for remote sessions' } }
++        })
++
++        await expect(setPeerPermissionMode({ ...base, sessionId: sessionId, mode: 'yolo', http: http as never }))
++            .rejects.toMatchObject({ code: 'apply_failed', message: 'set-mode failed: OpenCode plan mode is only supported for remote sessions' })
++    })
++})
+diff --git a/hub/src/web/routes/sessions.test.ts b/hub/src/web/routes/sessions.test.ts
+index b6ee8ded7..002d08be6 100644
+--- a/hub/src/web/routes/sessions.test.ts
++++ b/hub/src/web/routes/sessions.test.ts
+@@ -1152,6 +1152,24 @@ describe('sessions routes', () => {
+         expect(applySessionConfigCalls).toEqual([])
+     })
+ 
++    it('rejects Safe Yolo for shared sessions', async () => {
++        const session = createSession({
++            active: false,
++            metadata: { path: '/tmp/project', host: 'localhost', flavor: 'codex', capabilities: { concurrentClients: true } }
++        })
++        const { app, applySessionConfigCalls } = createApp(session)
++
++        const response = await app.request('/api/sessions/session-1/permission-mode', {
++            method: 'POST',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({ mode: 'safe-yolo' })
++        })
++
++        expect(response.status).toBe(400)
++        expect(await response.json()).toEqual({ error: 'Safe Yolo is not available for shared sessions' })
++        expect(applySessionConfigCalls).toEqual([])
++    })
++
+     it('applies permission mode changes for inactive sessions', async () => {
+         const session = createSession({
+             active: false,
+diff --git a/hub/src/web/routes/sessions.ts b/hub/src/web/routes/sessions.ts
+index a68fd815e..e2f385fbd 100644
+--- a/hub/src/web/routes/sessions.ts
++++ b/hub/src/web/routes/sessions.ts
+@@ -612,6 +612,9 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
+         if (!isPermissionModeAllowedForFlavor(mode, flavor)) {
+             return c.json({ error: 'Invalid permission mode for session flavor' }, 400)
+         }
++        if (mode === 'safe-yolo' && sessionResult.session.metadata?.capabilities?.concurrentClients) {
++            return c.json({ error: 'Safe Yolo is not available for shared sessions' }, 400)
++        }
+         if (flavor === 'opencode' && mode === 'plan' && sessionResult.session.agentState?.controlledByUser === true && !sessionResult.session.metadata?.capabilities?.concurrentClients) {
+             return c.json({ error: 'OpenCode plan mode is only supported for remote sessions' }, 409)
+         }

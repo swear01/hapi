@@ -1,0 +1,664 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Thu, 22 Oct 2026 12:08:14 +0000
+Subject: [PATCH 63/95] carry(upstream): PR #2102 fix: show Claude sessions
+ waiting on background tasks (#2100)
+
+---
+ .../claude/utils/OutgoingMessageQueue.test.ts | 12 +++
+ cli/src/claude/utils/OutgoingMessageQueue.ts  |  5 +-
+ cli/src/claude/utils/chatVisibility.ts        |  5 ++
+ .../claude/utils/sdkToLogConverter.test.ts    | 11 +++
+ hub/src/socket/handlers/cli/index.ts          |  6 +-
+ .../handlers/cli/sessionHandlers.test.ts      | 19 ++--
+ .../socket/handlers/cli/sessionHandlers.ts    | 21 +++--
+ hub/src/socket/server.ts                      |  4 +-
+ hub/src/startHub.ts                           |  2 +-
+ hub/src/sync/backgroundTasks.ts               | 87 ++-----------------
+ hub/src/sync/sessionCache.ts                  |  8 +-
+ hub/src/sync/sessionIdleEngine.test.ts        |  2 +-
+ hub/src/sync/sessionModel.test.ts             | 62 +++++++++++++
+ hub/src/sync/syncEngine.ts                    |  4 +-
+ .../SessionAttentionIndicator.test.tsx        |  6 +-
+ .../components/SessionAttentionIndicator.tsx  | 11 ++-
+ web/src/components/SessionRowSummary.tsx      | 33 ++-----
+ web/src/components/icons.tsx                  | 18 ++++
+ 18 files changed, 172 insertions(+), 144 deletions(-)
+
+diff --git a/cli/src/claude/utils/OutgoingMessageQueue.test.ts b/cli/src/claude/utils/OutgoingMessageQueue.test.ts
+index 05aeefc5a..3f1e83a56 100644
+--- a/cli/src/claude/utils/OutgoingMessageQueue.test.ts
++++ b/cli/src/claude/utils/OutgoingMessageQueue.test.ts
+@@ -33,6 +33,18 @@ describe('OutgoingMessageQueue message filtering', () => {
+         expect(sent[1]).toMatchObject({ type: 'assistant' })
+     })
+ 
++    it('forwards hidden background task snapshots, including empty ones', async () => {
++        queue.enqueue({ type: 'system', subtype: 'background_tasks_changed', tasks: [{ task_id: 'b1' }], uuid: '1' })
++        queue.enqueue({ type: 'system', subtype: 'background_tasks_changed', tasks: [], uuid: '2' })
++        queue.enqueue({ type: 'system', subtype: 'task_started', uuid: '3' })
++        await queue.flush()
++
++        expect(sent).toEqual([
++            expect.objectContaining({ subtype: 'background_tasks_changed', tasks: [{ task_id: 'b1' }] }),
++            expect.objectContaining({ subtype: 'background_tasks_changed', tasks: [] })
++        ])
++    })
++
+     it('filters out isMeta messages', async () => {
+         queue.enqueue({ type: 'user', isMeta: true, uuid: '1' })
+         queue.enqueue({ type: 'assistant', uuid: '2' })
+diff --git a/cli/src/claude/utils/OutgoingMessageQueue.ts b/cli/src/claude/utils/OutgoingMessageQueue.ts
+index d97bf285a..62225dd1d 100644
+--- a/cli/src/claude/utils/OutgoingMessageQueue.ts
++++ b/cli/src/claude/utils/OutgoingMessageQueue.ts
+@@ -6,7 +6,7 @@
+  */
+ 
+ import { AsyncLock } from '@/utils/lock';
+-import { isClaudeChatVisibleMessage } from './chatVisibility';
++import { isClaudeBackgroundTasksSnapshot, isClaudeChatVisibleMessage } from './chatVisibility';
+ 
+ interface QueueItem {
+     id: number;                    // Incremental ID for ordering
+@@ -122,7 +122,8 @@ export class OutgoingMessageQueue {
+             
+             // Send if not already sent
+             if (!item.sent) {
+-                if (isClaudeChatVisibleMessage(item.logMessage) && !item.logMessage.isMeta && !item.logMessage.isCompactSummary) {
++                const forward = isClaudeChatVisibleMessage(item.logMessage) || isClaudeBackgroundTasksSnapshot(item.logMessage);
++                if (forward && !item.logMessage.isMeta && !item.logMessage.isCompactSummary) {
+                     this.sendFunction(item.logMessage);
+                 }
+                 item.sent = true;
+diff --git a/cli/src/claude/utils/chatVisibility.ts b/cli/src/claude/utils/chatVisibility.ts
+index d03178f40..f5098a821 100644
+--- a/cli/src/claude/utils/chatVisibility.ts
++++ b/cli/src/claude/utils/chatVisibility.ts
+@@ -4,3 +4,8 @@ import { isClaudeChatVisibleMessage as isSharedClaudeChatVisibleMessage } from '
+ export function isClaudeChatVisibleMessage(message: Pick<RawJSONLines, 'type'> & { subtype?: string }): boolean {
+     return isSharedClaudeChatVisibleMessage(message)
+ }
++
++/** Hidden from chat, but the hub reads it to track running background tasks. */
++export function isClaudeBackgroundTasksSnapshot(message: Pick<RawJSONLines, 'type'> & { subtype?: string }): boolean {
++    return message.type === 'system' && message.subtype === 'background_tasks_changed'
++}
+diff --git a/cli/src/claude/utils/sdkToLogConverter.test.ts b/cli/src/claude/utils/sdkToLogConverter.test.ts
+index afe5c4848..925dff725 100644
+--- a/cli/src/claude/utils/sdkToLogConverter.test.ts
++++ b/cli/src/claude/utils/sdkToLogConverter.test.ts
+@@ -219,6 +219,17 @@ describe('SDKToLogConverter', () => {
+             const logMessage = converter.convert(userMessage)
+             expect(logMessage?.sessionId).toBe('updated-session-789')
+         })
++
++        it('keeps the task list on background_tasks_changed snapshots', () => {
++            const tasks = [{ task_id: 'b1', task_type: 'local_bash' }]
++            const logMessage = converter.convert({
++                type: 'system',
++                subtype: 'background_tasks_changed',
++                tasks
++            } as SDKSystemMessage)
++
++            expect(logMessage).toMatchObject({ type: 'system', subtype: 'background_tasks_changed', tasks })
++        })
+     })
+ 
+     describe('Result messages', () => {
+diff --git a/hub/src/socket/handlers/cli/index.ts b/hub/src/socket/handlers/cli/index.ts
+index d9c956488..d1b8b57fc 100644
+--- a/hub/src/socket/handlers/cli/index.ts
++++ b/hub/src/socket/handlers/cli/index.ts
+@@ -48,7 +48,7 @@ export type CliHandlersDeps = {
+     onSessionEnd?: (payload: SessionEndPayload) => void
+     onMachineAlive?: (payload: MachineAlivePayload) => void
+     onWebappEvent?: (event: SyncEvent) => void
+-    onBackgroundTaskDelta?: (sessionId: string, delta: { started: number; completed: number }) => void
++    onBackgroundTaskCount?: (sessionId: string, count: number) => void
+     onSessionActivity?: (sessionId: string, updatedAt: number) => void
+     onAgentProgress?: (sessionId: string, at: number) => void
+     onSweepImmediateQueued?: (sessionId: string, now: number) => void
+@@ -84,7 +84,7 @@ const SESSION_ACCESS_CACHE_TTL_MS = 1_000
+ const SESSION_ACCESS_CACHE_MAX_SESSIONS = 64
+ 
+ export function registerCliHandlers(socket: CliSocketWithData, deps: CliHandlersDeps): void {
+-    const { io, store, rpcRegistry, terminalRegistry, onSessionAlive, onSessionReady, onSessionEnd, onMachineAlive, onWebappEvent, onBackgroundTaskDelta, onSessionActivity, onAgentProgress, onSweepImmediateQueued, onMessagesConsumed } = deps
++    const { io, store, rpcRegistry, terminalRegistry, onSessionAlive, onSessionReady, onSessionEnd, onMachineAlive, onWebappEvent, onBackgroundTaskCount, onSessionActivity, onAgentProgress, onSweepImmediateQueued, onMessagesConsumed } = deps
+     const terminalNamespace = io.of('/terminal')
+     const namespace = typeof socket.data.namespace === 'string' ? socket.data.namespace : null
+ 
+@@ -178,7 +178,7 @@ export function registerCliHandlers(socket: CliSocketWithData, deps: CliHandlers
+         onSessionReady,
+         onSessionEnd,
+         onWebappEvent,
+-        onBackgroundTaskDelta,
++        onBackgroundTaskCount,
+         onSessionActivity,
+         onAgentProgress,
+         onSweepImmediateQueued,
+diff --git a/hub/src/socket/handlers/cli/sessionHandlers.test.ts b/hub/src/socket/handlers/cli/sessionHandlers.test.ts
+index 60291e8f2..2e3155c66 100644
+--- a/hub/src/socket/handlers/cli/sessionHandlers.test.ts
++++ b/hub/src/socket/handlers/cli/sessionHandlers.test.ts
+@@ -185,10 +185,10 @@ describe('cli session handlers', () => {
+         const store = new Store(':memory:')
+         const session = store.sessions.getOrCreateSession('replay', { flavor: 'claude' }, null, 'default')
+         const socket = new FakeSocket()
+-        const progress = mock(); const activity = mock(); const bgDelta = mock(); const events: SyncEvent[] = []
++        const progress = mock(); const activity = mock(); const bgCount = mock(); const events: SyncEvent[] = []
+         registerSessionHandlers(socket as unknown as CliSocketWithData, {
+             store, resolveSessionAccess: () => ({ ok: true, value: session }), emitAccessError() {},
+-            onAgentProgress: progress, onSessionActivity: activity, onBackgroundTaskDelta: bgDelta,
++            onAgentProgress: progress, onSessionActivity: activity, onBackgroundTaskCount: bgCount,
+             onWebappEvent: event => { events.push(event) }
+         })
+         const message = { role: 'user', content: { type: 'text', text: 'hello' } }
+@@ -202,14 +202,13 @@ describe('cli session handlers', () => {
+         expect(socket.roomEvents.filter(e => e.event === 'update')).toHaveLength(1)
+         expect(events.filter(e => e.type === 'message-received')).toHaveLength(1)
+ 
+-        // A background task start replayed the same way must count once, or the
+-        // counter never returns to zero and the session never reconciles idle.
+-        const started = { role: 'agent', content: { type: 'output', data: { type: 'tool_result', content: 'Command running in background with ID: bg-1' } } }
+-        socket.trigger('message', { sid: session.id, localId: 'replayed-2', message: started })
+-        socket.trigger('message', { sid: session.id, localId: 'replayed-2', message: started })
+-        expect(store.messages.getAllMessages(session.id)).toHaveLength(2)
+-        expect(bgDelta).toHaveBeenCalledTimes(1)
+-        expect(bgDelta).toHaveBeenCalledWith(session.id, { started: 1, completed: 0 })
++        // A replayed background-task snapshot is applied, never stored: it
++        // replaces the count, so applying it twice cannot drift.
++        const snapshot = { role: 'agent', content: { type: 'output', data: { type: 'system', subtype: 'background_tasks_changed', tasks: [{ id: 'bg-1' }] } } }
++        socket.trigger('message', { sid: session.id, localId: 'replayed-2', message: snapshot })
++        socket.trigger('message', { sid: session.id, localId: 'replayed-2', message: snapshot })
++        expect(store.messages.getAllMessages(session.id)).toHaveLength(1)
++        expect(bgCount.mock.calls).toEqual([[session.id, 1], [session.id, 1]])
+         store.close()
+     })
+ 
+diff --git a/hub/src/socket/handlers/cli/sessionHandlers.ts b/hub/src/socket/handlers/cli/sessionHandlers.ts
+index 231e75be5..767490837 100644
+--- a/hub/src/socket/handlers/cli/sessionHandlers.ts
++++ b/hub/src/socket/handlers/cli/sessionHandlers.ts
+@@ -8,7 +8,7 @@ import type { Store, StoredSession } from '../../../store'
+ import type { SyncEvent } from '../../../sync/syncEngine'
+ import { extractTodoWriteTodosFromMessageContent } from '../../../sync/todos'
+ import { extractTeamStateFromMessageContent, applyTeamStateDelta } from '../../../sync/teams'
+-import { extractBackgroundTaskDelta } from '../../../sync/backgroundTasks'
++import { extractBackgroundTaskCount } from '../../../sync/backgroundTasks'
+ import { shouldRecordSessionActivity } from '../../../sync/sessionActivity'
+ import { lifecycleRunningSince } from '../../../sync/sessionIdle'
+ import type { CliSocketWithData } from '../../socketTypes'
+@@ -92,7 +92,7 @@ export type SessionHandlersDeps = {
+     onSessionReady?: (payload: SessionReadyPayload) => void
+     onSessionEnd?: (payload: SessionEndPayload) => void
+     onWebappEvent?: (event: SyncEvent) => void
+-    onBackgroundTaskDelta?: (sessionId: string, delta: { started: number; completed: number }) => void
++    onBackgroundTaskCount?: (sessionId: string, count: number) => void
+     onSessionActivity?: (sessionId: string, updatedAt: number) => void
+     /** tiann/hapi#1820: any message is agent progress, either direction. */
+     onAgentProgress?: (sessionId: string, at: number) => void
+@@ -104,7 +104,7 @@ export type SessionHandlersDeps = {
+ }
+ 
+ export function registerSessionHandlers(socket: CliSocketWithData, deps: SessionHandlersDeps): void {
+-    const { store, resolveSessionAccess, emitAccessError, onSessionAlive, onSessionReady, onSessionEnd, onWebappEvent, onBackgroundTaskDelta, onSessionActivity, onAgentProgress, onSweepImmediateQueued, onMessagesConsumed } = deps
++    const { store, resolveSessionAccess, emitAccessError, onSessionAlive, onSessionReady, onSessionEnd, onWebappEvent, onBackgroundTaskCount, onSessionActivity, onAgentProgress, onSweepImmediateQueued, onMessagesConsumed } = deps
+ 
+     socket.on('native-queue-message', data => {
+         const parsed = z.object({ sid: z.string(), localId: z.string().min(1), text: z.string().nullable() }).safeParse(data)
+@@ -160,10 +160,18 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
+             return
+         }
+ 
++        // A background-task snapshot is session state, not chat: apply it
++        // without storing a hidden row.
++        const backgroundTaskCount = extractBackgroundTaskCount(content)
++        if (backgroundTaskCount !== null) {
++            onBackgroundTaskCount?.(sid, backgroundTaskCount)
++            return
++        }
++
+         const { message: msg, inserted } = store.messages.addMessageWithStatus(sid, content, localId, undefined, createdAt)
+         // A localId the session already stored is a reconnect replay (history
+         // resync, transcript backfill), not new work: no progress clock, no
+-        // activity, no todo/team/background-task deltas, no re-broadcast.
++        // activity, no todo/team deltas, no re-broadcast.
+         if (!inserted) {
+             return
+         }
+@@ -233,11 +241,6 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
+             }
+         }
+ 
+-        const bgDelta = extractBackgroundTaskDelta(content)
+-        if (bgDelta) {
+-            onBackgroundTaskDelta?.(sid, bgDelta)
+-        }
+-
+         const update = {
+             id: randomUUID(),
+             seq: msg.seq,
+diff --git a/hub/src/socket/server.ts b/hub/src/socket/server.ts
+index a394a649b..32c2ab94f 100644
+--- a/hub/src/socket/server.ts
++++ b/hub/src/socket/server.ts
+@@ -42,7 +42,7 @@ export type SocketServerDeps = {
+     onSessionReady?: (payload: { sid: string; time: number }) => void
+     onSessionEnd?: (payload: { sid: string; time: number }) => void
+     onMachineAlive?: (payload: { machineId: string; time: number; health?: unknown }) => void
+-    onBackgroundTaskDelta?: (sessionId: string, delta: { started: number; completed: number }) => void
++    onBackgroundTaskCount?: (sessionId: string, count: number) => void
+     onSessionActivity?: (sessionId: string, updatedAt: number) => void
+     onAgentProgress?: (sessionId: string, at: number) => void
+     onSweepImmediateQueued?: (sessionId: string, now: number) => void
+@@ -131,7 +131,7 @@ export function createSocketServer(deps: SocketServerDeps): {
+         onSessionEnd: deps.onSessionEnd,
+         onMachineAlive: deps.onMachineAlive,
+         onWebappEvent: deps.onWebappEvent,
+-        onBackgroundTaskDelta: deps.onBackgroundTaskDelta,
++        onBackgroundTaskCount: deps.onBackgroundTaskCount,
+         onSessionActivity: deps.onSessionActivity,
+         onAgentProgress: deps.onAgentProgress,
+         onSweepImmediateQueued: deps.onSweepImmediateQueued,
+diff --git a/hub/src/startHub.ts b/hub/src/startHub.ts
+index 6289acde2..4b1acd9b3 100644
+--- a/hub/src/startHub.ts
++++ b/hub/src/startHub.ts
+@@ -213,7 +213,7 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
+         onSessionReady: (payload) => syncEngine?.handleSessionReady(payload),
+         onSessionEnd: (payload) => syncEngine?.handleSessionEnd(payload),
+         onMachineAlive: (payload) => syncEngine?.handleMachineAlive(payload),
+-        onBackgroundTaskDelta: (sessionId, delta) => syncEngine?.handleBackgroundTaskDelta(sessionId, delta),
++        onBackgroundTaskCount: (sessionId, count) => syncEngine?.handleBackgroundTaskCount(sessionId, count),
+         onSessionActivity: (sessionId, updatedAt) => syncEngine?.recordSessionActivity(sessionId, updatedAt),
+         onAgentProgress: (sessionId, at) => syncEngine?.recordAgentProgress(sessionId, at),
+         onSweepImmediateQueued: (sessionId, now) => syncEngine?.sweepImmediateQueuedOnSessionEnd(sessionId, now),
+diff --git a/hub/src/sync/backgroundTasks.ts b/hub/src/sync/backgroundTasks.ts
+index 526a08d7d..8ed5c5a19 100644
+--- a/hub/src/sync/backgroundTasks.ts
++++ b/hub/src/sync/backgroundTasks.ts
+@@ -2,90 +2,21 @@ import { isObject } from '@hapi/protocol'
+ import { unwrapRoleWrappedRecordEnvelope } from '@hapi/protocol/messages'
+ 
+ /**
+- * Extract background task start/completion signals from a message.
++ * Read the running background task count from Claude's
++ * `system/background_tasks_changed` snapshot.
+  *
+- * Uses role-aware parsing to avoid false positives:
+- *  - Started:   agent-role output with tool_result containing
+- *               "Command running in background with ID:"
+- *  - Completed: agent-role output wrapping a user-type message (system-injected)
+- *               starting with "<task-notification>"
+- *
+- * Both signals arrive as { role: 'agent', content: { type: 'output', data: {...} } }
+- * because the CLI wraps all messages in agent envelopes.
++ * Claude Code (SDK mode) emits it whenever the set of background tasks
++ * changes, including an empty `tasks` list once the last one finishes. The
++ * CLI forwards it as { role: 'agent', content: { type: 'output', data } }.
++ * Being a full snapshot, it replaces the count instead of adjusting it.
+  */
+-export function extractBackgroundTaskDelta(messageContent: unknown): { started: number; completed: number } | null {
++export function extractBackgroundTaskCount(messageContent: unknown): number | null {
+     const record = unwrapRoleWrappedRecordEnvelope(messageContent)
+     if (!record || record.role !== 'agent') return null
+     if (!isObject(record.content) || record.content.type !== 'output') return null
+ 
+     const data = isObject(record.content.data) ? record.content.data : null
+-    if (!data) return null
+-
+-    const started = countTaskStarts(record.content)
+-    const completed = data.type === 'user' ? countTaskCompletions(data) : 0
+-
+-    if (started === 0 && completed === 0) return null
+-    return { started, completed }
+-}
+-
+-/**
+- * Count background task starts from tool_result blocks.
+- */
+-function countTaskStarts(content: Record<string, unknown>): number {
+-    const data = isObject(content.data) ? content.data : null
+-    if (!data) return 0
+-
+-    // Direct tool_result
+-    if (data.type === 'tool_result') {
+-        return isBackgroundStartResult(data) ? 1 : 0
+-    }
+-
+-    // Assistant message with content array containing tool_result blocks
+-    if (data.type === 'assistant') {
+-        const message = isObject(data.message) ? data.message : null
+-        const modelContent = message?.content
+-        if (!Array.isArray(modelContent)) return 0
+-
+-        let count = 0
+-        for (const block of modelContent) {
+-            if (isObject(block) && block.type === 'tool_result' && isBackgroundStartResult(block)) {
+-                count++
+-            }
+-        }
+-        return count
+-    }
+-
+-    return 0
+-}
+-
+-function isBackgroundStartResult(block: Record<string, unknown>): boolean {
+-    const text = typeof block.content === 'string'
+-        ? block.content
+-        : Array.isArray(block.content)
+-            ? block.content.map((c: unknown) => isObject(c) && typeof c.text === 'string' ? c.text : '').join('')
+-            : ''
+-    return text.includes('Command running in background with ID:')
+-}
+-
+-/**
+- * Count task completions from system-injected user messages.
+- *
+- * These arrive as: { type: 'user', message: { content: '<task-notification>...' } }
+- * inside the agent output envelope.
+- */
+-function countTaskCompletions(data: Record<string, unknown>): number {
+-    // { type: 'user', message: { content: '<task-notification>...' } }
+-    if (isObject(data.message)) {
+-        const msg = data.message as Record<string, unknown>
+-        if (typeof msg.content === 'string' && msg.content.trimStart().startsWith('<task-notification>')) {
+-            return 1
+-        }
+-    }
+-
+-    // { type: 'user', uuid: '...', content: '<task-notification>...' }
+-    if (typeof data.content === 'string' && data.content.trimStart().startsWith('<task-notification>')) {
+-        return 1
+-    }
++    if (data?.type !== 'system' || data.subtype !== 'background_tasks_changed') return null
+ 
+-    return 0
++    return Array.isArray(data.tasks) ? data.tasks.length : null
+ }
+diff --git a/hub/src/sync/sessionCache.ts b/hub/src/sync/sessionCache.ts
+index c88dd8472..dc614a1c5 100644
+--- a/hub/src/sync/sessionCache.ts
++++ b/hub/src/sync/sessionCache.ts
+@@ -5,7 +5,6 @@ import type { Store } from '../store'
+ import { clampAliveTime } from './aliveTime'
+ import { EventPublisher } from './eventPublisher'
+ import { extractTodoWriteTodosFromMessageContent, TodosSchema } from './todos'
+-import { extractBackgroundTaskDelta } from './backgroundTasks'
+ import { lifecycleRunningSince, resolveSessionIdleTimeoutMs, shouldClearKeepaliveIdle, shouldMarkKeepaliveIdle } from './sessionIdle'
+ 
+ const QUEUED_MESSAGE_THINKING_GRACE_MS = 15_000
+@@ -615,13 +614,10 @@ export class SessionCache {
+         })
+     }
+ 
+-    applyBackgroundTaskDelta(sessionId: string, delta: { started: number; completed: number }): void {
++    setBackgroundTaskCount(sessionId: string, next: number): void {
+         const session = this.sessions.get(sessionId)
+         if (!session) return
+-
+-        const prev = session.backgroundTaskCount ?? 0
+-        const next = Math.max(0, prev + delta.started - delta.completed)
+-        if (next === prev) return
++        if (next === (session.backgroundTaskCount ?? 0)) return
+ 
+         session.backgroundTaskCount = next
+         this.recordAgentProgress(sessionId)
+diff --git a/hub/src/sync/sessionIdleEngine.test.ts b/hub/src/sync/sessionIdleEngine.test.ts
+index d8654d1ea..01a386927 100644
+--- a/hub/src/sync/sessionIdleEngine.test.ts
++++ b/hub/src/sync/sessionIdleEngine.test.ts
+@@ -107,7 +107,7 @@ describe('SyncEngine keepalive-idle tick', () => {
+         try {
+             const session = engine.getOrCreateSession('abort', RUNNING, null, 'default')
+             engine.handleSessionAlive({ sid: session.id, time: Date.now(), thinking: true })
+-            engine.handleBackgroundTaskDelta(session.id, { started: 1, completed: 0 })
++            engine.handleBackgroundTaskCount(session.id, 1)
+             engine.handleSessionAlive({ sid: session.id, time: Date.now(), thinking: false })
+             expect(engine.getSession(session.id)?.backgroundTaskCount).toBe(1)
+             const cache = (engine as unknown as { sessionCache: SessionCache }).sessionCache
+diff --git a/hub/src/sync/sessionModel.test.ts b/hub/src/sync/sessionModel.test.ts
+index e4332b8cc..ea96bf053 100644
+--- a/hub/src/sync/sessionModel.test.ts
++++ b/hub/src/sync/sessionModel.test.ts
+@@ -988,6 +988,68 @@ describe('session model', () => {
+         expect(activity[0].updatedAt).toBe(messages[0]?.createdAt)
+     })
+ 
++    it('sets backgroundTaskCount from Claude background_tasks_changed snapshots', () => {
++        const store = new Store(':memory:')
++        const events: SyncEvent[] = []
++        const cache = new SessionCache(store, createPublisher(events))
++        const session = cache.getOrCreateSession(
++            'session-cli-background-tasks',
++            { path: '/tmp/project', host: 'localhost', flavor: 'claude' },
++            null,
++            'default'
++        )
++        const handlers = new Map<string, (payload: unknown) => void>()
++
++        registerSessionHandlers({
++            on: (event: string, handler: (payload: unknown) => void) => {
++                handlers.set(event, handler)
++            },
++            to: () => ({ emit: () => {} })
++        } as never, {
++            store,
++            resolveSessionAccess: (sessionId) => {
++                const stored = store.sessions.getSessionByNamespace(sessionId, 'default')
++                return stored ? { ok: true, value: stored } : { ok: false, reason: 'not-found' }
++            },
++            emitAccessError: () => {},
++            onBackgroundTaskCount: (sessionId, count) => cache.setBackgroundTaskCount(sessionId, count)
++        })
++        const send = (data: unknown) => handlers.get('message')?.({
++            sid: session.id,
++            message: JSON.stringify({ role: 'agent', content: { type: 'output', data } })
++        })
++        const snapshot = (taskIds: string[]) => send({
++            type: 'system',
++            subtype: 'background_tasks_changed',
++            uuid: `snapshot-${taskIds.length}`,
++            tasks: taskIds.map((task_id) => ({ task_id, task_type: 'local_bash' }))
++        })
++
++        snapshot(['b1', 'b2'])
++        expect(cache.getSession(session.id)?.backgroundTaskCount).toBe(2)
++
++        // The Bash tool result that announces a background task is not a count signal.
++        send({
++            type: 'user',
++            uuid: 'tool-result',
++            message: {
++                role: 'user',
++                content: [{ type: 'tool_result', tool_use_id: 't1', content: 'Command running in background with ID: b3.' }]
++            }
++        })
++        expect(cache.getSession(session.id)?.backgroundTaskCount).toBe(2)
++
++        snapshot([])
++        expect(cache.getSession(session.id)?.backgroundTaskCount).toBe(0)
++        // Snapshots are session state, not chat rows; only the tool result is stored.
++        expect(store.messages.getMessages(session.id)).toHaveLength(1)
++        expect(events
++            .filter((event) => event.type === 'session-updated' && event.sessionId === session.id)
++            .map((event) => (event as { data?: { backgroundTaskCount?: number } }).data?.backgroundTaskCount)
++            .filter((count) => count !== undefined)
++        ).toEqual([2, 0])
++    })
++
+     it('records activity only for the first messages-consumed transition while retaining duplicate acknowledgements', () => {
+         const originalDateNow = Date.now
+         let now = 1_000
+diff --git a/hub/src/sync/syncEngine.ts b/hub/src/sync/syncEngine.ts
+index 211e1ddda..bf88898c8 100644
+--- a/hub/src/sync/syncEngine.ts
++++ b/hub/src/sync/syncEngine.ts
+@@ -676,8 +676,8 @@ export class SyncEngine {
+         clearAgentTerminalBuffer(payload.sid)
+     }
+ 
+-    handleBackgroundTaskDelta(sessionId: string, delta: { started: number; completed: number }): void {
+-        this.sessionCache.applyBackgroundTaskDelta(sessionId, delta)
++    handleBackgroundTaskCount(sessionId: string, count: number): void {
++        this.sessionCache.setBackgroundTaskCount(sessionId, count)
+     }
+ 
+     recordSessionActivity(sessionId: string, updatedAt: number): void {
+diff --git a/web/src/components/SessionAttentionIndicator.test.tsx b/web/src/components/SessionAttentionIndicator.test.tsx
+index d69f29387..424983e0e 100644
+--- a/web/src/components/SessionAttentionIndicator.test.tsx
++++ b/web/src/components/SessionAttentionIndicator.test.tsx
+@@ -155,13 +155,13 @@ describe('SessionAttentionIndicator tooltip', () => {
+         expect(tooltip.textContent).not.toMatch(/\+\d+ more/)
+     })
+ 
+-    it('renders background task count', () => {
++    it('renders background task count behind a waiting spinner', () => {
+         const summary = makeSummary({
+             id: 's1',
+             backgroundTaskCount: 3
+         })
+ 
+-        renderWithI18n(
++        const { container } = renderWithI18n(
+             <SessionAttentionIndicator
+                 attention={{ kind: 'background' }}
+                 summary={summary}
+@@ -173,6 +173,8 @@ describe('SessionAttentionIndicator tooltip', () => {
+         const tooltip = screen.getByRole('tooltip', { hidden: true })
+         expect(tooltip.textContent).toContain('Background tasks running')
+         expect(tooltip.textContent).toContain('3 tasks running')
++        expect(container.querySelector('svg.animate-spin-slow.text-blue-400')).not.toBeNull()
++        expect(container.querySelector('.rounded-full')).toBeNull()
+     })
+ 
+     it('renders only the title for unread attention (relative time is already on the row)', () => {
+diff --git a/web/src/components/SessionAttentionIndicator.tsx b/web/src/components/SessionAttentionIndicator.tsx
+index 0beb66ded..6a6025f9c 100644
+--- a/web/src/components/SessionAttentionIndicator.tsx
++++ b/web/src/components/SessionAttentionIndicator.tsx
+@@ -3,14 +3,17 @@ import type { SessionAttention } from '@/lib/sessionAttention'
+ import { getSessionAttentionLabelKey } from '@/lib/sessionAttention'
+ import { useTranslation } from '@/lib/use-translation'
+ import { HoverTooltip, SESSION_ROW_TOOLTIP_FOCUS_CLASS } from '@/components/HoverTooltip'
++import { LoaderIcon } from '@/components/icons'
+ 
+-const ATTENTION_DOT_CLASS: Record<SessionAttention['kind'], string> = {
++const ATTENTION_DOT_CLASS: Record<Exclude<SessionAttention['kind'], 'background'>, string> = {
+     permission: 'bg-amber-500 animate-pulse',
+     input: 'bg-blue-500',
+-    background: 'bg-blue-400',
+     unread: 'bg-[var(--app-link)]'
+ }
+ 
++/** Waiting on background work: spins like a running turn, in blue instead of green. */
++export const BACKGROUND_SPINNER_CLASS = 'h-3.5 w-3.5 shrink-0 animate-spin-slow text-blue-400'
++
+ /**
+  * Visible attention dot + hover tooltip explaining the indicator.
+  *
+@@ -25,7 +28,9 @@ export function SessionAttentionIndicator(props: {
+     tooltipId: string
+ }) {
+     const { t } = useTranslation()
+-    const dot = (
++    const dot = props.attention.kind === 'background' ? (
++        <LoaderIcon className={BACKGROUND_SPINNER_CLASS} />
++    ) : (
+         <span
+             className={`inline-flex h-2 w-2 shrink-0 rounded-full ${ATTENTION_DOT_CLASS[props.attention.kind]}`}
+         />
+diff --git a/web/src/components/SessionRowSummary.tsx b/web/src/components/SessionRowSummary.tsx
+index d1707de21..68b306e1d 100644
+--- a/web/src/components/SessionRowSummary.tsx
++++ b/web/src/components/SessionRowSummary.tsx
+@@ -1,9 +1,9 @@
+ import { useMemo } from 'react'
+ import type { SessionSummary } from '@/types/api'
+ import { AgentFlavorIcon } from '@/components/AgentFlavorIcon'
+-import { ScheduleIcon } from '@/components/icons'
++import { LoaderIcon, ScheduleIcon } from '@/components/icons'
+ import { HoverTooltip, SESSION_ROW_TOOLTIP_FOCUS_CLASS, useSessionRowTooltipIds } from '@/components/HoverTooltip'
+-import { getAttentionLabel, SessionAttentionIndicator } from '@/components/SessionAttentionIndicator'
++import { BACKGROUND_SPINNER_CLASS, getAttentionLabel, SessionAttentionIndicator } from '@/components/SessionAttentionIndicator'
+ import { classifySessionAttention } from '@/lib/sessionAttention'
+ import { getSessionLastSeenAt, getSessionManualUnreadAt } from '@/lib/sessionLastSeen'
+ import { formatRelativeTime } from '@/lib/relativeTime'
+@@ -14,21 +14,6 @@ import { useTranslation } from '@/lib/use-translation'
+ import { getWorktreeSessionLabel } from '@/lib/sessionWorktreeLabel'
+ import { isKeepaliveIdle, isLiveSession } from '@/lib/sessionLiveness'
+ 
+-function LoaderIcon(props: { className?: string }) {
+-    return (
+-        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={props.className}>
+-            <line x1="12" y1="2" x2="12" y2="6" />
+-            <line x1="12" y1="18" x2="12" y2="22" />
+-            <line x1="4.93" y1="4.93" x2="7.76" y2="7.76" />
+-            <line x1="16.24" y1="16.24" x2="19.07" y2="19.07" />
+-            <line x1="2" y1="12" x2="6" y2="12" />
+-            <line x1="18" y1="12" x2="22" y2="12" />
+-            <line x1="4.93" y1="19.07" x2="7.76" y2="16.24" />
+-            <line x1="16.24" y1="7.76" x2="19.07" y2="4.93" />
+-        </svg>
+-    )
+-}
+-
+ function BulbIcon(props: { className?: string }) {
+     return (
+         <svg
+@@ -214,17 +199,15 @@ export function SessionRowSummary(props: {
+                             tooltipId={attentionId}
+                         />
+                     ) : showDetailedStatus && attention?.kind === 'background' ? (
+-                        <span
+-                            className={`inline-flex h-2 w-2 shrink-0 rounded-full ${ATTENTION_DOT_CLASS.background}`}
+-                            title={attentionLabel ?? undefined}
+-                            aria-label={attentionLabel ?? undefined}
+-                        />
++                        <span className="shrink-0" title={attentionLabel ?? undefined} aria-label={attentionLabel ?? undefined}>
++                            <LoaderIcon className={BACKGROUND_SPINNER_CLASS} />
++                        </span>
+                     ) : s.active && (s.backgroundTaskCount ?? 0) > 0 ? (
+                         <span
+-                            className="inline-flex shrink-0 items-center gap-1 text-[var(--app-badge-success-text)]"
+-                            title={t('session.item.running')}
++                            className="inline-flex shrink-0 items-center gap-1 text-blue-400"
++                            title={t('session.item.background')}
+                         >
+-                            <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse" aria-hidden="true" />
++                            <LoaderIcon className={BACKGROUND_SPINNER_CLASS} />
+                             {!inRunningSection ? (
+                                 <span className="text-[11px] font-medium leading-none">{t('session.item.running')}</span>
+                             ) : null}
+diff --git a/web/src/components/icons.tsx b/web/src/components/icons.tsx
+index 214486365..c91ef9806 100644
+--- a/web/src/components/icons.tsx
++++ b/web/src/components/icons.tsx
+@@ -125,6 +125,24 @@ export function ScheduleIcon(props: IconProps) {
+     )
+ }
+ 
++/** Spinner spokes; callers add the spin animation and color. */
++export function LoaderIcon(props: IconProps) {
++    return createIcon(
++        <>
++            <line x1="12" y1="2" x2="12" y2="6" />
++            <line x1="12" y1="18" x2="12" y2="22" />
++            <line x1="4.93" y1="4.93" x2="7.76" y2="7.76" />
++            <line x1="16.24" y1="16.24" x2="19.07" y2="19.07" />
++            <line x1="2" y1="12" x2="6" y2="12" />
++            <line x1="18" y1="12" x2="22" y2="12" />
++            <line x1="4.93" y1="19.07" x2="7.76" y2="16.24" />
++            <line x1="16.24" y1="7.76" x2="19.07" y2="4.93" />
++        </>,
++        props,
++        2
++    )
++}
++
+ /** Word-wrap toggle — lines with a wrap-around arrow on the last line. */
+ export function WrapIcon(props: IconProps) {
+     return createIcon(

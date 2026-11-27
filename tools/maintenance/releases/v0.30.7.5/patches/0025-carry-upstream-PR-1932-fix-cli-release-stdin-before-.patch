@@ -1,0 +1,271 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Mon, 19 Oct 2026 15:35:52 +0000
+Subject: [PATCH 25/51] carry(upstream): PR #1932 fix(cli): release stdin
+ before handing terminal to local-mode child
+
+Upstream-head: 0f96944d07a58f789f093057036bfc8560220e69
+---
+ .../common/remote/RemoteLauncherBase.ts       | 17 ++++-
+ cli/src/utils/spawnWithTerminalGuard.test.ts  | 62 ++++++++++++++++++-
+ cli/src/utils/spawnWithTerminalGuard.ts       | 13 ++--
+ cli/src/utils/stdinLifecycle.ts               | 60 ++++++++++++++++++
+ 4 files changed, 143 insertions(+), 9 deletions(-)
+ create mode 100644 cli/src/utils/stdinLifecycle.ts
+
+diff --git a/cli/src/modules/common/remote/RemoteLauncherBase.ts b/cli/src/modules/common/remote/RemoteLauncherBase.ts
+index c2f619db5..dd32fbdde 100644
+--- a/cli/src/modules/common/remote/RemoteLauncherBase.ts
++++ b/cli/src/modules/common/remote/RemoteLauncherBase.ts
+@@ -2,6 +2,7 @@ import { render } from 'ink';
+ import type { ReactElement } from 'react';
+ import { MessageBuffer } from '@/ui/ink/messageBuffer';
+ import { restoreTerminalState } from '@/ui/terminalState';
++import { ensureLiveStdin } from '@/utils/stdinLifecycle';
+ import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
+ 
+ export type RemoteLauncherExitReason = 'switch' | 'exit';
+@@ -40,7 +41,6 @@ type RpcHandlerManagerLike = {
+ 
+ export abstract class RemoteLauncherBase {
+     protected readonly messageBuffer: MessageBuffer;
+-    protected readonly hasTTY: boolean;
+     protected readonly logPath?: string;
+     protected exitReason: RemoteLauncherExitReason | null = null;
+     protected shouldExit: boolean = false;
+@@ -49,10 +49,19 @@ export abstract class RemoteLauncherBase {
+ 
+     protected constructor(logPath?: string) {
+         this.logPath = logPath;
+-        this.hasTTY = Boolean(process.stdout.isTTY && process.stdin.isTTY);
+         this.messageBuffer = new MessageBuffer();
+     }
+ 
++    // Computed lazily: stdin may be destroyed while a local-mode child owns
++    // the terminal (see utils/stdinLifecycle) and re-created in setupTerminal.
++    protected get hasTTY(): boolean {
++        return Boolean(
++            process.stdout.isTTY
++            && process.stdin.isTTY
++            && !process.stdin.destroyed
++        );
++    }
++
+     protected abstract createDisplay(context: RemoteLauncherDisplayContext): ReactElement;
+ 
+     protected abstract runMainLoop(): Promise<void>;
+@@ -147,6 +156,10 @@ export abstract class RemoteLauncherBase {
+     }
+ 
+     protected setupTerminal(handlers: RemoteLauncherTerminalHandlers): void {
++        // Local mode destroys stdin so the child TUI gets all console input
++        // (Bun keeps reading fd 0 after pause()). Re-create it before the
++        // remote-mode UI reads keys again.
++        ensureLiveStdin();
+         if (this.hasTTY) {
+             console.clear();
+             this.inkInstance = render(this.createDisplay({
+diff --git a/cli/src/utils/spawnWithTerminalGuard.test.ts b/cli/src/utils/spawnWithTerminalGuard.test.ts
+index 2852743d6..957d70a92 100644
+--- a/cli/src/utils/spawnWithTerminalGuard.test.ts
++++ b/cli/src/utils/spawnWithTerminalGuard.test.ts
+@@ -29,24 +29,58 @@ const dummyOptions = {
+ describe('spawnWithTerminalGuard', () => {
+     let stdinPauseSpy: ReturnType<typeof vi.spyOn>;
+     let stdinResumeSpy: ReturnType<typeof vi.spyOn>;
++    let stdinDestroySpy: ReturnType<typeof vi.spyOn>;
++    let destroyedDescriptor: PropertyDescriptor | undefined;
++    let isTTYDescriptor: PropertyDescriptor | undefined;
++
++    const setStdinDestroyed = (value: boolean) => {
++        Object.defineProperty(process.stdin, 'destroyed', {
++            configurable: true,
++            get: () => value
++        });
++    };
++
++    const setStdinIsTTY = (value: boolean | undefined) => {
++        Object.defineProperty(process.stdin, 'isTTY', {
++            configurable: true,
++            get: () => value
++        });
++    };
+ 
+     beforeEach(() => {
+         vi.clearAllMocks();
+         stdinPauseSpy = vi.spyOn(process.stdin, 'pause').mockImplementation(() => process.stdin);
+         stdinResumeSpy = vi.spyOn(process.stdin, 'resume').mockImplementation(() => process.stdin);
++        stdinDestroySpy = vi.spyOn(process.stdin, 'destroy').mockImplementation(() => process.stdin);
++        destroyedDescriptor = Object.getOwnPropertyDescriptor(process.stdin, 'destroyed');
++        isTTYDescriptor = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
++        setStdinDestroyed(false);
++        setStdinIsTTY(true);
+     });
+ 
+     afterEach(() => {
+         stdinPauseSpy.mockRestore();
+         stdinResumeSpy.mockRestore();
++        stdinDestroySpy.mockRestore();
++        if (destroyedDescriptor) {
++            Object.defineProperty(process.stdin, 'destroyed', destroyedDescriptor);
++        } else {
++            delete (process.stdin as unknown as { destroyed?: unknown }).destroyed;
++        }
++        if (isTTYDescriptor) {
++            Object.defineProperty(process.stdin, 'isTTY', isTTYDescriptor);
++        } else {
++            delete (process.stdin as unknown as { isTTY?: unknown }).isTTY;
++        }
+     });
+ 
+-    it('pauses stdin before spawn and resumes after success', async () => {
++    it('releases (pauses and destroys) stdin before spawn and resumes after success', async () => {
+         mockSpawnWithAbort.mockResolvedValue();
+ 
+         await spawnWithTerminalGuard(dummyOptions);
+ 
+         expect(stdinPauseSpy).toHaveBeenCalledOnce();
++        expect(stdinDestroySpy).toHaveBeenCalledOnce();
+         expect(stdinResumeSpy).toHaveBeenCalledOnce();
+         expect(mockRestoreTerminalState).toHaveBeenCalledOnce();
+     });
+@@ -68,6 +102,17 @@ describe('spawnWithTerminalGuard', () => {
+         expect(mockRestoreTerminalState).toHaveBeenCalledOnce();
+     });
+ 
++    it('does not resume stdin when the stream was destroyed', async () => {
++        mockSpawnWithAbort.mockImplementation(async () => {
++            setStdinDestroyed(true);
++        });
++
++        await spawnWithTerminalGuard(dummyOptions);
++
++        expect(stdinResumeSpy).not.toHaveBeenCalled();
++        expect(mockRestoreTerminalState).toHaveBeenCalledOnce();
++    });
++
+     it('propagates the original error from spawnWithAbort', async () => {
+         const error = new Error('process exited with code 1');
+         mockSpawnWithAbort.mockRejectedValue(error);
+@@ -75,12 +120,23 @@ describe('spawnWithTerminalGuard', () => {
+         await expect(spawnWithTerminalGuard(dummyOptions)).rejects.toThrow(error);
+     });
+ 
+-    it('calls pause before spawn, and resume after spawn', async () => {
++    it('preserves piped stdin: pauses without destroying, then resumes', async () => {
++        setStdinIsTTY(undefined);
++        mockSpawnWithAbort.mockResolvedValue();
++
++        await spawnWithTerminalGuard(dummyOptions);
++
++        expect(stdinPauseSpy).toHaveBeenCalledOnce();
++        expect(stdinDestroySpy).not.toHaveBeenCalled();
++        expect(stdinResumeSpy).toHaveBeenCalledOnce();
++    });
++
++    it('releases stdin before spawn, and resumes after spawn', async () => {
+         mockSpawnWithAbort.mockResolvedValue();
+ 
+         await spawnWithTerminalGuard(dummyOptions);
+ 
+-        expect(stdinPauseSpy.mock.invocationCallOrder[0])
++        expect(stdinDestroySpy.mock.invocationCallOrder[0])
+             .toBeLessThan(mockSpawnWithAbort.mock.invocationCallOrder[0]);
+         expect(mockSpawnWithAbort.mock.invocationCallOrder[0])
+             .toBeLessThan(stdinResumeSpy.mock.invocationCallOrder[0]);
+diff --git a/cli/src/utils/spawnWithTerminalGuard.ts b/cli/src/utils/spawnWithTerminalGuard.ts
+index b7361c703..d45013238 100644
+--- a/cli/src/utils/spawnWithTerminalGuard.ts
++++ b/cli/src/utils/spawnWithTerminalGuard.ts
+@@ -1,16 +1,21 @@
+ import { restoreTerminalState } from '@/ui/terminalState';
++import { releaseStdinForChild } from '@/utils/stdinLifecycle';
+ import { spawnWithAbort, type SpawnWithAbortOptions } from '@/utils/spawnWithAbort';
+ 
+ /**
+- * Guards the terminal around a spawnWithAbort call: pauses stdin before spawn,
+- * then resumes stdin and restores terminal escape state in finally.
++ * Guards the terminal around a spawnWithAbort call: releases stdin before
++ * spawn (pause() alone is not enough — Bun keeps a pending read on fd 0 that
++ * starves the child; see stdinLifecycle), then resumes stdin and restores
++ * terminal escape state in finally.
+  */
+ export async function spawnWithTerminalGuard(options: SpawnWithAbortOptions): Promise<void> {
+-    process.stdin.pause();
++    releaseStdinForChild();
+     try {
+         await spawnWithAbort(options);
+     } finally {
+-        process.stdin.resume();
++        if (!process.stdin.destroyed) {
++            process.stdin.resume();
++        }
+         restoreTerminalState();
+     }
+ }
+diff --git a/cli/src/utils/stdinLifecycle.ts b/cli/src/utils/stdinLifecycle.ts
+new file mode 100644
+index 000000000..dd048bdcc
+--- /dev/null
++++ b/cli/src/utils/stdinLifecycle.ts
+@@ -0,0 +1,60 @@
++import tty from 'node:tty';
++import { logger } from '@/ui/logger';
++
++// Why this module exists:
++// Bun's tty.ReadStream keeps an in-flight read on fd 0 even after pause()
++// (https://github.com/oven-sh/bun/issues/29126). When a session switches from
++// remote mode back to local mode, the agent TUI is spawned with
++// stdio:'inherit' and races that stale read for console input — and loses.
++// The TUI renders but no keystroke ever reaches it.
++// The only reliable way to stop the read under Bun is to destroy the stdin
++// stream outright; remote mode re-creates it via ensureLiveStdin() when it
++// starts up again.
++
++/**
++ * Stop consuming stdin so a child spawned with stdio:'inherit' gets all
++ * console input. Destroys the stream because pause() alone leaves a pending
++ * read under Bun.
++ */
++export function releaseStdinForChild(): void {
++    try {
++        process.stdin.pause();
++    } catch {
++    }
++    // Destroying is only needed for a TTY (Bun's stale pending read). For
++    // piped stdin, destroy() would close fd 0 and starve a child spawned
++    // with stdio:'inherit'; pause() is sufficient there.
++    if (process.stdin.destroyed || !process.stdin.isTTY) {
++        return;
++    }
++    try {
++        process.stdin.destroy();
++    } catch (error) {
++        logger.debug('[stdinLifecycle] Failed to destroy stdin', error);
++    }
++}
++
++/**
++ * Re-create process.stdin from fd 0 after releaseStdinForChild() destroyed
++ * it. No-op when stdin is still alive or fd 0 is not a terminal (remote mode
++ * without a TTY never reads stdin).
++ */
++export function ensureLiveStdin(): void {
++    if (!process.stdin.destroyed) {
++        return;
++    }
++    if (!tty.isatty(0)) {
++        return;
++    }
++    try {
++        const fresh = new tty.ReadStream(0);
++        Object.defineProperty(process, 'stdin', {
++            value: fresh,
++            writable: true,
++            configurable: true
++        });
++        logger.debug('[stdinLifecycle] Re-created process.stdin from fd 0');
++    } catch (error) {
++        logger.debug('[stdinLifecycle] Failed to re-create stdin', error);
++    }
++}

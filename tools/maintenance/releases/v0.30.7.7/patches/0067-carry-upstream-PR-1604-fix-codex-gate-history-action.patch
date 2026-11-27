@@ -1,0 +1,302 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Fri, 23 Oct 2026 18:20:36 +0000
+Subject: [PATCH 67/94] carry(upstream): PR #1604 fix(codex): gate history
+ actions until native thread is ready
+
+---
+ cli/src/agent/sessionFactory.test.ts          | 73 ++++++++++++++++++-
+ cli/src/agent/sessionFactory.ts               |  4 +
+ cli/src/codex/shared/runtime.ts               | 13 +++-
+ hub/src/sync/conversationHistoryCodex.test.ts | 43 +++++++++++
+ hub/src/sync/rpcGateway.ts                    |  4 +-
+ hub/src/sync/syncEngine.ts                    | 17 ++++-
+ shared/src/apiTypes.ts                        |  6 ++
+ 7 files changed, 151 insertions(+), 9 deletions(-)
+
+diff --git a/cli/src/agent/sessionFactory.test.ts b/cli/src/agent/sessionFactory.test.ts
+index 2d86d692b..2d223f14d 100644
+--- a/cli/src/agent/sessionFactory.test.ts
++++ b/cli/src/agent/sessionFactory.test.ts
+@@ -143,10 +143,11 @@ describe('bootstrapExistingSession', () => {
+         expect(apiCreateMock).not.toHaveBeenCalled()
+     })
+ 
+-    it('loads an existing HAPI session and reports it to the runner', async () => {
++    it('does not wait for metadata when an existing session has no stale history capabilities', async () => {
+         const session = createSession()
+         const sessionClient = {
+-            updateMetadata: vi.fn()
++            updateMetadata: vi.fn(),
++            flushMetadata: vi.fn(async () => false)
+         }
+         getSessionMock.mockResolvedValue(session)
+         getOrCreateMachineMock.mockResolvedValue({ id: 'machine-1' })
+@@ -156,7 +157,8 @@ describe('bootstrapExistingSession', () => {
+         const result = await bootstrapExistingSession({
+             sessionId: 'hapi-session-1',
+             flavor: 'codex',
+-            workingDirectory: '/tmp/project'
++            workingDirectory: '/tmp/project',
++            requireMetadataFlush: metadata => Boolean(metadata?.capabilities?.conversationHistory)
+         })
+ 
+         expect(result.sessionInfo.id).toBe('hapi-session-1')
+@@ -164,6 +166,7 @@ describe('bootstrapExistingSession', () => {
+         expect(result.workingDirectory).toBe('/tmp/project')
+         expect(sessionSyncClientMock).toHaveBeenCalledWith(session)
+         expect(sessionClient.updateMetadata).toHaveBeenCalledOnce()
++        expect(sessionClient.flushMetadata).not.toHaveBeenCalled()
+         expect(notifyRunnerSessionStartedMock).toHaveBeenCalledWith(
+             'hapi-session-1',
+             expect.objectContaining({
+@@ -273,7 +276,8 @@ describe('bootstrapExistingSession', () => {
+             }
+         }
+         const sessionClient = {
+-            updateMetadata: vi.fn()
++            updateMetadata: vi.fn(),
++            flushMetadata: vi.fn(async () => true)
+         }
+         getSessionMock.mockResolvedValue(session)
+         getOrCreateMachineMock.mockResolvedValue({ id: 'machine-1' })
+@@ -362,6 +366,67 @@ describe('bootstrapExistingSession', () => {
+         expect(sessionClient.updateMetadata.mock.calls[0][0](session.metadata)).toMatchObject({ codexHistoryBaseline: baseline })
+     })
+ 
++    it('clears stale history capabilities before reporting a Codex session as started', async () => {
++        const session = createSession()
++        const existingMetadata = session.metadata
++        if (!existingMetadata) throw new Error('expected test session metadata')
++
++        session.metadata = {
++            ...existingMetadata,
++            capabilities: {
++                terminal: true,
++                conversationHistory: { forkCurrent: true }
++            }
++        }
++        let releaseMetadataFlush: (() => void) | undefined
++        let resolveMetadataFlushStarted: (() => void) | undefined
++        const metadataFlushStarted = new Promise<void>((resolve) => {
++            resolveMetadataFlushStarted = resolve
++        })
++        const sessionClient = {
++            updateMetadata: vi.fn(),
++            flushMetadata: vi.fn(async () => {
++                resolveMetadataFlushStarted?.()
++                await new Promise<void>((resolve) => {
++                    releaseMetadataFlush = resolve
++                })
++                return true
++            })
++        }
++        getSessionMock.mockResolvedValue(session)
++        getOrCreateMachineMock.mockResolvedValue({ id: 'machine-1' })
++        sessionSyncClientMock.mockReturnValue(sessionClient)
++        readSettingsMock.mockResolvedValue({ machineId: 'machine-1' })
++
++        const bootstrapPromise = bootstrapExistingSession({
++            sessionId: 'hapi-session-1',
++            flavor: 'codex',
++            workingDirectory: '/tmp/project',
++            metadataOverrides: {
++                capabilities: {
++                    terminal: true,
++                    conversationHistory: undefined
++                }
++            },
++            requireMetadataFlush: metadata => Boolean(metadata?.capabilities?.conversationHistory)
++        })
++        await metadataFlushStarted
++        expect(notifyRunnerSessionStartedMock).not.toHaveBeenCalled()
++        releaseMetadataFlush!()
++        const result = await bootstrapPromise
++
++        expect(result.metadata.capabilities).toEqual({ terminal: true })
++        const updateHandler = sessionClient.updateMetadata.mock.calls[0][0]
++        expect(updateHandler(session.metadata).capabilities).toEqual({ terminal: true })
++        expect(sessionClient.flushMetadata).toHaveBeenCalledOnce()
++        expect(notifyRunnerSessionStartedMock).toHaveBeenCalledWith(
++            'hapi-session-1',
++            expect.objectContaining({
++                capabilities: { terminal: true }
++            })
++        )
++    })
++
+     it('advertises remote terminal capability in session metadata', () => {
+         const metadata = buildSessionMetadata({
+             flavor: 'codex',
+diff --git a/cli/src/agent/sessionFactory.ts b/cli/src/agent/sessionFactory.ts
+index 74e0fccc2..cad195956 100644
+--- a/cli/src/agent/sessionFactory.ts
++++ b/cli/src/agent/sessionFactory.ts
+@@ -406,6 +406,7 @@ export async function bootstrapExistingSession(options: {
+     metadataOverrides?: Partial<Metadata>
+     /** Derived from the persisted row before `metadataOverrides` replace it. */
+     deriveMetadata?: (current: Metadata | null | undefined) => Partial<Metadata>
++    requireMetadataFlush?: (metadata: Metadata | null | undefined) => boolean
+ }): Promise<SessionBootstrapResult> {
+     await ensureHapiSessionControlSkill(options.flavor, options.workingDirectory)
+     const startedBy = options.startedBy ?? 'terminal'
+@@ -454,6 +455,9 @@ export async function bootstrapExistingSession(options: {
+ 
+     const session = api.sessionSyncClient(sessionInfo)
+     session.updateMetadata(buildUpdatedMetadata)
++    if (options.requireMetadataFlush?.(sessionInfo.metadata) && !await session.flushMetadata()) {
++        throw new Error('Unable to persist existing-session metadata')
++    }
+ 
+     if (options.exportSessionEnv !== false) exportHapiSessionEnv(sessionInfo.id)
+ 
+diff --git a/cli/src/codex/shared/runtime.ts b/cli/src/codex/shared/runtime.ts
+index 6d83b7dc2..d08e4ab3e 100644
+--- a/cli/src/codex/shared/runtime.ts
++++ b/cli/src/codex/shared/runtime.ts
+@@ -171,13 +171,22 @@ export async function runSharedRuntime(options: SharedLaunchOptions, onReady?: (
+     const prepare = async (cwd: string, existingSessionId?: string, parent?: SharedCodexRoot): Promise<SharedCodexRoot> => {
+         assertRunning();
+         const shared = { flavor: 'codex', startedBy: options.startedBy ?? 'terminal', workingDirectory: cwd,
+-            exportSessionEnv: false, reportStarted: false, metadataOverrides: { capabilities: { terminal: true, concurrentClients: true },
++            exportSessionEnv: false, reportStarted: false, metadataOverrides: { capabilities: {
++                terminal: true,
++                concurrentClients: true,
++                ...(existingSessionId ? { conversationHistory: undefined } : {})
++            },
+                 ...(parent ? { forkedFrom: parent.session.sessionId } : {}) } } as const;
+         // reservedSessionId names one preallocated hub row — single-use. A second
+         // create()/fork must mint a fresh row, not re-adopt (#1911 Opus Major).
+         const reservedSessionId = takeReservedSessionId(options);
+         const bootstrap = existingSessionId
+-            ? await bootstrapExistingSession({ ...shared, sessionId: existingSessionId, deriveMetadata: legacyHistoryCapture })
++            ? await bootstrapExistingSession({
++                ...shared,
++                sessionId: existingSessionId,
++                deriveMetadata: legacyHistoryCapture,
++                requireMetadataFlush: metadata => Boolean(metadata?.capabilities?.conversationHistory)
++            })
+             : await bootstrapSession({
+                 ...shared,
+                 reservedSessionId,
+diff --git a/hub/src/sync/conversationHistoryCodex.test.ts b/hub/src/sync/conversationHistoryCodex.test.ts
+index a688bdaec..41a21346e 100644
+--- a/hub/src/sync/conversationHistoryCodex.test.ts
++++ b/hub/src/sync/conversationHistoryCodex.test.ts
+@@ -1,4 +1,5 @@
+ import { describe, expect, it } from 'bun:test'
++import { MACHINE_CAPABILITIES } from '@hapi/protocol/runnerCapabilities'
+ import { Store } from '../store'
+ import { RpcRegistry } from '../socket/rpcRegistry'
+ import { SyncEngine } from './syncEngine'
+@@ -50,3 +51,45 @@ describe('shared Codex rewind commit', () => {
+         } finally { engine.stop() }
+     })
+ })
++
++function createEngine() {
++    const store = new Store(':memory:')
++    const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
++    return { store, engine }
++}
++
++describe('Codex conversation-history hub integration', () => {
++    it('forwards serialized Fork RPC errors instead of using the missing-id fallback', async () => {
++        const { store, engine } = createEngine()
++        try {
++            const session = engine.getOrCreateSession('codex-fork-not-ready', {
++                path: '/tmp/project',
++                host: 'localhost',
++                machineId: 'machine-1',
++                flavor: 'codex',
++                codexSessionId: 'native-thread',
++                capabilities: { conversationHistory: { forkCurrent: true } }
++            }, null, 'default')
++            engine.getOrCreateMachine('machine-1', {
++                host: 'localhost',
++                platform: 'linux',
++                happyCliVersion: 'test',
++                capabilities: [MACHINE_CAPABILITIES.SessionControlSkill]
++            }, null, 'default')
++            engine.handleSessionAlive({ sid: session.id, time: Date.now(), mode: 'remote' })
++            store.messages.addMessage(session.id, { role: 'user', content: 'boundary' }, 'local-boundary')
++            store.messages.markMessagesInvoked(session.id, ['local-boundary'], Date.now())
++
++            ;(engine as any).rpcGateway.forkConversation = async () => ({
++                error: 'Codex thread is not ready'
++            })
++
++            await expect(engine.forkConversation(session.id, 'default')).resolves.toEqual({
++                type: 'error',
++                message: 'Codex thread is not ready'
++            })
++        } finally {
++            engine.stop()
++        }
++    })
++})
+diff --git a/hub/src/sync/rpcGateway.ts b/hub/src/sync/rpcGateway.ts
+index 374b92495..2d12e1e0e 100644
+--- a/hub/src/sync/rpcGateway.ts
++++ b/hub/src/sync/rpcGateway.ts
+@@ -573,13 +573,13 @@ export class RpcGateway {
+     async forkConversation(
+         sessionId: string,
+         params: { messageLocalId?: string }
+-    ): Promise<import('@hapi/protocol/apiTypes').ForkConversationRpcResult> {
++    ): Promise<import('@hapi/protocol/apiTypes').ForkConversationRpcResponse> {
+         return await this.sessionRpc(
+             sessionId,
+             RPC_METHODS.ForkConversation,
+             params,
+             120_000
+-        ) as import('@hapi/protocol/apiTypes').ForkConversationRpcResult
++        ) as import('@hapi/protocol/apiTypes').ForkConversationRpcResponse
+     }
+ 
+     async clearConversation(sessionId: string): Promise<{ sessionId: string }> {
+diff --git a/hub/src/sync/syncEngine.ts b/hub/src/sync/syncEngine.ts
+index bf88898c8..9b016ffb0 100644
+--- a/hub/src/sync/syncEngine.ts
++++ b/hub/src/sync/syncEngine.ts
+@@ -1575,7 +1575,22 @@ export class SyncEngine {
+             return { type: 'error', message: error instanceof Error ? error.message : String(error) }
+         }
+ 
+-        if (!rpcResult?.nativeSessionId) {
++        if (
++            rpcResult &&
++            typeof rpcResult === 'object' &&
++            'error' in rpcResult &&
++            typeof rpcResult.error === 'string' &&
++            rpcResult.error.trim()
++        ) {
++            return { type: 'error', message: rpcResult.error }
++        }
++
++        if (
++            !rpcResult ||
++            typeof rpcResult !== 'object' ||
++            !('nativeSessionId' in rpcResult) ||
++            !rpcResult.nativeSessionId
++        ) {
+             return { type: 'error', message: 'Native fork did not return a session id' }
+         }
+         if (rpcResult.sessionId) {
+diff --git a/shared/src/apiTypes.ts b/shared/src/apiTypes.ts
+index 464459f74..eb6a41b72 100644
+--- a/shared/src/apiTypes.ts
++++ b/shared/src/apiTypes.ts
+@@ -601,6 +601,12 @@ export type ForkConversationRpcResult = {
+     forkSession?: boolean
+ }
+ 
++/** Raw RPC response, including generic serialized handler failures. */
++export type ForkConversationRpcResponse = ForkConversationRpcResult | {
++    /** Serialized CLI handler failure returned through the generic RPC layer. */
++    error: string
++}
++
+ export type RewindConversationErrorCode =
+     | 'ambiguous_native_boundary'
+     | 'ambiguous_native_boundary_fork_safe'

@@ -1,0 +1,1542 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Mon, 19 Oct 2026 15:38:01 +0000
+Subject: [PATCH 34/94] carry(upstream): PR #2025 fix(codex): persist Round
+ duration across session reloads
+
+Upstream-head: cefea0cfb364c2b7f7d9d24deee3b2166277558e
+---
+ cli/README.md                                 |   8 +
+ cli/src/codex/codexLocalLauncher.test.ts      |  80 ++++++++--
+ cli/src/codex/codexLocalLauncher.ts           |  35 +++--
+ cli/src/codex/codexRemoteLauncher.test.ts     |  51 +++++++
+ cli/src/codex/codexRemoteLauncher.ts          |  54 ++++---
+ cli/src/codex/shared/projection.test.ts       |  38 +++++
+ cli/src/codex/shared/projection.ts            |  57 ++++---
+ cli/src/codex/shared/root.ts                  |   7 +-
+ cli/src/codex/utils/codexEventConverter.ts    |   2 +-
+ cli/src/codex/utils/roundDuration.test.ts     |  27 ++++
+ cli/src/codex/utils/roundDuration.ts          |  19 +++
+ .../codex-imported-duration-rejected.json     | 100 +++++++++++++
+ .../codex-persisted-round-duration-tail.json  |  99 +++++++++++++
+ web/scripts/fixtures/cases/codex.ts           |  13 ++
+ web/src/chat/normalizeAgent.test.ts           |  24 +++
+ web/src/chat/normalizeAgent.ts                |  20 +++
+ web/src/chat/reducerTimeline.test.ts          | 140 ++++++++++++++++++
+ web/src/chat/reducerTimeline.ts               |  42 +++++-
+ web/src/chat/types.ts                         |   5 +-
+ web/src/lib/message-window-store.test.ts      |  38 +++++
+ 20 files changed, 784 insertions(+), 75 deletions(-)
+ create mode 100644 cli/src/codex/utils/roundDuration.test.ts
+ create mode 100644 cli/src/codex/utils/roundDuration.ts
+ create mode 100644 shared/fixtures/chat/codex-imported-duration-rejected.json
+ create mode 100644 shared/fixtures/chat/codex-persisted-round-duration-tail.json
+
+diff --git a/cli/README.md b/cli/README.md
+index 85bcf935c..5a002ccdb 100644
+--- a/cli/README.md
++++ b/cli/README.md
+@@ -156,6 +156,14 @@ See `src/ui/doctor.ts`.
+ - `hapi hub` - Start the bundled hub (single binary workflow).
+ - `hapi server` - Alias for `hapi hub`.
+ 
++### Codex round timing
++
++Completed live Codex turns persist their duration in the message stream, so Web
++and PWA response details keep the same Round duration after refresh or a cached
++tail reload. Local transcript timing uses the original start and completion
++timestamps; imported history and turns without an observed live start do not
++receive a new duration.
++
+ ### Codex MCP servers
+ 
+ Codex sessions keep the MCP servers configured in the user's Codex
+diff --git a/cli/src/codex/codexLocalLauncher.test.ts b/cli/src/codex/codexLocalLauncher.test.ts
+index d8de89845..2622b12d4 100644
+--- a/cli/src/codex/codexLocalLauncher.test.ts
++++ b/cli/src/codex/codexLocalLauncher.test.ts
+@@ -213,6 +213,43 @@ describe('codexLocalLauncher', () => {
+         }
+     });
+ 
++    it('persists original live transcript duration without timing replay or duplicate completions', async () => {
++        const transcriptPath = await writeTranscriptMeta('duration.jsonl', 'duration-session');
++        const event = (type: string, turn_id: string, timestamp: string) => JSON.stringify({
++            type: 'event_msg', timestamp, payload: { type, turn_id }
++        }) + '\n';
++        await appendFile(transcriptPath,
++            event('task_started', 'old', '2026-10-15T00:00:00.000Z')
++            + event('task_complete', 'old', '2026-10-15T01:00:00.000Z'));
++        const { session, agentMessages } = createSessionStub('default', undefined, tempDir, null, true);
++        let release!: () => void;
++        harness.runBarrier = new Promise<void>(resolve => { release = resolve; });
++        const running = codexLocalLauncher(session as never);
++        try {
++            await vi.waitFor(() => expect(harness.sessionHookHandlers).toHaveLength(1));
++            harness.sessionHookHandlers[0]('duration-session', { transcript_path: transcriptPath });
++            await wait(300);
++            expect(agentMessages).not.toContainEqual(expect.objectContaining({ type: 'turn_duration' }));
++            // Both records can arrive in one scan; receipt time would give a fabricated zero.
++            await appendFile(transcriptPath,
++                event('task_started', 'live', '2026-10-15T02:00:00.000Z')
++                + event('task_complete', 'live', '2026-10-15T02:00:39.426Z')
++                + event('task_complete', 'live', '2026-10-15T02:00:40.000Z')
++                + JSON.stringify({ type: 'event_msg', payload: { type: 'token_count', turn_id: 'live',
++                    info: { last_token_usage: { input_tokens: 100, output_tokens: 10 } } } }) + '\n');
++            await vi.waitFor(() => expect(agentMessages).toContainEqual(expect.objectContaining({
++                type: 'turn_duration', flavor: 'codex', turn_id: 'live', durationMs: 39_426
++            })), { timeout: 3000 });
++            expect(agentMessages.filter(message => (message as { type?: string }).type === 'turn_duration')).toHaveLength(1);
++            await vi.waitFor(() => expect(agentMessages).toContainEqual(expect.objectContaining({
++                type: 'token_count', turn_id: 'live'
++            })));
++        } finally {
++            release();
++            await running;
++        }
++    });
++
+     it('notifies once for a live completion after forwarding the final answer, without replay alerts', async () => {
+         const transcriptPath = await writeTranscriptMeta('ready.jsonl', 'ready-session');
+         const event = (payload: Record<string, unknown>) => JSON.stringify({ type: 'event_msg', payload }) + '\n';
+@@ -596,12 +633,14 @@ describe('codexLocalLauncher', () => {
+             name: 'update_plan',
+             callId: 'exec-plan-1',
+             input: { plan: [{ step: 'Inspect', status: 'completed' }] },
+-            id: expect.any(String)
++            id: expect.any(String),
++            turn_id: 'turn-hook'
+         }, {
+             type: 'tool-call-result',
+             callId: 'exec-plan-1',
+             output: 'Plan updated',
+-            id: expect.any(String)
++            id: expect.any(String),
++            turn_id: 'turn-hook'
+         }, {
+             type: 'tool-call',
+             name: 'CodexBash',
+@@ -611,7 +650,8 @@ describe('codexLocalLauncher', () => {
+                 cwd: '/tmp/worktree',
+                 source: 'codex-hook'
+             },
+-            id: expect.any(String)
++            id: expect.any(String),
++            turn_id: 'turn-hook'
+         }, {
+             type: 'tool-call-result',
+             callId: 'exec-command-1',
+@@ -620,7 +660,8 @@ describe('codexLocalLauncher', () => {
+                 stderr: '',
+                 status: 'completed'
+             },
+-            id: expect.any(String)
++            id: expect.any(String),
++            turn_id: 'turn-hook'
+         }]);
+     });
+ 
+@@ -1099,18 +1140,21 @@ describe('codexLocalLauncher', () => {
+         }, {
+             type: 'message',
+             message: 'visible assistant preface',
++            turn_id: 'turn-with-preface',
+             id: expect.any(String)
+         }, {
+             type: 'tool-call',
+             name: 'ExitPlanMode',
+             callId: 'codex-proposed-plan:plan-1',
+             input: { plan: '## Proposed plan\n\n1. Inspect\n2. Implement' },
+-            id: 'plan-1'
++            id: 'plan-1',
++            turn_id: 'turn-with-preface'
+         }, {
+             type: 'tool-call-result',
+             callId: 'codex-proposed-plan:plan-1',
+             output: null,
+-            id: 'plan-1:result'
++            id: 'plan-1:result',
++            turn_id: 'turn-with-preface'
+         }]);
+         expect(agentMessages[9]).toMatchObject({
+             callId: (agentMessages[8] as { callId: string }).callId
+@@ -1198,7 +1242,8 @@ describe('codexLocalLauncher', () => {
+             message: {
+                 type: 'message',
+                 message: 'visible final A',
+-                id: 'final-a'
++                id: 'final-a',
++                turn_id: 'turn-ordered'
+             }
+         }, {
+             type: 'user-message',
+@@ -1208,7 +1253,8 @@ describe('codexLocalLauncher', () => {
+             message: {
+                 type: 'message',
+                 message: 'visible final B',
+-                id: 'final-b'
++                id: 'final-b',
++                turn_id: 'turn-ordered'
+             }
+         }]);
+     });
+@@ -1305,11 +1351,13 @@ describe('codexLocalLauncher', () => {
+         expect(agentMessages).toEqual([{
+             type: 'message',
+             message: 'visible 0.147 commentary',
+-            id: 'commentary-147'
++            id: 'commentary-147',
++            turn_id: 'turn-147'
+         }, {
+             type: 'message',
+             message: 'visible 0.147 final answer',
+-            id: 'final-147'
++            id: 'final-147',
++            turn_id: 'turn-147'
+         }]);
+     });
+ 
+@@ -1356,7 +1404,8 @@ describe('codexLocalLauncher', () => {
+         expect(agentMessages).toEqual([{
+             type: 'message',
+             message: 'visible answer at EOF',
+-            id: 'final-at-eof'
++            id: 'final-at-eof',
++            turn_id: 'turn-final-at-eof'
+         }]);
+ 
+         releaseRunBarrier?.();
+@@ -1365,7 +1414,8 @@ describe('codexLocalLauncher', () => {
+         expect(agentMessages).toEqual([{
+             type: 'message',
+             message: 'visible answer at EOF',
+-            id: 'final-at-eof'
++            id: 'final-at-eof',
++            turn_id: 'turn-final-at-eof'
+         }]);
+     });
+ 
+@@ -1423,12 +1473,14 @@ describe('codexLocalLauncher', () => {
+             name: 'ExitPlanMode',
+             callId: 'codex-proposed-plan:plan-only',
+             input: { plan: '## Plan only' },
+-            id: 'plan-only'
++            id: 'plan-only',
++            turn_id: 'turn-plan-only'
+         }, {
+             type: 'tool-call-result',
+             callId: 'codex-proposed-plan:plan-only',
+             output: null,
+-            id: 'plan-only:result'
++            id: 'plan-only:result',
++            turn_id: 'turn-plan-only'
+         }]);
+     });
+ 
+diff --git a/cli/src/codex/codexLocalLauncher.ts b/cli/src/codex/codexLocalLauncher.ts
+index 7465feac3..af8726c05 100644
+--- a/cli/src/codex/codexLocalLauncher.ts
++++ b/cli/src/codex/codexLocalLauncher.ts
+@@ -1,3 +1,4 @@
++import { CodexRoundDuration } from './utils/roundDuration';
+ import { logger } from '@/ui/logger';
+ import { resolve } from 'node:path';
+ import { startHookServer } from '@/claude/utils/startHookServer';
+@@ -122,13 +123,15 @@ export async function codexLocalLauncher(session: CodexSession): Promise<'switch
+             name: 'ExitPlanMode',
+             callId,
+             input: { plan: message.plan },
+-            id: message.id
++            id: message.id,
++            turn_id: message.turnId
+         });
+         session.sendAgentMessage({
+             type: 'tool-call-result',
+             callId,
+             output: null,
+-            id: `${message.id}:result`
++            id: `${message.id}:result`,
++            turn_id: message.turnId
+         });
+     };
+ 
+@@ -171,6 +174,8 @@ export async function codexLocalLauncher(session: CodexSession): Promise<'switch
+         pendingExecWrappers.clear();
+     };
+ 
++    const roundDuration = new CodexRoundDuration();
++
+     const dispatchTranscriptActions = (
+         actions: CodexConversionAction[],
+         context: { replayedHistory: boolean }
+@@ -200,7 +205,8 @@ export async function codexLocalLauncher(session: CodexSession): Promise<'switch
+                 continue;
+             }
+ 
+-            const message = action.message;
++            const turnId = action.turnId ?? roundDuration.turnId;
++            const message = { ...action.message, ...(turnId ? { turn_id: turnId } : {}) };
+             if (message.type === 'proposed_plan') {
+                 // Codex may complete the Plan item before emitting its final text preface.
+                 pendingPlansByTurnId.set(message.turnId, message);
+@@ -325,15 +331,22 @@ export async function codexLocalLauncher(session: CodexSession): Promise<'switch
+                 dispatchTranscriptActions(convertTranscriptEvent(event), context);
+                 if (event.type === 'event_msg' && event.payload && typeof event.payload === 'object') {
+                     const payload = event.payload as Record<string, unknown>;
++                    const timestamp = typeof event.timestamp === 'string' ? Date.parse(event.timestamp) : NaN;
++                    const turnId = typeof payload.turn_id === 'string' ? payload.turn_id : null;
++                    if (!context.replayedHistory && payload.type === 'task_started') roundDuration.start(turnId, timestamp);
+                     if (['task_complete', 'turn_aborted', 'task_failed'].includes(String(payload.type))) {
+-                        if (typeof payload.turn_id === 'string') {
+-                            if (completedTurns.has(payload.turn_id)) return;
+-                            completedTurns.add(payload.turn_id);
++                        if (turnId) {
++                            if (completedTurns.has(turnId)) return;
++                            completedTurns.add(turnId);
++                        }
++                        if (!context.replayedHistory) {
++                            const duration = roundDuration.finish(turnId, timestamp, payload.type === 'task_complete');
++                            if (duration) session.sendAgentMessage(duration);
++                            session.sendAgentMessage({
++                                type: 'turn_complete',
++                                stopReason: payload.type === 'task_complete' ? 'success' : payload.type === 'turn_aborted' ? 'cancelled' : 'error'
++                            });
+                         }
+-                        if (!context.replayedHistory) session.sendAgentMessage({
+-                            type: 'turn_complete',
+-                            stopReason: payload.type === 'task_complete' ? 'success' : payload.type === 'turn_aborted' ? 'cancelled' : 'error'
+-                        });
+                     }
+                     if (payload.type === 'task_started' || payload.type === 'user_message'
+                         || payload.type === 'turn_aborted' || payload.type === 'task_failed') {
+@@ -412,7 +425,7 @@ export async function codexLocalLauncher(session: CodexSession): Promise<'switch
+                     return;
+                 }
+                 for (const message of toolHookBridge.handle(data)) {
+-                    session.sendAgentMessage(message);
++                    session.sendAgentMessage({ ...message, turn_id: data.turn_id });
+                 }
+                 return;
+             }
+diff --git a/cli/src/codex/codexRemoteLauncher.test.ts b/cli/src/codex/codexRemoteLauncher.test.ts
+index 3988ccd6b..8146fd617 100644
+--- a/cli/src/codex/codexRemoteLauncher.test.ts
++++ b/cli/src/codex/codexRemoteLauncher.test.ts
+@@ -1274,6 +1274,57 @@ function createSessionStub(
+ }
+ 
+ describe('codexRemoteLauncher', () => {
++    it('keeps plan cards distinct across native turns and stable within each turn', async () => {
++        harness.suppressTurnCompletion = true;
++        const { session, codexMessages } = createSessionStub(['first'], createMode(), false, false);
++        const running = codexRemoteLauncher(session as never);
++        for (let index = 1; index <= 2; index += 1) {
++            await vi.waitFor(() => expect(harness.startTurnThreadIds).toHaveLength(index));
++            const turnId = `turn-${index}`;
++            for (const status of ['pending', 'completed']) {
++                harness.dispatchNotification?.('turn/plan/updated', {
++                    threadId: 'thread-1', turnId, plan: [{ step: 'work', status }]
++                });
++            }
++            harness.dispatchNotification?.('turn/completed', { threadId: 'thread-1', turn: { id: turnId, status: 'completed' } });
++            if (index === 1) session.queue.push('second', createMode());
++        }
++        session.queue.close();
++        await expect(running).resolves.toBe('exit');
++        const plans = codexMessages.filter((message): message is Record<string, unknown> =>
++            typeof message === 'object' && message !== null && 'callId' in message);
++        for (const type of ['tool-call', 'tool-call-result']) {
++            expect(plans.filter(message => message.type === type).map(message => message.callId)).toEqual([
++                'codex-plan-state:turn-1', 'codex-plan-state:turn-1',
++                'codex-plan-state:turn-2', 'codex-plan-state:turn-2'
++            ]);
++        }
++    });
++
++    it('persists the matching live app-server duration and ignores child or stale terminals', async () => {
++        harness.suppressTurnCompletion = true;
++        const { session, codexMessages } = createSessionStub(['first message']);
++        const now = vi.spyOn(Date, 'now').mockReturnValue(10_000);
++        const running = codexRemoteLauncher(session as never);
++        try {
++            await vi.waitFor(() => expect(harness.startTurnThreadIds).toHaveLength(1));
++            now.mockReturnValue(20_000);
++            harness.dispatchNotification?.('turn/completed', { threadId: 'child', turn: { id: 'child-turn', status: 'completed' } });
++            harness.dispatchNotification?.('turn/completed', { threadId: 'thread-1', turn: { id: 'old', status: 'completed' } });
++            expect(codexMessages.filter(message => typeof message === 'object' && message !== null
++                && 'type' in message && message.type === 'turn_duration')).toHaveLength(0);
++            now.mockReturnValue(49_426);
++            harness.dispatchNotification?.('turn/completed', { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed' } });
++            await expect(running).resolves.toBe('exit');
++            expect(codexMessages.filter(message => typeof message === 'object' && message !== null
++                && 'type' in message && message.type === 'turn_duration')).toEqual([
++                expect.objectContaining({ turn_id: 'turn-1', durationMs: 39_426 })
++            ]);
++        } finally {
++            now.mockRestore();
++        }
++    });
++
+     it('invalidates queued steer handlers after abort or cleanup', () => {
+         expect(isCurrentSteerHandler(3, 3, false)).toBe(true);
+         expect(isCurrentSteerHandler(4, 3, false)).toBe(false);
+diff --git a/cli/src/codex/codexRemoteLauncher.ts b/cli/src/codex/codexRemoteLauncher.ts
+index f18d10a58..cee4967f4 100644
+--- a/cli/src/codex/codexRemoteLauncher.ts
++++ b/cli/src/codex/codexRemoteLauncher.ts
+@@ -1,3 +1,4 @@
++import { CodexRoundDuration } from './utils/roundDuration';
+ import React from 'react';
+ import { randomUUID } from 'node:crypto';
+ 
+@@ -666,10 +667,10 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+             }
+         });
+         const reasoningProcessor = new ReasoningProcessor((message) => {
+-            session.sendAgentMessage(message);
++            session.sendAgentMessage({ ...message, ...(this.currentTurnId ? { turn_id: this.currentTurnId } : {}) });
+         });
+         const diffProcessor = new DiffProcessor((message) => {
+-            session.sendAgentMessage(message);
++            session.sendAgentMessage({ ...message, ...(this.currentTurnId ? { turn_id: this.currentTurnId } : {}) });
+         });
+         const mcpTitleByCallId = new Map<string, string>();
+         const agentCardByAgentId = new Map<string, string>();
+@@ -2710,9 +2711,10 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+             return true;
+         };
+ 
++        const roundDuration = new CodexRoundDuration();
+         let codexEventQueue: Promise<void> | null = null;
+ 
+-        const handleCodexEvent = async (msg: Record<string, unknown>): Promise<void> => {
++        const handleCodexEvent = async (msg: Record<string, unknown>, receivedAt = Date.now()): Promise<void> => {
+             const msgType = asString(msg.type);
+             if (!msgType) return;
+             const eventTurnId = asString(msg.turn_id ?? msg.turnId);
+@@ -2813,6 +2815,10 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+                 return;
+             }
+ 
++            const sendRootMessage = (message: Record<string, unknown>) => {
++                const turnId = eventTurnId ?? this.currentTurnId;
++                session.sendAgentMessage({ ...message, ...(turnId ? { turn_id: turnId } : {}) });
++            };
+             const isStaleSameThreadRecoveryTerminal = msgType === 'task_complete'
+                 && turnInFlight
+                 && (sameThreadRetryAttempt > 0 || sameThreadCompactAttempt > 0)
+@@ -2834,6 +2840,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+             }
+ 
+             if (msgType === 'task_started') {
++                roundDuration.start(eventTurnId, receivedAt);
+                 const turnId = eventTurnId;
+                 agentMessageStartedForTurn = false;
+                 dismissedSafetyBufferingKeys.clear();
+@@ -3026,6 +3033,8 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+                     return;
+                 }
+                 const finalizedTurnId = eventTurnId ?? this.currentTurnId;
++                const duration = roundDuration.finish(finalizedTurnId, receivedAt, msgType === 'task_complete');
++                if (duration) sendRootMessage(duration);
+                 if (finalizedTurnId) {
+                     lastFinalizedTurnId = finalizedTurnId;
+                 }
+@@ -3187,7 +3196,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+             if (msgType === 'agent_message') {
+                 const message = asString(msg.message);
+                 if (message) {
+-                    session.sendAgentMessage({
++                    sendRootMessage({
+                         type: 'message',
+                         message,
+                         id: randomUUID()
+@@ -3207,7 +3216,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+                     if (!image) return;
+ 
+                     messageBuffer.addMessage(`Generated image: ${image.fileName}`, 'assistant');
+-                    session.sendAgentMessage({
++                    sendRootMessage({
+                         type: 'generated-image',
+                         imageId: image.id,
+                         sourceImageId,
+@@ -3230,7 +3239,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+                     delete inputs.call_id;
+                     delete inputs.callId;
+ 
+-                    session.sendAgentMessage({
++                    sendRootMessage({
+                         type: 'tool-call',
+                         name: 'CodexBash',
+                         callId: callId,
+@@ -3249,7 +3258,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+                     output.stdout = output.output;
+                     delete output.output;
+ 
+-                    session.sendAgentMessage({
++                    sendRootMessage({
+                         type: 'tool-call-result',
+                         callId: callId,
+                         output,
+@@ -3259,7 +3268,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+             }
+             if (msgType === 'token_count') {
+                 const threadId = eventThreadId ?? this.currentThreadId;
+-                session.sendAgentMessage({
++                sendRootMessage({
+                     ...addCodexEventScope(msg, 'parent', threadId),
+                     flavor: 'codex',
+                     model: asString(msg.model) ?? usageModel,
+@@ -3268,7 +3277,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+             }
+             if (msgType === 'context_compacted') {
+                 const threadId = eventThreadId ?? this.currentThreadId;
+-                session.sendAgentMessage({
++                sendRootMessage({
+                     ...addCodexEventScope({
+                         type: 'context_compacted',
+                         ...(eventTurnId ? { turn_id: eventTurnId } : {})
+@@ -3288,19 +3297,21 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+                 }
+             }
+             if (msgType === 'plan_update') {
+-                session.sendAgentMessage({
++                const turnId = eventTurnId ?? this.currentTurnId;
++                const callId = turnId ? `codex-plan-state:${turnId}` : 'codex-plan-state';
++                sendRootMessage({
+                     type: 'tool-call',
+                     name: 'update_plan',
+-                    callId: 'codex-plan-state',
++                    callId,
+                     input: {
+                         plan: Array.isArray(msg.plan) ? msg.plan : [],
+                         source: 'codex'
+                     },
+                     id: randomUUID()
+                 });
+-                session.sendAgentMessage({
++                sendRootMessage({
+                     type: 'tool-call-result',
+-                    callId: 'codex-plan-state',
++                    callId,
+                     output: {
+                         plan: Array.isArray(msg.plan) ? msg.plan : [],
+                         source: 'codex',
+@@ -3317,7 +3328,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+                     const filesMsg = changeCount === 1 ? '1 file' : `${changeCount} files`;
+                     messageBuffer.addMessage(`Modifying ${filesMsg}...`, 'tool');
+ 
+-                    session.sendAgentMessage({
++                    sendRootMessage({
+                         type: 'tool-call',
+                         name: 'CodexPatch',
+                         callId: callId,
+@@ -3344,7 +3355,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+                         messageBuffer.addMessage(`Error: ${errorMsg.substring(0, 200)}`, 'result');
+                     }
+ 
+-                    session.sendAgentMessage({
++                    sendRootMessage({
+                         type: 'tool-call-result',
+                         callId: callId,
+                         output: {
+@@ -3370,7 +3381,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+                     if (isHapiChangeTitleToolName(name) && requestedTitle) {
+                         mcpTitleByCallId.set(callId, requestedTitle);
+                     }
+-                    session.sendAgentMessage({
++                    sendRootMessage({
+                         type: 'tool-call',
+                         name,
+                         callId,
+@@ -3401,7 +3412,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+                         sendTitleSummary(title);
+                     }
+ 
+-                    session.sendAgentMessage({
++                    sendRootMessage({
+                         type: 'tool-call-result',
+                         callId,
+                         output,
+@@ -3443,7 +3454,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+                         }
+                         return;
+                     }
+-                    session.sendAgentMessage({
++                    sendRootMessage({
+                         type: 'tool-call',
+                         name,
+                         callId,
+@@ -3460,7 +3471,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+                         handleAgentToolEnd(callId, name, msg.output, Boolean(msg.is_error ?? msg.isError));
+                         return;
+                     }
+-                    session.sendAgentMessage({
++                    sendRootMessage({
+                         type: 'tool-call-result',
+                         callId,
+                         output: msg.output,
+@@ -3536,6 +3547,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+                 });
+                 return;
+             }
++            const receivedAt = Date.now();
+             const events = appServerEventConverter.handleNotification(method, params);
+             for (const event of events) {
+                 const eventRecord = asRecord(event) ?? { type: undefined };
+@@ -3545,7 +3557,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+                 if (codexEventQueue || hasGeneratedImagePath) {
+                     const previousQueue = codexEventQueue ?? Promise.resolve();
+                     const nextQueue = previousQueue
+-                        .then(() => handleCodexEvent(eventRecord))
++                        .then(() => handleCodexEvent(eventRecord, receivedAt))
+                         .catch((error) => logger.debug('[Codex] Failed to handle app-server event:', error instanceof Error ? error.message : String(error)));
+                     const queued = nextQueue.finally(() => {
+                         if (codexEventQueue === queued) {
+@@ -3554,7 +3566,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+                     });
+                     codexEventQueue = queued;
+                 } else {
+-                    void handleCodexEvent(eventRecord).catch((error) => {
++                    void handleCodexEvent(eventRecord, receivedAt).catch((error) => {
+                         logger.debug('[Codex] Failed to handle app-server event:', error instanceof Error ? error.message : String(error));
+                     });
+                 }
+diff --git a/cli/src/codex/shared/projection.test.ts b/cli/src/codex/shared/projection.test.ts
+index 85b949598..39b6e3681 100644
+--- a/cli/src/codex/shared/projection.test.ts
++++ b/cli/src/codex/shared/projection.test.ts
+@@ -31,6 +31,24 @@ describe('shared history projection', () => {
+         expect(send.mock.calls).toEqual(live);
+     });
+ 
++    it('keeps plan cards distinct across native turns and stable within each turn', async () => {
++        const send = vi.fn();
++        const session = { getMetadata: () => ({}), sendAgentMessage: send } as unknown as ApiSessionClient;
++        const projection = new SharedCodexProjection(session, 'thread', async () => {});
++        for (const turnId of ['first', 'second']) {
++            for (const status of ['pending', 'completed']) {
++                await projection.notification('turn/plan/updated', { threadId: 'thread', turnId,
++                    plan: [{ step: 'work', status }] });
++            }
++        }
++        for (const type of ['tool-call', 'tool-call-result']) {
++            expect(send.mock.calls.map(([body]) => body).filter(body => body.type === type).map(body => body.callId)).toEqual([
++                'codex-plan-state:first', 'codex-plan-state:first',
++                'codex-plan-state:second', 'codex-plan-state:second'
++            ]);
++        }
++    });
++
+     it.each([undefined, 'root'])('persists proposals without approval and replays the same IDs (parent: %s)', async parentThreadId => {
+         const send = vi.fn();
+         const session = { getMetadata: () => ({}), sendAgentMessage: send } as unknown as ApiSessionClient;
+@@ -124,6 +142,26 @@ describe('shared history projection', () => {
+             }
+         }
+     });
++    it('persists a live duration once and never times history snapshots', async () => {
++        const send = vi.fn();
++        const session = { getMetadata: () => ({}), sendAgentMessage: send } as unknown as ApiSessionClient;
++        const projection = new SharedCodexProjection(session, 'thread', async () => {});
++        await projection.history({ turns: [{ id: 'old', status: 'completed', items: [{ id: 'old-answer', type: 'agentMessage', text: 'history' }] }] });
++        await projection.notification('turn/completed', { threadId: 'thread', turn: { id: 'old', status: 'completed' } }, undefined, 5000);
++        await projection.history({ turns: [{ id: 'already-running', status: 'inProgress', items: [] }] });
++        await projection.notification('turn/completed', { threadId: 'thread', turn: { id: 'already-running', status: 'completed' } }, undefined, 6000);
++        expect(send.mock.calls.map(([body]) => body).filter(body => body.type === 'turn_duration')).toEqual([]);
++        await projection.notification('turn/started', { threadId: 'thread', turn: { id: 'live' } }, undefined, 10_000);
++        projection.reset();
++        await projection.history({ turns: [{ id: 'live', status: 'inProgress', items: [] }] });
++        await projection.notification('turn/completed', { threadId: 'thread', turn: { id: 'old', status: 'completed' } }, undefined, 15_000);
++        await projection.notification('turn/completed', { threadId: 'thread', turn: { id: 'live', status: 'completed' } }, undefined, 49_426);
++        await projection.notification('turn/completed', { threadId: 'thread', turn: { id: 'live', status: 'completed' } }, undefined, 50_000);
++        expect(send.mock.calls.map(([body]) => body).filter(body => body.type === 'turn_duration')).toEqual([
++            expect.objectContaining({ durationMs: 39_426, turn_id: 'live' })
++        ]);
++    });
++
+     it('keeps each turn model through settings changes, reconnect replay and rerouting', async () => {
+         const send = vi.fn();
+         const session = { getMetadata: () => ({}), sendAgentMessage: send } as unknown as ApiSessionClient;
+diff --git a/cli/src/codex/shared/projection.ts b/cli/src/codex/shared/projection.ts
+index c0436fa41..7fcb601bc 100644
+--- a/cli/src/codex/shared/projection.ts
++++ b/cli/src/codex/shared/projection.ts
+@@ -1,3 +1,4 @@
++import { CodexRoundDuration } from '../utils/roundDuration';
+ import { createHash } from 'node:crypto';
+ import type { ApiSessionClient } from '@/api/apiSession';
+ import { normalizeSessionDisplayTitle } from '@/agent/sessionDisplayRename';
+@@ -35,6 +36,7 @@ function metadataHasDisplayTitle(metadata: { name?: string; summary?: { text: st
+ /** Canonical V2 stream only. Stable message IDs also deduplicate snapshot replay at the hub. */
+ export class SharedCodexProjection {
+     private converter = new AppServerEventConverter();
++    private readonly roundDuration = new CodexRoundDuration();
+     private readonly emitted = new Set<string>();
+     private readonly turns = new Map<string, string>();
+     private readonly turnModels = new Map<string, string>();
+@@ -68,7 +70,7 @@ export class SharedCodexProjection {
+         });
+     }
+ 
+-    async notification(method: string, params: unknown, modelAtReceipt?: string): Promise<void> {
++    async notification(method: string, params: unknown, modelAtReceipt?: string, receivedAt = Date.now()): Promise<void> {
+         const p = record(params);
+         const item = record(p.item);
+         if (!this.parentThreadId && p.threadId === this.threadId && string(item.id)) {
+@@ -88,6 +90,15 @@ export class SharedCodexProjection {
+             }
+         }
+         await this.project(method, params, modelAtReceipt);
++        if (p.threadId === this.threadId && !this.parentThreadId) {
++            const turn = record(p.turn);
++            const turnId = string(turn.id);
++            if (method === 'turn/started') this.roundDuration.start(turnId, receivedAt);
++            if (method === 'turn/completed') {
++                const duration = this.roundDuration.finish(turnId, receivedAt, turn.status === 'completed');
++                if (duration) this.send(duration, `duration:${turnId}`);
++            }
++        }
+     }
+ 
+     private async project(method: string, params: unknown, modelAtReceipt?: string, fromHistory = false): Promise<void> {
+@@ -95,6 +106,9 @@ export class SharedCodexProjection {
+         const p = record(params);
+         const item = record(p.item);
+         const turnId = string(p.turnId) ?? string(record(p.turn).id);
++        const send = (body: Record<string, unknown>, key: string) => this.send({
++            ...body, ...(turnId ? { turn_id: turnId } : {})
++        }, key);
+         // Settings may already describe the next turn by the time queued
+         // notifications are projected. Never attribute usage to that model.
+         if (turnId && method === 'turn/started' && modelAtReceipt && !this.turnModels.has(turnId)) {
+@@ -121,7 +135,7 @@ export class SharedCodexProjection {
+             }
+         }
+         if (this.parentThreadId && (method === 'turn/started' || method === 'turn/completed')) {
+-            this.send({ type: 'agent-run-update', agentId: this.threadId, cardId: `codex-agent:${this.threadId}`,
++            send({ type: 'agent-run-update', agentId: this.threadId, cardId: `codex-agent:${this.threadId}`,
+                 status: method === 'turn/started' ? 'running' : record(p.turn).status === 'completed' ? 'completed' : 'failed'
+             }, `lifecycle:${turnId}:${method}`);
+         }
+@@ -135,32 +149,32 @@ export class SharedCodexProjection {
+         for (const event of events) {
+             const callId = string(event.call_id);
+             const key = `${turnId ?? 'thread'}:${itemId ?? callId ?? createHash('sha256').update(JSON.stringify(event)).digest('hex')}:${event.type}`;
+-            if (event.type === 'agent_message') this.send({ type: 'message', message: event.message }, key);
+-            else if (event.type === 'agent_reasoning') this.send({ type: 'reasoning', message: event.text }, key);
++            if (event.type === 'agent_message') send({ type: 'message', message: event.message }, key);
++            else if (event.type === 'agent_reasoning') send({ type: 'reasoning', message: event.text }, key);
+             else if (event.type === 'exec_command_begin' && callId) {
+-                this.send({ type: 'tool-call', name: 'CodexBash', callId, input: event }, key);
++                send({ type: 'tool-call', name: 'CodexBash', callId, input: event }, key);
+             } else if (event.type === 'exec_command_end' && callId) {
+-                this.send({ type: 'tool-call-result', callId, output: { ...event, stdout: event.output } }, key);
++                send({ type: 'tool-call-result', callId, output: { ...event, stdout: event.output } }, key);
+             } else if (event.type === 'patch_apply_begin' && callId) {
+-                this.send({ type: 'tool-call', name: 'CodexPatch', callId, input: { changes: event.changes, auto_approved: event.auto_approved } }, key);
++                send({ type: 'tool-call', name: 'CodexPatch', callId, input: { changes: event.changes, auto_approved: event.auto_approved } }, key);
+             } else if (event.type === 'patch_apply_end' && callId) {
+-                this.send({ type: 'tool-call-result', callId, output: { stdout: event.stdout, stderr: event.stderr, success: event.success } }, key);
++                send({ type: 'tool-call-result', callId, output: { stdout: event.stdout, stderr: event.stderr, success: event.success } }, key);
+             } else if (event.type === 'mcp_tool_call_begin' && callId) {
+                 const invocation = record(event.invocation);
+-                this.send({ type: 'tool-call', name: `mcp__${invocation.server}__${invocation.tool}`, callId, input: invocation.arguments ?? {} }, key);
++                send({ type: 'tool-call', name: `mcp__${invocation.server}__${invocation.tool}`, callId, input: invocation.arguments ?? {} }, key);
+             } else if (event.type === 'mcp_tool_call_end' && callId) {
+                 const result = record(event.result);
+-                this.send({ type: 'tool-call-result', callId, output: result.Ok ?? result.Err ?? event.result, is_error: 'Err' in result }, key);
++                send({ type: 'tool-call-result', callId, output: result.Ok ?? result.Err ?? event.result, is_error: 'Err' in result }, key);
+             } else if (event.type === 'codex_tool_call_begin' && callId) {
+-                this.send({ type: 'tool-call', name: event.name, callId, input: event.input ?? event.arguments }, key);
++                send({ type: 'tool-call', name: event.name, callId, input: event.input ?? event.arguments }, key);
+             } else if (event.type === 'codex_tool_call_end' && callId) {
+-                this.send({ type: 'tool-call-result', callId, output: event.output, is_error: event.is_error }, key);
++                send({ type: 'tool-call-result', callId, output: event.output, is_error: event.is_error }, key);
+             } else if (event.type === 'compaction_started') {
+                 // History replay re-projects every completed item's start;
+                 // a finished compaction must not announce a live status.
+                 if (fromHistory) continue;
+                 if (this.parentThreadId) {
+-                    this.send({ type: 'compaction_started', statusText: '📦 Compaction started' }, key);
++                    send({ type: 'compaction_started', statusText: '📦 Compaction started' }, key);
+                 } else {
+                     // Status UI listens on session events; an agent message
+                     // would render as a normal assistant bubble instead.
+@@ -171,27 +185,28 @@ export class SharedCodexProjection {
+                 }
+             } else if (event.type === 'token_count' || event.type === 'context_compacted' || event.type.startsWith('thread_goal_')) {
+                 const model = event.type === 'token_count' && turnId ? this.turnModels.get(turnId) : undefined;
+-                this.send({ ...event, ...(model ? { model } : {}), flavor: 'codex', scope: { role: 'parent', threadId: this.threadId }, scope_role: 'parent', thread_id: this.threadId }, key);
++                send({ ...event, ...(model ? { model } : {}), flavor: 'codex', scope: { role: 'parent', threadId: this.threadId }, scope_role: 'parent', thread_id: this.threadId }, key);
+             } else if (event.type === 'proposed_plan' && turnId && itemId) {
+                 const planId = codexPlanProposalId(this.threadId, turnId, itemId);
+-                this.send({ type: 'tool-call', name: 'ExitPlanMode', callId: planId, input: { plan: event.plan } }, key);
++                send({ type: 'tool-call', name: 'ExitPlanMode', callId: planId, input: { plan: event.plan } }, key);
+                 // A proposal is durable content, not a native approval request.
+-                this.send({ type: 'tool-call-result', callId: planId, output: null }, `${key}:result`);
++                send({ type: 'tool-call-result', callId: planId, output: null }, `${key}:result`);
+             } else if (event.type === 'plan_update') {
+-                this.send({ type: 'tool-call', name: 'update_plan', callId: 'codex-plan-state', input: { plan: event.plan, source: 'codex' } }, key);
+-                this.send({ type: 'tool-call-result', callId: 'codex-plan-state', output: { plan: event.plan, source: 'codex', status: 'updated' } }, `${key}:result`);
++                const callId = turnId ? `codex-plan-state:${turnId}` : 'codex-plan-state';
++                send({ type: 'tool-call', name: 'update_plan', callId, input: { plan: event.plan, source: 'codex' } }, key);
++                send({ type: 'tool-call-result', callId, output: { plan: event.plan, source: 'codex', status: 'updated' } }, `${key}:result`);
+             } else if (event.type === 'generated_image' && typeof event.saved_path === 'string') {
+                 const image = await registerGeneratedImageFromPath({ path: event.saved_path, id: createHash('sha256').update(`${this.threadId}:${key}`).digest('hex'), fileName: string(event.file_name) });
+-                if (image) this.send({ type: 'generated-image', imageId: image.id, fileName: image.fileName, mimeType: image.mimeType }, key);
++                if (image) send({ type: 'generated-image', imageId: image.id, fileName: image.fileName, mimeType: image.mimeType }, key);
+             } else if (event.type === 'task_failed') {
+-                this.send({ type: 'message', message: `Codex error: ${event.error ?? event.message ?? 'Turn failed'}` }, key);
++                send({ type: 'message', message: `Codex error: ${event.error ?? event.message ?? 'Turn failed'}` }, key);
+             }
+         }
+         if (item.type === 'collabAgentToolCall') {
+             const states = record(item.agentsStates);
+             for (const [agentId, state] of Object.entries(states)) {
+                 const status = string(record(state).status) ?? 'running';
+-                this.send({ type: 'agent-run-update', agentId, cardId: `codex-agent:${agentId}`,
++                send({ type: 'agent-run-update', agentId, cardId: `codex-agent:${agentId}`,
+                     status: status === 'completed' ? 'completed' : status === 'errored' ? 'failed' : 'running',
+                     summary: record(state).message, input: item, scope: { role: 'child', threadId: agentId, parentThreadId: this.threadId }, scope_role: 'child', thread_id: agentId
+                 }, `agent:${agentId}:${itemId}:${method}:${JSON.stringify(state)}`);
+diff --git a/cli/src/codex/shared/root.ts b/cli/src/codex/shared/root.ts
+index d3ab79e0f..3393888d0 100644
+--- a/cli/src/codex/shared/root.ts
++++ b/cli/src/codex/shared/root.ts
+@@ -116,8 +116,9 @@ export class SharedCodexRoot {
+                 }
+                 this.publishPlan();
+             }
++            const receivedAt = Date.now();
+             const modelAtReceipt = record(params).threadId === this.threadId ? this.settings.model ?? undefined : undefined;
+-            this.notifications = this.notifications.then(() => this.notification(method, params, modelAtReceipt)).catch(error => logger.debug('[Codex shared] projection', error));
++            this.notifications = this.notifications.then(() => this.notification(method, params, modelAtReceipt, receivedAt)).catch(error => logger.debug('[Codex shared] projection', error));
+         });
+         this.client.setTransportAbandonedHandler(() => { void this.reconnect(); });
+         this.session.onUserMessage((message, localId) => {
+@@ -275,7 +276,7 @@ export class SharedCodexRoot {
+         for (const listener of this.settingsListeners) listener();
+         this.publishPlan();
+     }
+-    private async notification(method: string, params: unknown, modelAtReceipt?: string): Promise<void> {
++    private async notification(method: string, params: unknown, modelAtReceipt?: string, receivedAt = Date.now()): Promise<void> {
+         if (!this.threadId || this.closed) return;
+         const p = record(params);
+         if (method === 'thread/started') {
+@@ -321,7 +322,7 @@ export class SharedCodexRoot {
+         if (method === 'thread/queue/changed') {
+             for (const id of await this.queue.reconcile()) this.dequeuedInputs.add(id);
+         }
+-        await this.projection.notification(method, params, modelAtReceipt); this.publishCompaction(); this.alive();
++        await this.projection.notification(method, params, modelAtReceipt, receivedAt); this.publishCompaction(); this.alive();
+     }
+     async readThread(threadId = this.threadId): Promise<Record<string, unknown>> {
+         let thread = record(record(await this.client.request('thread/read', { threadId, includeTurns: false })).thread);
+diff --git a/cli/src/codex/utils/codexEventConverter.ts b/cli/src/codex/utils/codexEventConverter.ts
+index c291f5b0d..db68f94d9 100644
+--- a/cli/src/codex/utils/codexEventConverter.ts
++++ b/cli/src/codex/utils/codexEventConverter.ts
+@@ -386,7 +386,7 @@ export function createCodexEventConverter(): CodexEventConverter {
+         currentTurnId = extractEventTurnId(parsed.data) ?? currentTurnId;
+         const projection = extractAssistantMessageProjection(parsed.data, currentTurnId);
+         const converted = convertCodexEvent(parsed.data);
+-        const convertedActions = convertProjectionToActions(converted, projection?.turnId ?? null);
++        const convertedActions = convertProjectionToActions(converted, projection?.turnId ?? extractEventTurnId(parsed.data));
+         const payload = asRecord(parsed.data.payload);
+ 
+         if (parsed.data.type === 'compacted') {
+diff --git a/cli/src/codex/utils/roundDuration.test.ts b/cli/src/codex/utils/roundDuration.test.ts
+new file mode 100644
+index 000000000..921bf8958
+--- /dev/null
++++ b/cli/src/codex/utils/roundDuration.test.ts
+@@ -0,0 +1,27 @@
++import { describe, expect, it } from 'vitest';
++import { CodexRoundDuration } from './roundDuration';
++
++describe('Codex live round duration', () => {
++    it('keeps the original start, ignores stale completions and persists once', () => {
++        const clock = new CodexRoundDuration();
++        clock.start('turn', 1000);
++        clock.start('turn', 2000);
++        expect(clock.finish('old', 3000, true)).toBeUndefined();
++        expect(clock.finish('turn', 4000, true)).toEqual({ type: 'turn_duration', flavor: 'codex', turn_id: 'turn', durationMs: 3000 });
++        expect(clock.finish('turn', 5000, true)).toBeUndefined();
++        clock.start('instant', 0);
++        expect(clock.finish('instant', 0, true)?.durationMs).toBe(0);
++    });
++    it('does not invent a start for completion-only history or interrupted turns', () => {
++        const clock = new CodexRoundDuration();
++        expect(clock.finish('imported', 4000, true)).toBeUndefined();
++        clock.start('failed', 1000);
++        expect(clock.finish('failed', 4000, false)).toBeUndefined();
++        expect(clock.finish('failed', 5000, true)).toBeUndefined();
++    });
++    it.each([NaN, Infinity, -1])('rejects invalid or reversed time %s', time => {
++        const clock = new CodexRoundDuration();
++        clock.start('turn', 1000);
++        expect(clock.finish('turn', time, true)).toBeUndefined();
++    });
++});
+diff --git a/cli/src/codex/utils/roundDuration.ts b/cli/src/codex/utils/roundDuration.ts
+new file mode 100644
+index 000000000..45055653f
+--- /dev/null
++++ b/cli/src/codex/utils/roundDuration.ts
+@@ -0,0 +1,19 @@
++/** Tracks only observed live starts; replay callers must never seed this clock. */
++export class CodexRoundDuration {
++    private active: { turnId: string; startedAt: number } | undefined;
++
++    get turnId(): string | undefined { return this.active?.turnId; }
++
++    start(turnId: string | null | undefined, startedAt: number): void {
++        if (!turnId || !Number.isFinite(startedAt) || this.active?.turnId === turnId) return;
++        this.active = { turnId, startedAt };
++    }
++
++    finish(turnId: string | null | undefined, completedAt: number, completed: boolean) {
++        if (!turnId || this.active?.turnId !== turnId) return;
++        const { startedAt } = this.active;
++        this.active = undefined;
++        if (!completed || !Number.isFinite(completedAt) || completedAt < startedAt) return;
++        return { type: 'turn_duration' as const, flavor: 'codex' as const, turn_id: turnId, durationMs: completedAt - startedAt };
++    }
++}
+diff --git a/shared/fixtures/chat/codex-imported-duration-rejected.json b/shared/fixtures/chat/codex-imported-duration-rejected.json
+new file mode 100644
+index 000000000..ae48d90be
+--- /dev/null
++++ b/shared/fixtures/chat/codex-imported-duration-rejected.json
+@@ -0,0 +1,100 @@
++{
++    "description": "A completed Codex tail contains duration metadata without its initiating user row. Imported history cannot supply trusted timing. Metadata adds no visible chat row or duplicate usage.",
++    "expected": {
++        "blocks": [
++            {
++                "createdAt": 1755000000000,
++                "id": "duration-tail-0:0",
++                "kind": "agent-text",
++                "localId": null,
++                "text": "Completed Codex answer"
++            }
++        ],
++        "hasReadyEvent": false,
++        "latestUsage": {
++            "contextSize": 100,
++            "contextWindow": null,
++            "inputTokens": 100,
++            "outputTokens": 10
++        },
++        "visibleBlocks": [
++            {
++                "createdAt": 1755000000000,
++                "id": "duration-tail-0:0",
++                "kind": "agent-text",
++                "localId": null,
++                "text": "Completed Codex answer"
++            }
++        ]
++    },
++    "fixtureVersion": 1,
++    "input": {
++        "agentState": null,
++        "messages": [
++            {
++                "content": {
++                    "content": {
++                        "data": {
++                            "message": "Completed Codex answer",
++                            "turn_id": "round",
++                            "type": "message"
++                        },
++                        "type": "codex"
++                    },
++                    "role": "agent"
++                },
++                "createdAt": 1755000000000,
++                "id": "duration-tail-0",
++                "localId": null,
++                "seq": 1
++            },
++            {
++                "content": {
++                    "content": {
++                        "data": {
++                            "hapiUsageScope": "imported-history",
++                            "info": {
++                                "last_token_usage": {
++                                    "input_tokens": 100,
++                                    "output_tokens": 10
++                                }
++                            },
++                            "model": "gpt-5.4",
++                            "turn_id": "round",
++                            "type": "token_count"
++                        },
++                        "type": "codex"
++                    },
++                    "role": "agent"
++                },
++                "createdAt": 1755000001000,
++                "id": "duration-tail-1",
++                "localId": null,
++                "seq": 2
++            },
++            {
++                "content": {
++                    "content": {
++                        "data": {
++                            "durationMs": 39426,
++                            "flavor": "codex",
++                            "hapiUsageScope": "imported-history",
++                            "turn_id": "round",
++                            "type": "turn_duration"
++                        },
++                        "type": "codex"
++                    },
++                    "role": "agent"
++                },
++                "createdAt": 1755000002000,
++                "id": "duration-tail-2",
++                "localId": null,
++                "seq": 3
++            }
++        ],
++        "options": {
++            "hasMoreMessages": false
++        }
++    },
++    "name": "codex-imported-duration-rejected"
++}
+diff --git a/shared/fixtures/chat/codex-persisted-round-duration-tail.json b/shared/fixtures/chat/codex-persisted-round-duration-tail.json
+new file mode 100644
+index 000000000..bfaae10f1
+--- /dev/null
++++ b/shared/fixtures/chat/codex-persisted-round-duration-tail.json
+@@ -0,0 +1,99 @@
++{
++    "description": "A completed Codex tail contains duration metadata without its initiating user row. Imported history cannot supply trusted timing. Metadata adds no visible chat row or duplicate usage.",
++    "expected": {
++        "blocks": [
++            {
++                "createdAt": 1755000000000,
++                "id": "duration-tail-0:0",
++                "kind": "agent-text",
++                "localId": null,
++                "text": "Completed Codex answer"
++            }
++        ],
++        "hasReadyEvent": false,
++        "latestUsage": {
++            "contextSize": 100,
++            "contextWindow": null,
++            "inputTokens": 100,
++            "outputTokens": 10
++        },
++        "visibleBlocks": [
++            {
++                "createdAt": 1755000000000,
++                "id": "duration-tail-0:0",
++                "kind": "agent-text",
++                "localId": null,
++                "text": "Completed Codex answer"
++            }
++        ]
++    },
++    "fixtureVersion": 1,
++    "input": {
++        "agentState": null,
++        "messages": [
++            {
++                "content": {
++                    "content": {
++                        "data": {
++                            "message": "Completed Codex answer",
++                            "turn_id": "round",
++                            "type": "message"
++                        },
++                        "type": "codex"
++                    },
++                    "role": "agent"
++                },
++                "createdAt": 1755000000000,
++                "id": "duration-tail-0",
++                "localId": null,
++                "seq": 1
++            },
++            {
++                "content": {
++                    "content": {
++                        "data": {
++                            "flavor": "codex",
++                            "info": {
++                                "last_token_usage": {
++                                    "input_tokens": 100,
++                                    "output_tokens": 10
++                                }
++                            },
++                            "model": "gpt-5.4",
++                            "turn_id": "round",
++                            "type": "token_count"
++                        },
++                        "type": "codex"
++                    },
++                    "role": "agent"
++                },
++                "createdAt": 1755000001000,
++                "id": "duration-tail-1",
++                "localId": null,
++                "seq": 2
++            },
++            {
++                "content": {
++                    "content": {
++                        "data": {
++                            "durationMs": 39426,
++                            "flavor": "codex",
++                            "turn_id": "round",
++                            "type": "turn_duration"
++                        },
++                        "type": "codex"
++                    },
++                    "role": "agent"
++                },
++                "createdAt": 1755000002000,
++                "id": "duration-tail-2",
++                "localId": null,
++                "seq": 3
++            }
++        ],
++        "options": {
++            "hasMoreMessages": false
++        }
++    },
++    "name": "codex-persisted-round-duration-tail"
++}
+diff --git a/web/scripts/fixtures/cases/codex.ts b/web/scripts/fixtures/cases/codex.ts
+index 236a58f5b..2dfa055e1 100644
+--- a/web/scripts/fixtures/cases/codex.ts
++++ b/web/scripts/fixtures/cases/codex.ts
+@@ -7,6 +7,19 @@ import { T0, wireMessage } from './support'
+  * stream snapshots keyed by data.id.
+  */
+ export const codexCases: FixtureCase[] = [
++    ...([false, true] as const).map((imported): FixtureCase => ({
++        name: imported ? 'codex-imported-duration-rejected' : 'codex-persisted-round-duration-tail',
++        description: 'A completed Codex tail contains duration metadata without its initiating user row. Imported history cannot supply trusted timing. Metadata adds no visible chat row or duplicate usage.',
++        messages: [
++            { type: 'message', message: 'Completed Codex answer' },
++            { type: 'token_count', ...(imported ? { hapiUsageScope: 'imported-history' } : { flavor: 'codex' }),
++                model: 'gpt-5.4', info: { last_token_usage: { input_tokens: 100, output_tokens: 10 } } },
++            { type: 'turn_duration', flavor: 'codex', durationMs: 39_426,
++                ...(imported ? { hapiUsageScope: 'imported-history' } : {}) }
++        ].map((data, index) => wireMessage({ id: `duration-tail-${index}`, seq: index + 1,
++            createdAt: T0 + index * 1000, content: { role: 'agent', content: { type: 'codex', data: { ...data, turn_id: 'round' } } }
++        }))
++    })),
+     ...([true, false] as const).map((available): FixtureCase => {
+         const callId = 'codex-proposed-plan:root:turn:plan-item'
+         const data = [
+diff --git a/web/src/chat/normalizeAgent.test.ts b/web/src/chat/normalizeAgent.test.ts
+index 55a3a13e3..971e1cac0 100644
+--- a/web/src/chat/normalizeAgent.test.ts
++++ b/web/src/chat/normalizeAgent.test.ts
+@@ -280,3 +280,27 @@ describe('normalizeAgentRecord — Codex usage provenance', () => {
+         })
+     })
+ })
++
++
++describe('persisted Codex duration provenance', () => {
++    it('accepts an observed zero-duration Codex turn', () => {
++        expect(normalizeAgentRecord('duration', null, 1, { type: 'codex', data: {
++            type: 'turn_duration', flavor: 'codex', turn_id: 'turn', durationMs: 0
++        } })).toMatchObject({ role: 'event', content: { type: 'turn-duration', durationMs: 0, turnId: 'turn' } })
++    })
++    it.each([{ scope_role: 'child' }, { scopeRole: 'child' }, { scope: { role: 'child' } }])('rejects child timing with scope %j', scope => {
++        expect(normalizeAgentRecord('duration', null, 1, { type: 'codex', data: {
++            type: 'turn_duration', flavor: 'codex', turn_id: 'turn', durationMs: 123, ...scope
++        } })).toBeNull()
++    })
++    it.each([-1, NaN, Infinity, '123', undefined])('rejects invalid duration %s', durationMs => {
++        expect(normalizeAgentRecord('duration', null, 1, { type: 'codex', data: {
++            type: 'turn_duration', flavor: 'codex', turn_id: 'turn', durationMs
++        } })).toBeNull()
++    })
++    it('rejects imported history even when it carries a duration', () => {
++        expect(normalizeAgentRecord('duration', null, 1, { type: 'codex', data: {
++            type: 'turn_duration', flavor: 'codex', turn_id: 'turn', durationMs: 123, hapiUsageScope: 'imported-history'
++        } })).toBeNull()
++    })
++})
+diff --git a/web/src/chat/normalizeAgent.ts b/web/src/chat/normalizeAgent.ts
+index 3684c2fdc..528cc49a6 100644
+--- a/web/src/chat/normalizeAgent.ts
++++ b/web/src/chat/normalizeAgent.ts
+@@ -999,6 +999,8 @@ export function normalizeAgentRecord(
+     if (content.type === AGENT_MESSAGE_PAYLOAD_TYPE) {
+         const data = isObject(content.data) ? content.data : null
+         if (!data || typeof data.type !== 'string') return null
++        const turnId = asString(data.turn_id ?? data.turnId) ?? undefined
++        if (turnId) meta = { ...(isObject(meta) ? meta : {}), codexTurnId: turnId }
+ 
+         if (
+             data.type === 'agent-run-start'
+@@ -1139,6 +1141,23 @@ export function normalizeAgentRecord(
+             }
+         }
+ 
++        if (data.type === 'turn_duration') {
++            const durationMs = nonNegativeNumber(data.durationMs)
++            const scope = isObject(data.scope) ? data.scope : null
++            const scopeRole = asString(data.scope_role ?? data.scopeRole ?? scope?.role)
++            if (data.flavor !== 'codex' || data.hapiUsageScope === 'imported-history'
++                || scopeRole === 'child' || !turnId || durationMs === undefined) return null
++            return {
++                id: messageId,
++                localId,
++                createdAt,
++                role: 'event',
++                content: { type: 'turn-duration', provider: 'codex', durationMs, turnId },
++                isSidechain: false,
++                meta
++            }
++        }
++
+         if (data.type === 'token_count') {
+             const usage = normalizeCodexTokenUsage(data.info, data)
+             return usage ? {
+@@ -1152,6 +1171,7 @@ export function normalizeAgentRecord(
+                     ...(data.flavor === 'codex'
+                         ? {
+                             provider: 'codex' as const,
++                            turnId,
+                             model: asString(data.model) ?? undefined
+                         }
+                         : {})
+diff --git a/web/src/chat/reducerTimeline.test.ts b/web/src/chat/reducerTimeline.test.ts
+index 33e0a2c10..4c5e7c877 100644
+--- a/web/src/chat/reducerTimeline.test.ts
++++ b/web/src/chat/reducerTimeline.test.ts
+@@ -1,5 +1,8 @@
+ import { describe, expect, it } from 'vitest'
+ import { reduceTimeline } from './reducerTimeline'
++import { normalizeAgentRecord } from './normalizeAgent'
++import { aggregateResponseGroups } from '@/lib/assistant-runtime'
++import { buildVisibleChatBlocks } from './toolGroups'
+ import { toolDurationMs } from '@/components/ToolCard/toolDuration'
+ import type { TracedMessage } from './tracer'
+ 
+@@ -236,6 +239,143 @@ describe('reduceTimeline', () => {
+         }])
+     })
+ 
++    it.each([false, true])('preserves persisted Codex duration through hydration and tail reload (usage first: %s)', (usageFirst) => {
++        const usage = { type: 'token_count', flavor: 'codex', model: 'gpt-5.4',
++            info: { last_token_usage: { input_tokens: 100, output_tokens: 10 } } }
++        const duration = { type: 'turn_duration', flavor: 'codex', durationMs: 39_426 }
++        const tail = [
++            { type: 'message', message: 'Completed answer' },
++            ...(usageFirst ? [usage, duration] : [duration, usage]),
++            // A late usage update must not erase the persisted duration.
++            usage
++        ].map((data, index) => normalizeAgentRecord(`tail-${index}`, null, 100_000 + index, { type: 'codex', data: { ...data, turn_id: 'round' } })).filter((message): message is TracedMessage => message !== null)
++        for (const withUser of [true, false]) {
++            const messages = withUser
++                ? [makeUserMessage('prompt', { invokedAt: 1 }), ...tail]
++                : JSON.parse(JSON.stringify(tail)) as TracedMessage[]
++            const { blocks } = reduceTimeline(messages, makeContext())
++            const visible = buildVisibleChatBlocks(blocks, { hasMoreMessages: !withUser })
++            const summary = aggregateResponseGroups(visible).get('tail-0:0')?.roundSummary
++            expect(summary).toMatchObject({ provider: 'codex', durationMs: 39_426, numTurns: 1,
++                usage: { input_tokens: 100, output_tokens: 10 },
++                modelUsage: { 'gpt-5.4': { inputTokens: 100, outputTokens: 10 } } })
++        }
++    })
++
++    it('keeps the existing latest-usage model policy when a persisted duration is present', () => {
++        const messages = [
++            { type: 'message', message: 'answer' },
++            { type: 'turn_duration', flavor: 'codex', durationMs: 1000 },
++            ...['old-model', 'new-model'].map(model => ({ type: 'token_count', flavor: 'codex', model,
++                info: { last_token_usage: { input_tokens: 100, output_tokens: 10 } } }))
++        ].map((data, index) => normalizeAgentRecord(`model-${index}`, null, index, { type: 'codex', data: { ...data, turn_id: 'round' } }))
++            .filter((message): message is TracedMessage => message !== null)
++        const { blocks } = reduceTimeline(messages, makeContext())
++        expect(blocks[0]).toMatchObject({ roundSummary: { durationMs: 1000,
++            modelUsage: { 'new-model': { inputTokens: 100, outputTokens: 10 } } } })
++        expect((blocks[0] as { roundSummary?: { modelUsage: unknown } }).roundSummary?.modelUsage).not.toHaveProperty('old-model')
++    })
++
++    it.each(['message', 'tool-call'] as const)('binds late metadata to its %s turn across queued user messages', (type) => {
++        const wire = (id: string, turn_id: string, data: Record<string, unknown>) => normalizeAgentRecord(id, null, 1000, {
++            type: 'codex', data: { ...data, turn_id }
++        })!
++        const answer = type === 'message' ? { type, message: 'first answer' }
++            : { type, name: 'ExitPlanMode', callId: 'plan-first', input: { plan: '# First' } }
++        const first = wire('first', 'turn-1', answer)
++        const second = wire('second', 'turn-2', { type: 'message', message: 'second answer' })
++        const usage = (turnId: string) => wire(`usage-${turnId}`, turnId, { type: 'token_count', flavor: 'codex',
++            model: 'gpt-5.4', info: { last_token_usage: { input_tokens: 100, output_tokens: 10 } } })
++        const duration = wire('duration', 'turn-1', { type: 'turn_duration', flavor: 'codex', durationMs: 39_426 })
++        const { blocks } = reduceTimeline([first, makeUserMessage('queued next prompt'), second, usage('turn-2'), duration, usage('turn-1')], makeContext())
++        const firstBlock = blocks.find(block => block.kind === (type === 'message' ? 'agent-text' : 'tool-call'))!
++        expect(firstBlock).toMatchObject({ roundSummary: { turnId: 'turn-1', durationMs: 39_426, numTurns: 1 } })
++        const secondBlock = blocks.find(block => block.id === 'second:0')!
++        expect(secondBlock).toMatchObject({ roundSummary: { turnId: 'turn-2', numTurns: 1 } })
++        expect((secondBlock as { roundSummary?: { durationMs?: number } }).roundSummary?.durationMs).toBeUndefined()
++    })
++
++    it('does not carry a previous native turn duration into a later summary in the same response group', () => {
++        const messages = [
++            { turn_id: 'first', type: 'message', message: 'first' },
++            { turn_id: 'first', type: 'turn_duration', flavor: 'codex', durationMs: 1000 },
++            { turn_id: 'second', type: 'message', message: 'second' },
++            { turn_id: 'second', type: 'token_count', flavor: 'codex', model: 'gpt-5.4',
++                info: { last_token_usage: { input_tokens: 100, output_tokens: 10 } } }
++        ].map((data, index) => normalizeAgentRecord(`turn-${index}`, null, index, { type: 'codex', data })!)
++        const { blocks } = reduceTimeline(messages, makeContext())
++        expect(blocks[0]).toMatchObject({ roundSummary: { turnId: 'second', numTurns: 1 } })
++        expect((blocks[0] as { roundSummary?: { durationMs?: number } }).roundSummary?.durationMs).toBeUndefined()
++    })
++
++    it('keeps legacy Codex Round usage when the persisted answer has no native turn ID', () => {
++        const messages = [
++            { type: 'message', message: 'legacy answer' },
++            { type: 'token_count', flavor: 'codex', turn_id: 'turn', model: 'gpt-5.4',
++                info: { last_token_usage: { input_tokens: 100, output_tokens: 10 } } },
++            { type: 'turn_duration', flavor: 'codex', turn_id: 'turn', durationMs: 39_426 }
++        ].map((data, index) => normalizeAgentRecord(`legacy-${index}`, null, index, { type: 'codex', data })!)
++        const { blocks } = reduceTimeline(messages, makeContext())
++        expect(blocks[0]).toMatchObject({ roundSummary: { provider: 'codex', numTurns: 1,
++            usage: { input_tokens: 100, output_tokens: 10 },
++            modelUsage: { 'gpt-5.4': { inputTokens: 100, outputTokens: 10 } } } })
++        expect((blocks[0] as { roundSummary?: { durationMs?: number } }).roundSummary?.durationMs).toBeUndefined()
++    })
++
++    it('rejects unmatched Codex metadata when the response has a different native turn ID', () => {
++        const messages = [
++            { type: 'message', message: 'new answer', turn_id: 'new' },
++            { type: 'token_count', flavor: 'codex', turn_id: 'old', model: 'gpt-5.4',
++                info: { last_token_usage: { input_tokens: 100, output_tokens: 10 } } },
++            { type: 'turn_duration', flavor: 'codex', turn_id: 'old', durationMs: 39_426 }
++        ].map((data, index) => normalizeAgentRecord(`unmatched-${index}`, null, index, { type: 'codex', data })!)
++        const { blocks } = reduceTimeline(messages, makeContext())
++        expect((blocks[0] as { roundSummary?: unknown }).roundSummary).toBeUndefined()
++    })
++
++    it('ignores older Codex metadata after a newer native turn summary in the same group', () => {
++        const messages = [
++            { turn_id: 'first', type: 'message', message: 'first' },
++            { turn_id: 'second', type: 'message', message: 'second' },
++            { turn_id: 'second', type: 'token_count', flavor: 'codex', model: 'new-model',
++                info: { last_token_usage: { input_tokens: 200, output_tokens: 20 } } },
++            { turn_id: 'first', type: 'turn_duration', flavor: 'codex', durationMs: 1000 },
++            { turn_id: 'first', type: 'token_count', flavor: 'codex', model: 'old-model',
++                info: { last_token_usage: { input_tokens: 100, output_tokens: 10 } } }
++        ].map((data, index) => normalizeAgentRecord(`late-${index}`, null, index, { type: 'codex', data })!)
++        const { blocks } = reduceTimeline(messages, makeContext())
++        expect(blocks[0]).toMatchObject({ roundSummary: { turnId: 'second',
++            usage: { input_tokens: 200, output_tokens: 20 },
++            modelUsage: { 'new-model': { inputTokens: 200, outputTokens: 20 } } } })
++        expect((blocks[0] as { roundSummary?: { durationMs?: number } }).roundSummary?.durationMs).toBeUndefined()
++    })
++
++    it('preserves completed Round summaries on plan cards scoped to each native turn', () => {
++        const messages: TracedMessage[] = []
++        for (const [index, turnId] of ['first', 'second'].entries()) {
++            messages.push(makeUserMessage(`prompt ${turnId}`, { id: `user-${turnId}` }))
++            const callId = `codex-plan-state:${turnId}`
++            for (const [messageIndex, data] of [
++                { type: 'tool-call', name: 'update_plan', callId, input: { plan: [{ step: turnId, status: 'completed' }] } },
++                { type: 'tool-call-result', callId, output: { status: 'updated' } },
++                { type: 'message', message: `${turnId} answer` },
++                { type: 'token_count', flavor: 'codex', model: 'gpt-5.4',
++                    info: { last_token_usage: { input_tokens: 100 * (index + 1), output_tokens: 10 } } },
++                { type: 'turn_duration', flavor: 'codex', durationMs: 1000 * (index + 1) }
++            ].entries()) {
++                messages.push(normalizeAgentRecord(`${turnId}-${messageIndex}`, null, messages.length,
++                    { type: 'codex', data: { ...data, turn_id: turnId } })!)
++            }
++        }
++        const { blocks } = reduceTimeline(messages, makeContext())
++        const plans = blocks.filter(block => block.kind === 'tool-call')
++        expect(plans).toHaveLength(2)
++        for (const [index, plan] of plans.entries()) {
++            expect(plan).toMatchObject({ roundSummary: { turnId: index === 0 ? 'first' : 'second',
++                durationMs: 1000 * (index + 1), usage: { input_tokens: 100 * (index + 1) } } })
++        }
++    })
++
+     it('does not derive a Round summary from unmarked token usage', () => {
+         const assistant = makeAgentMessage('Imported Codex answer', {
+             id: 'imported-codex-answer',
+diff --git a/web/src/chat/reducerTimeline.ts b/web/src/chat/reducerTimeline.ts
+index 6cdf38ccf..84f3d7da2 100644
+--- a/web/src/chat/reducerTimeline.ts
++++ b/web/src/chat/reducerTimeline.ts
+@@ -85,8 +85,19 @@ function attachCodexRoundSummaryToLatestGroup(blocks: ChatBlock[], summary: Roun
+         && block.kind !== 'agent-event'
+         && !(block.kind === 'cli-output' && block.source === 'user')
+ 
++    let targetIndex = summary.turnId
++        ? blocks.findLastIndex(block => isSummaryTarget(block) && isObject(block.meta) && block.meta.codexTurnId === summary.turnId)
++        : blocks.length - 1
++    // Persisted replies from earlier versions have no native turn IDs.
++    if (targetIndex === -1 && summary.usage) {
++        for (let index = blocks.length - 1; index >= 0 && isSummaryTarget(blocks[index]); index -= 1) {
++            const meta = blocks[index].meta
++            if (isObject(meta) && typeof meta.codexTurnId === 'string') return
++        }
++        targetIndex = blocks.length - 1
++    }
+     let firstIndex = -1
+-    for (let index = blocks.length - 1; index >= 0; index -= 1) {
++    for (let index = targetIndex; index >= 0; index -= 1) {
+         if (!isSummaryTarget(blocks[index])) break
+         firstIndex = index
+     }
+@@ -94,7 +105,21 @@ function attachCodexRoundSummaryToLatestGroup(blocks: ChatBlock[], summary: Roun
+ 
+     const firstBlock = blocks[firstIndex]
+     if (isSummaryTarget(firstBlock)) {
+-        firstBlock.roundSummary = summary
++        const previousSummary = firstBlock.roundSummary
++        if (previousSummary?.turnId && summary.turnId && previousSummary.turnId !== summary.turnId) {
++            for (let index = targetIndex + 1; index < blocks.length && isSummaryTarget(blocks[index]); index += 1) {
++                const meta = blocks[index].meta
++                if (isObject(meta) && meta.codexTurnId === previousSummary.turnId) return
++            }
++        }
++        const previous = previousSummary?.provider === 'codex'
++            && (!summary.turnId || previousSummary.turnId === summary.turnId) ? previousSummary : undefined
++        firstBlock.roundSummary = {
++            ...previous,
++            ...summary,
++            modelUsage: summary.usage ? summary.modelUsage : previous?.modelUsage ?? summary.modelUsage,
++            durationMs: summary.durationMs ?? previous?.durationMs
++        }
+     }
+ }
+ 
+@@ -507,6 +532,7 @@ export function reduceTimeline(
+                 const tokenCount = msg.content as {
+                     type: 'token-count'
+                     provider?: 'codex'
++                    turnId?: string
+                     model?: string | null
+                 }
+                 if (
+@@ -524,6 +550,7 @@ export function reduceTimeline(
+                         }
+                     attachCodexRoundSummaryToLatestGroup(blocks, {
+                         provider: 'codex',
++                        turnId: tokenCount.turnId,
+                         usage: displayUsage,
+                         modelUsage: model
+                             ? {
+@@ -564,6 +591,12 @@ export function reduceTimeline(
+                 continue
+             }
+             if (msg.content.type === 'turn-duration') {
++                if (msg.content.provider === 'codex') {
++                    attachCodexRoundSummaryToLatestGroup(blocks, {
++                        provider: 'codex', turnId: msg.content.turnId as string, modelUsage: {}, numTurns: 1, durationMs: msg.content.durationMs as number
++                    })
++                    continue
++                }
+                 const targetId = msg.content.targetMessageId
+                 const durationMs = msg.content.durationMs as number
+                 type DurationBearingBlock = AgentTextBlock | AgentReasoningBlock | CliOutputBlock | ToolCallBlock
+@@ -1002,6 +1035,11 @@ export function reduceTimeline(
+                         agentTimestamp: msg.agentTimestamp
+                     })
+ 
++                    if (isObject(msg.meta) && typeof msg.meta.codexTurnId === 'string') {
++                        if (!isObject(block.meta) || block.meta.codexTurnId !== msg.meta.codexTurnId) block.roundSummary = undefined
++                        block.meta = msg.meta
++                    }
++
+                     if (block.tool.state === 'pending') {
+                         block.tool = { ...block.tool, state: 'running' }
+                     }
+diff --git a/web/src/chat/types.ts b/web/src/chat/types.ts
+index e0bcdd3e3..24038e2e6 100644
+--- a/web/src/chat/types.ts
++++ b/web/src/chat/types.ts
+@@ -23,6 +23,7 @@ export type RoundModelUsage = {
+ 
+ export type RoundSummary = {
+     provider?: 'codex'
++    turnId?: string
+     usage?: UsageData
+     modelUsage: Record<string, RoundModelUsage>
+     totalCostUsd?: number
+@@ -39,9 +40,9 @@ export type AgentEvent =
+     | { type: 'limit-warning'; /** 0–1 ratio (e.g. 0.9 = 90%), integer-precision via CLI pipe format */ utilization: number; endsAt: number; limitType: string }
+     | { type: 'ready' }
+     | { type: 'api-error'; retryAttempt: number; maxRetries: number; error: unknown }
+-    | { type: 'turn-duration'; durationMs: number; targetMessageId?: string }
++    | { type: 'turn-duration'; durationMs: number; targetMessageId?: string; provider?: 'codex'; turnId?: string }
+     | { type: 'turn-summary'; summary: RoundSummary }
+-    | { type: 'token-count'; info: unknown; provider?: 'codex'; model?: string | null }
++    | { type: 'token-count'; info: unknown; provider?: 'codex'; turnId?: string; model?: string | null }
+     | { type: 'microcompact'; trigger: string; preTokens: number; tokensSaved: number }
+     | { type: 'compact'; trigger: string; preTokens: number }
+     // Structured result of Pi's compact RPC; rendered as a dedicated chat block.
+diff --git a/web/src/lib/message-window-store.test.ts b/web/src/lib/message-window-store.test.ts
+index e26630bad..97120bac6 100644
+--- a/web/src/lib/message-window-store.test.ts
++++ b/web/src/lib/message-window-store.test.ts
+@@ -1,4 +1,9 @@
+ import { afterEach, describe, expect, it, vi } from 'vitest'
++import { normalizeDecryptedMessage } from '@/chat/normalize'
++import { reduceChatBlocks } from '@/chat/reducer'
++import type { NormalizedMessage } from '@/chat/types'
++import { aggregateResponseGroups } from '@/lib/assistant-runtime'
++import { buildVisibleChatBlocks } from '@/chat/toolGroups'
+ import type { ApiClient } from '@/api/client'
+ import type { DecryptedMessage, MessagesResponse } from '@/types/api'
+ import {
+@@ -573,6 +578,39 @@ describe('message tail synchronization', () => {
+         expect('pending' in getMessageWindowState(id)).toBe(false)
+     })
+ 
++    it('retains Codex round duration through persisted re-entry and a user-free latest tail', async () => {
++        const id = sessionId('codex-round-duration')
++        const tail: DecryptedMessage[] = [
++            { type: 'message', message: 'completed answer' },
++            { type: 'token_count', flavor: 'codex', model: 'gpt-5.4',
++                info: { last_token_usage: { input_tokens: 100, output_tokens: 10 } } },
++            { type: 'turn_duration', flavor: 'codex', durationMs: 39_426 }
++        ].map((data, index) => ({ id: `round-${index}`, seq: 40 + index, localId: null,
++            createdAt: 40_000 + index, content: { role: 'agent', content: { type: 'codex', data: { ...data, turn_id: 'round' } } } }))
++        sessionStorage.setItem(`hapi:message-window:v2:${id}`, JSON.stringify({
++            messages: tail, hasMore: true, oldestPositionAt: 40_000, oldestPositionSeq: 40,
++            newestPositionAt: 40_002, newestPositionSeq: 42, epoch: 3
++        }))
++        const assertDuration = () => {
++            const messages = getMessageWindowState(id).messages
++            expect(messages.map(message => message.id)).toEqual(['round-0', 'round-1', 'round-2'])
++            const normalized = messages.map(normalizeDecryptedMessage).filter((message): message is NormalizedMessage => message !== null)
++            const { blocks } = reduceChatBlocks(normalized, null)
++            const visible = buildVisibleChatBlocks(blocks, { hasMoreMessages: true })
++            expect(aggregateResponseGroups(visible).get('round-0:0')?.roundSummary).toMatchObject({
++                durationMs: 39_426, numTurns: 1, usage: { input_tokens: 100, output_tokens: 10 }
++            })
++        }
++        assertDuration()
++        activateMessageWindow(id)
++        const getMessages = vi.fn(async () => latestResponse(JSON.parse(JSON.stringify(tail)) as DecryptedMessage[], {
++            epoch: 3, limit: 20, hasMore: true, nextBeforeAt: 40_000, nextBeforeSeq: 40
++        }))
++        await syncTailMessages(createApi(getMessages), id)
++        expect(getMessages).toHaveBeenCalledWith(id, { limit: 20 })
++        assertDuration()
++    })
++
+     it('preserves queued rows while replacing stale server rows on re-entry', async () => {
+         const id = sessionId('reentry-queued')
+         const cached = makeAgentMessage({ id: 'cached', seq: 40, at: 4_000 })

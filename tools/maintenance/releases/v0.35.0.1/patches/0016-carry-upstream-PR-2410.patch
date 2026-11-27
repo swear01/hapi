@@ -1,0 +1,74 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Fri, 13 Nov 2026 03:50:16 +0800
+Subject: [PATCH 16/29] carry(upstream): PR #2410
+
+---
+ cli/README.md                               | 2 +-
+ cli/src/claude/utils/startHappyServer.ts    | 2 +-
+ cli/src/commands/spawnPeer.ts               | 3 ++-
+ cli/src/modules/spawnPeer/spawnPeer.test.ts | 4 ++--
+ 4 files changed, 6 insertions(+), 5 deletions(-)
+
+diff --git a/cli/README.md b/cli/README.md
+index abe41a3a1..fa7d3da76 100644
+--- a/cli/README.md
++++ b/cli/README.md
+@@ -43,7 +43,7 @@ Choose a supported coding agent from your terminal and control its sessions remo
+   DSH is remote-only and its ACP server must be configured separately.
+ - `hapi resume [sessionId]` - List resumable sessions for this machine or resume one locally.
+ - `hapi ping-peer <session-id-prefix> <message>` - Message another session. Inactive targets are refused (exit 5) unless `--wake` resumes them first. Prefer this or MCP `ping_peer` / `list_peers` over reinventing JWT+curl. Also `--message-file` / `--list [--all]` (active sessions with machine and cwd; `--all` includes inactive).
+-- `hapi spawn-peer --dir PATH --name TITLE --message-file -` - Spawn a session and deliver a required first message. Optional `--machine ID|hostname` targets another runner (resolved via GET /api/machines); `--dir` must exist on the target. Machine spawn HTTP 200 is not a working peer; this command fails if the remit does not land. Prefer MCP `spawn_peer`.
++- `hapi spawn-peer --dir PATH --name TITLE --message-file -` - Spawn a session and deliver a required first message. Optional `--machine ID|hostname` targets another runner (resolved via GET /api/machines); `--dir` must exist on the target, and `--session-type worktree` requires it to be a git repository. Machine spawn HTTP 200 is not a working peer; this command fails if the remit does not land. Prefer MCP `spawn_peer`.
+ - `hapi usage [--since 24h|7d|<ISO>|<ms>] [--until …] [--json]` - When agents were working across every machine on the hub, from `GET /api/activity`. `--json` prints one `hapi.activity.v1` report for other tools (time trackers); errors go to stderr with exit codes 2 (arguments), 3 (no token or refused), 4 (hub too old), 1 (other).
+ - `hapi inspect-peer <session-id-or-prefix>` - Read-only peer metadata + recent message text (no resume). Prefer this or MCP `inspect_peer` when a user cites `[title](/sessions/<id>)` or Copy-reference `See session "…" (/sessions/<id>) for context`. `/sessions/<id>` is a hub path, not a local file. Optional `--limit`.
+ - `hapi set-mode <session-id-or-prefix> <mode>` - Change the permission mode of an existing session, like the web permission picker. Active sessions switch immediately; inactive ones use it on next resume. An invalid mode prints the modes allowed for that agent.
+diff --git a/cli/src/claude/utils/startHappyServer.ts b/cli/src/claude/utils/startHappyServer.ts
+index 0e7eba4b7..524ec0ef9 100644
+--- a/cli/src/claude/utils/startHappyServer.ts
++++ b/cli/src/claude/utils/startHappyServer.ts
+@@ -247,7 +247,7 @@ function createHapiMcpServer(
+         effort: z.string().trim().min(1).optional()
+             .describe('Effort override (flavor-dependent).'),
+         sessionType: z.enum(['simple', 'worktree']).optional()
+-            .describe('simple or worktree. Default simple (use directory as cwd). worktree creates a new tree from directory.'),
++            .describe('simple or worktree. Default simple (use directory as cwd). worktree creates a new tree from directory, which must be a git repository.'),
+         permissionMode: PermissionModeSchema.optional()
+             .describe(
+                 'Permission mode for the new session. Omit to use hub/stock default (yolo). '
+diff --git a/cli/src/commands/spawnPeer.ts b/cli/src/commands/spawnPeer.ts
+index fac9619a6..039ab6de5 100644
+--- a/cli/src/commands/spawnPeer.ts
++++ b/cli/src/commands/spawnPeer.ts
+@@ -52,7 +52,8 @@ ${chalk.bold('Options:')}
+   --agent NAME            Agent flavor (default: hub peerSpawnDefaults, else claude)
+   --model ID              Model override for the resolved agent flavor
+   --effort LEVEL          Effort override (flavor-dependent; e.g. claude high)
+-  --session-type TYPE     simple | worktree (default: simple; worktree creates a new tree from PATH)
++  --session-type TYPE     simple | worktree (default: simple; worktree creates a new tree from PATH,
++                          which must be a git repository)
+   --permission-mode MODE  Optional; omit = hub/stock default (yolo). Pass to tighten or when named; not cloned from parent
+   --wait SECONDS          Active/verify timeout (default 60, or HAPI_WAIT_ACTIVE_SECS)
+ 
+diff --git a/cli/src/modules/spawnPeer/spawnPeer.test.ts b/cli/src/modules/spawnPeer/spawnPeer.test.ts
+index a91949a1a..9ac8d4db1 100644
+--- a/cli/src/modules/spawnPeer/spawnPeer.test.ts
++++ b/cli/src/modules/spawnPeer/spawnPeer.test.ts
+@@ -513,7 +513,7 @@ it('resolves relative directory against cwd (MCP session working directory)', as
+                     return { status: 200, data: { token: 'jwt' } }
+                 }
+                 if (url.endsWith(`/api/machines/${MACHINE_ID}/spawn`)) {
+-                    return { status: 200, data: { type: 'error', message: 'no runner' } }
++                    return { status: 200, data: { type: 'error', message: 'Path is not a Git repository' } }
+                 }
+                 throw new Error(`unexpected POST ${url}`)
+             }
+@@ -526,7 +526,7 @@ it('resolves relative directory against cwd (MCP session working directory)', as
+             accessToken: 'tok',
+             apiUrl: 'http://hub.test',
+             http: http as never
+-        })).rejects.toMatchObject({ code: 'spawn_failed' })
++        })).rejects.toMatchObject({ code: 'spawn_failed', message: 'spawn failed: Path is not a Git repository' })
+         expect(http.post).toHaveBeenCalledTimes(2)
+     })
+ 

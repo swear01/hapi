@@ -1,0 +1,1447 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Mon, 19 Oct 2026 15:36:18 +0000
+Subject: [PATCH 27/94] carry(upstream): PR #1940 fix(runner): reconnect live
+ Codex roots on resume
+
+Upstream-head: 6e5455b135b0c38cdaf9272dcd9ffda73868be21
+---
+ cli/src/api/apiSession.test.ts                |  69 +++++
+ cli/src/api/apiSession.ts                     |  22 ++
+ cli/src/codex/shared/frontend.ts              |  20 +-
+ .../shared/reconnect.integration.test.ts      | 292 ++++++++++++++++++
+ cli/src/codex/shared/registry.ts              |   4 +-
+ cli/src/codex/shared/runtime.ts               |   1 +
+ cli/src/codex/shared/runtimeControl.test.ts   |  47 +++
+ cli/src/runner/buildCliArgs.test.ts           |  81 ++++-
+ cli/src/runner/reconnectSession.test.ts       |  43 +++
+ cli/src/runner/reconnectSession.ts            |  28 ++
+ cli/src/runner/run.ts                         | 248 +++++++++++----
+ cli/src/runner/sessionStopGuard.test.ts       |  56 ++++
+ cli/src/runner/sessionStopGuard.ts            |  42 +++
+ cli/src/test/auditTestProcesses.ts            |   4 +-
+ 14 files changed, 883 insertions(+), 74 deletions(-)
+ create mode 100644 cli/src/codex/shared/reconnect.integration.test.ts
+ create mode 100644 cli/src/codex/shared/runtimeControl.test.ts
+ create mode 100644 cli/src/runner/reconnectSession.test.ts
+ create mode 100644 cli/src/runner/reconnectSession.ts
+ create mode 100644 cli/src/runner/sessionStopGuard.test.ts
+ create mode 100644 cli/src/runner/sessionStopGuard.ts
+
+diff --git a/cli/src/api/apiSession.test.ts b/cli/src/api/apiSession.test.ts
+index 5f4a36c00..063ff71f3 100644
+--- a/cli/src/api/apiSession.test.ts
++++ b/cli/src/api/apiSession.test.ts
+@@ -6,6 +6,7 @@ const socketHarness = vi.hoisted(() => ({
+     sockets: [] as Array<{
+         connected: boolean
+         connectCalls: number
++        disconnectCalls: number
+         connectImmediately: boolean
+         emitted: Array<{ event: string; args: unknown[] }>
+         volatileEmitted: Array<{ event: string; args: unknown[] }>
+@@ -26,6 +27,7 @@ vi.mock('socket.io-client', () => ({
+         const state: (typeof socketHarness.sockets)[number] = {
+             connected: false,
+             connectCalls: 0,
++            disconnectCalls: 0,
+             connectImmediately: socketHarness.connectImmediately,
+             emitted: [] as Array<{ event: string; args: unknown[] }>,
+             volatileEmitted: [],
+@@ -79,6 +81,7 @@ vi.mock('socket.io-client', () => ({
+                 return socket
+             },
+             disconnect: () => {
++                state.disconnectCalls += 1
+                 state.connected = false
+                 return socket
+             }
+@@ -138,6 +141,72 @@ function createSession(overrides: Partial<Session> = {}): Session {
+     }
+ }
+ 
++describe('ApiSessionClient reconnectHub', () => {
++    it('returns a bounded failure and permits a later successful reconnect', async () => {
++        const client = new ApiSessionClient('test', createSession())
++        const socket = socketHarness.sockets.at(-1)!
++        socket.connected = false
++        socket.connectImmediately = false
++        try {
++            await expect(client.reconnectHub(20)).resolves.toBe(false)
++            expect(client.getState()).toBe('active')
++            socket.connectImmediately = true
++            await expect(client.reconnectHub(20)).resolves.toBe(true)
++        } finally { client.close() }
++    })
++
++    it('does not report success or restart after close races with a failed ping', async () => {
++        const client = new ApiSessionClient('test', createSession())
++        const socket = socketHarness.sockets.at(-1)!
++        socket.emitWithAckImpl = async () => { client.close(); throw new Error('closed') }
++        await expect(client.reconnectHub()).resolves.toBe(false)
++        expect(socket.connectCalls).toBe(1)
++        expect(client.getState()).toBe('closed')
++    })
++
++    it('repairs a disconnected Hub socket without closing the session', async () => {
++        const client = new ApiSessionClient('test', createSession())
++        const socket = socketHarness.sockets.at(-1)!
++        socket.connected = false
++        try {
++            await expect(client.reconnectHub()).resolves.toBe(true)
++            expect(socket.connectCalls).toBe(2)
++            expect(client.getState()).toBe('active')
++            expect(socket.emitted.some(event => event.event === 'session-alive')).toBe(true)
++        } finally { client.close() }
++    })
++
++    it('keeps a responsive connection and rebuilds only a connection that fails its ping', async () => {
++        const client = new ApiSessionClient('test', createSession())
++        const socket = socketHarness.sockets.at(-1)!
++        try {
++            await expect(client.reconnectHub()).resolves.toBe(true)
++            expect(socket.disconnectCalls).toBe(0)
++            socket.emitWithAckImpl = async event => {
++                if (event === 'ping' && socket.connectCalls === 1) throw new Error('transport stuck')
++                return {}
++            }
++            await expect(client.reconnectHub()).resolves.toBe(true)
++            expect(socket.disconnectCalls).toBe(1)
++            expect(socket.connectCalls).toBe(2)
++            expect(client.getState()).toBe('active')
++        } finally { client.close() }
++    })
++
++    it.each(['closed', 'archived'] as const)('never reconnects a %s session', async state => {
++        const client = new ApiSessionClient('test', createSession())
++        const socket = socketHarness.sockets.at(-1)!
++        try {
++            if (state === 'closed') client.close()
++            else socket.trigger('update', { body: { t: 'update-session', metadata: {
++                version: 1, value: { path: '/tmp', host: 'test', lifecycleState: 'archived', archivedBy: 'hub' }
++            } } })
++            await expect(client.reconnectHub()).resolves.toBe(false)
++            expect(socket.connectCalls).toBe(1)
++        } finally { client.close() }
++    })
++})
++
+ function deferred<T>() {
+     let resolve!: (value: T) => void
+     let reject!: (error: unknown) => void
+diff --git a/cli/src/api/apiSession.ts b/cli/src/api/apiSession.ts
+index 78a4cd4d6..dea7bab40 100644
+--- a/cli/src/api/apiSession.ts
++++ b/cli/src/api/apiSession.ts
+@@ -1603,6 +1603,28 @@ export class ApiSessionClient extends EventEmitter {
+         return await this.drainLock(this.metadataLock, timeoutMs)
+     }
+ 
++    /** Repair only this session's Hub transport; keep the native execution alive. */
++    async reconnectHub(timeoutMs: number = 5_000): Promise<boolean> {
++        const canReconnect = () => this.state === 'active' && this.allowReconnect
++        if (!canReconnect() || timeoutMs <= 0) return false
++        const deadline = Date.now() + timeoutMs
++        const remaining = () => Math.max(0, deadline - Date.now())
++        const ping = async (budget: number): Promise<boolean> => {
++            if (budget <= 0 || !canReconnect()) return false
++            try {
++                await this.socket.timeout(budget).emitWithAck('ping')
++                return canReconnect() && this.socket.connected
++            } catch { return false }
++        }
++        if (this.socket.connected) {
++            if (await ping(Math.min(1_000, Math.floor(remaining() / 2)))) return true
++            if (!canReconnect()) return false
++            this.socket.disconnect()
++        }
++        if (!canReconnect() || !await this.waitForConnected(remaining())) return false
++        return await ping(remaining())
++    }
++
+     async flush(options?: { timeoutMs?: number }): Promise<boolean> {
+         const deadlineMs = Date.now() + (options?.timeoutMs ?? 5_000)
+         const remainingMs = () => Math.max(0, deadlineMs - Date.now())
+diff --git a/cli/src/codex/shared/frontend.ts b/cli/src/codex/shared/frontend.ts
+index 6e2ec483e..4de1899dd 100644
+--- a/cli/src/codex/shared/frontend.ts
++++ b/cli/src/codex/shared/frontend.ts
+@@ -9,12 +9,26 @@ import { findRuntime, runtimeAlive, type CodexRuntimeRecord } from './registry';
+ import { initializeSharedClient, sharedLaunchConfig, SharedLaunchSchema, type SharedLaunchOptions } from './launch';
+ import { runSharedRuntime, type RuntimeReady } from './runtime';
+ 
+-export async function runtimeControl(runtime: CodexRuntimeRecord, method: string, sessionId: string): Promise<unknown> {
++export async function runtimeControl(runtime: CodexRuntimeRecord, method: string, sessionId: string, options?: { timeoutMs: number }): Promise<unknown> {
+     if (!runtimeAlive(runtime)) throw new Error('Shared runtime is not alive');
+     const client = new CodexAppServerClient({ endpoint: runtime.endpoint, token: runtime.token });
+     client.setServerRequestHandler(() => {});
+-    try { await initializeSharedClient(client); return await client.request(method, { sessionId }); }
+-    finally { await client.disconnect(); }
++    let timedOut = false;
++    let timer: ReturnType<typeof setTimeout> | undefined;
++    const request = async () => {
++        await initializeSharedClient(client);
++        if (timedOut) throw new Error('Shared runtime control timed out');
++        return await client.request(method, { sessionId });
++    };
++    try {
++        if (!options) return await request();
++        return await Promise.race([request(), new Promise<never>((_resolve, reject) => {
++            timer = setTimeout(() => {
++                timedOut = true;
++                reject(new Error('Shared runtime control timed out'));
++            }, options.timeoutMs);
++        })]);
++    } finally { clearTimeout(timer); await client.disconnect(); }
+ }
+ 
+ export async function attachSharedSession(runtime: CodexRuntimeRecord, sessionId: string, args: string[] = [], signal?: AbortSignal): Promise<void> {
+diff --git a/cli/src/codex/shared/reconnect.integration.test.ts b/cli/src/codex/shared/reconnect.integration.test.ts
+new file mode 100644
+index 000000000..3ed9e1603
+--- /dev/null
++++ b/cli/src/codex/shared/reconnect.integration.test.ts
+@@ -0,0 +1,292 @@
++import { describe, expect, it, vi } from 'vitest';
++import { createServer, type ServerResponse } from 'node:http';
++import { createServer as createPortReservation } from 'node:net';
++import { spawn, type ChildProcess } from 'node:child_process';
++import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
++import { join, resolve } from 'node:path';
++import { randomUUID } from 'node:crypto';
++import type { Socket } from 'socket.io-client';
++import type { ApiSessionClient } from '@/api/apiSession';
++import { updateSettings, readRunnerState } from '@/persistence';
++import { notifyRunnerSessionStarted } from '@/runner/controlClient';
++import { buildTestChildEnv } from '@/test/integrationEnv';
++import { trackChildProcess } from '@/test/processRegistry';
++import { killProcessByChildProcess } from '@/utils/process';
++import { configuration } from '@/configuration';
++import { CodexAppServerClient } from '../codexAppServerClient';
++import { initializeSharedClient } from './launch';
++import { record } from './gateway';
++import { runSharedRuntime, type RuntimeReady } from './runtime';
++
++// Capture real clients at bootstrap; no Hub, native engine, queue or transport mocks.
++const captured = vi.hoisted(() => ({ sessions: new Map<string, ApiSessionClient>() }));
++vi.mock('@/agent/sessionFactory', async importOriginal => {
++    const original = await importOriginal<typeof import('@/agent/sessionFactory')>();
++    return { ...original, bootstrapSession: async (options: Parameters<typeof original.bootstrapSession>[0]) => {
++        const result = await original.bootstrapSession(options);
++        captured.sessions.set(result.session.sessionId, result.session);
++        return result;
++    } };
++});
++
++async function eventually(check: () => Promise<boolean>, description: string, timeout = 15_000): Promise<void> {
++    await vi.waitFor(async () => { if (!await check()) throw new Error(description); }, { timeout, interval: 100 });
++}
++
++// Explicit opt-in. Installed Codex, an isolated native store and local fake model;
++// disposable auth comes from CLI setup; this test owns a restartable private Hub.
++describe.skipIf(process.env.HAPI_RUN_SHARED_CODEX_TESTS !== '1')('Runner shared-session reconnect', () => {
++    it('recovers the same live execution and preserves its in-flight turn and sibling', async () => {
++        const home = await mkdtemp('/tmp/hapi-reconnect-');
++        const nativeHome = join(home, 'codex');
++        const requests: string[] = [];
++        const runners: ChildProcess[] = [];
++        const hubs: ChildProcess[] = [];
++        const originalApiUrl = configuration.apiUrl;
++        const stop = new AbortController();
++        let running: Promise<void> | undefined;
++        let native: CodexAppServerClient | undefined;
++        let held: { response: ServerResponse; prompt: string } | undefined;
++        const reply = (response: ServerResponse, prompt: string) => {
++            const id = randomUUID();
++            const events = [
++                { type: 'response.created', response: { id } },
++                { type: 'response.output_item.done', item: { type: 'message', role: 'assistant', id: `msg_${id}`,
++                    content: [{ type: 'output_text', text: `MOCK_DONE ${prompt}` }] } },
++                { type: 'response.completed', response: { id, usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 } } }
++            ];
++            response.writeHead(200, { 'Content-Type': 'text/event-stream' });
++            response.end(events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(''));
++        };
++        const model = createServer((request, response) => {
++            const chunks: Buffer[] = [];
++            request.on('data', chunk => chunks.push(Buffer.from(chunk)));
++            request.on('end', () => {
++                if (!request.url?.endsWith('/responses')) { response.writeHead(404).end(); return; }
++                const body = record(JSON.parse(Buffer.concat(chunks).toString()));
++                const input = Array.isArray(body.input) ? body.input.map(record) : [];
++                const prompt = JSON.stringify(input.filter(item => item.role === 'user').at(-1));
++                requests.push(prompt);
++                if (prompt.includes('HELD_TURN')) held = { response, prompt };
++                else reply(response, prompt);
++            });
++        });
++        try {
++            await mkdir(nativeHome);
++            const reservation = createPortReservation();
++            const hubPort = await new Promise<number>((resolve, reject) => {
++                reservation.once('error', reject);
++                reservation.listen(0, '127.0.0.1', () => {
++                    const address = reservation.address();
++                    const port = typeof address === 'object' && address ? address.port : 0;
++                    reservation.close(error => error ? reject(error) : resolve(port));
++                });
++            });
++            const hubHome = join(home, 'hub');
++            await mkdir(hubHome);
++            const base = `http://127.0.0.1:${hubPort}`;
++            vi.stubEnv('HAPI_API_URL', base);
++            configuration._setApiUrl(base);
++            const startHub = async () => {
++                // Explicit whitelist: never inherit a production DB or notifier.
++                const child = spawn(process.env.HAPI_BUN_EXEC!, ['run', resolve('../hub/src/index.ts')], {
++                    env: {
++                        PATH: process.env.PATH, HOME: process.env.HOME,
++                        TMPDIR: process.env.TMPDIR, BUN_INSTALL: process.env.BUN_INSTALL,
++                        HAPI_HOME: hubHome, DB_PATH: join(hubHome, 'hapi.db'),
++                        HAPI_LISTEN_PORT: String(hubPort), HAPI_LISTEN_HOST: '127.0.0.1',
++                        HAPI_PUBLIC_URL: base, CLI_API_TOKEN: process.env.CLI_API_TOKEN,
++                        HAPI_TEST_MARKER: process.env.HAPI_HOME,
++                        TELEGRAM_NOTIFICATION: 'false', SERVERCHAN_NOTIFICATION: 'false',
++                    }, stdio: 'ignore'
++                });
++                trackChildProcess(child, 'reconnect-private-hub');
++                hubs.push(child);
++                await eventually(async () => {
++                    try { return (await fetch(`${base}/health`, { signal: AbortSignal.timeout(1000) })).ok; }
++                    catch { return false; }
++                }, 'private Hub starts');
++                return child;
++            };
++            const firstHub = await startHub();
++            await new Promise<void>(resolve => model.listen(0, '127.0.0.1', resolve));
++            const port = (model.address() as { port: number }).port;
++            await writeFile(join(nativeHome, 'config.toml'), `model = "mock-model"
++model_provider = "mock"
++approval_policy = "never"
++sandbox_mode = "read-only"
++check_for_update_on_startup = false
++[model_providers.mock]
++name = "Local reconnect test"
++base_url = "http://127.0.0.1:${port}/v1"
++wire_api = "responses"
++requires_openai_auth = false
++supports_websockets = false
++request_max_retries = 0
++stream_max_retries = 0
++[analytics]
++enabled = false
++[feedback]
++enabled = false
++            `);
++            vi.stubEnv('CODEX_HOME', nativeHome);
++            await updateSettings(settings => ({ ...settings, machineId: settings.machineId ?? randomUUID() }));
++            const auth = await fetch(`${base}/api/auth`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
++                body: JSON.stringify({ accessToken: process.env.CLI_API_TOKEN }) });
++            const token = String(record(await auth.json()).token);
++            const api = async (path: string, body?: unknown) => {
++                const response = await fetch(`${base}/api${path}`, {
++                    method: body === undefined ? 'GET' : 'POST',
++                    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
++                    ...(body === undefined ? {} : { body: JSON.stringify(body) })
++                });
++                const value = record(await response.json());
++                if (!response.ok) throw new Error(`${path}: ${JSON.stringify(value)}`);
++                return value;
++            };
++            let ready!: (value: RuntimeReady) => void;
++            const readiness = new Promise<RuntimeReady>(resolve => { ready = resolve; });
++            running = runSharedRuntime({ workingDirectory: home, startedBy: 'runner' }, ready, stop.signal);
++            const startRunner = async (codexAvailable = true) => {
++                const child = spawn(process.env.HAPI_BUN_EXEC!, ['run', resolve('src/index.ts'), 'runner', 'start-sync'], {
++                    env: {
++                        ...buildTestChildEnv(), HAPI_RUNNER_SUPERVISED: '1',
++                        ...(codexAvailable ? {} : { HAPI_CODEX_APP_SERVER_BIN: join(home, 'missing-codex') }),
++                    }, stdio: 'ignore'
++                });
++                trackChildProcess(child, 'reconnect-runner');
++                runners.push(child);
++                await eventually(async () => {
++                    const state = await readRunnerState();
++                    return state?.pid === child.pid && Boolean(state?.httpPort);
++                }, 'isolated Runner starts');
++                await eventually(async () => {
++                    const machines = (await api('/machines')).machines;
++                    return Array.isArray(machines) && machines.some(machine => record(machine).active === true);
++                }, 'Runner registered with Hub');
++                return child;
++            };
++            const owner = await Promise.race([readiness, running.then(() => { throw new Error('Runtime ended before readiness'); })]);
++            const primary = captured.sessions.get(owner.sessionId)!;
++            native = new CodexAppServerClient({ endpoint: owner.runtime.endpoint, token: owner.runtime.token });
++            native.setServerRequestHandler(() => {});
++            await initializeSharedClient(native);
++            await native.request('thread/start', { cwd: home });
++            const sibling = [...captured.sessions.values()].find(session => session.sessionId !== owner.sessionId)!;
++            expect(sibling).toBeDefined();
++            const primarySocket = (primary as unknown as { socket: Socket }).socket;
++            const siblingSocket = (sibling as unknown as { socket: Socket }).socket;
++            const siblingConnection = siblingSocket.id;
++            const firstRunner = await startRunner();
++            expect(await notifyRunnerSessionStarted(primary.sessionId, primary.getMetadata()!)).not.toHaveProperty('error');
++            expect(await killProcessByChildProcess(firstRunner)).toBe(true);
++            // A real replacement Runner must load the durable live PID record.
++            // Losing launch availability cannot prevent reconnecting the
++            // already-running runtime, including uncached native /new roots.
++            const recoveryRunner = await startRunner(false);
++            const send = (sid: string, text: string) => api(`/sessions/${sid}/messages`, { text, localId: randomUUID() });
++            const answered = async (sid: string, text: string) => {
++                const history = await api(`/sessions/${sid}/messages`);
++                return (Array.isArray(history.messages) ? history.messages : []).some(message => {
++                    const content = JSON.stringify(message);
++                    return content.includes('MOCK_DONE') && content.includes(text);
++                });
++            };
++            await eventually(async () => record((await api(`/sessions/${primary.sessionId}`)).session).active === true, 'primary active');
++            await send(primary.sessionId, 'HELD_TURN');
++            await eventually(async () => Boolean(held), 'native turn waiting on local model');
++            primarySocket.disconnect();
++            // Hub liveness expires after 30 seconds; no synthetic active flag.
++            await eventually(async () => record((await api(`/sessions/${primary.sessionId}`)).session).active === false, 'Hub observes disconnected CLI', 40_000);
++            const [first, concurrent] = await Promise.all([
++                api(`/sessions/${primary.sessionId}/resume`, {}),
++                api(`/sessions/${primary.sessionId}/resume`, {})
++            ]);
++            expect(first.sessionId).toBe(primary.sessionId);
++            expect(concurrent.sessionId).toBe(primary.sessionId);
++            await eventually(async () => record((await api(`/sessions/${primary.sessionId}`)).session).active === true, 'same session reconnected');
++            expect(record(record((await api(`/sessions/${primary.sessionId}`)).session).metadata).hostPid).toBe(process.pid);
++            expect(siblingSocket.connected).toBe(true);
++            expect(siblingSocket.id).toBe(siblingConnection);
++            expect(owner.runtime.sessions[primary.sessionId].active).toBe(true);
++            reply(held!.response, held!.prompt);
++            held = undefined;
++            await eventually(() => answered(primary.sessionId, 'HELD_TURN'), 'in-flight turn completes after reconnect');
++            expect(requests.filter(prompt => prompt.includes('HELD_TURN'))).toHaveLength(1);
++            await send(primary.sessionId, 'AFTER_RECONNECT');
++            await send(sibling.sessionId, 'SIBLING_CONTINUES');
++            await eventually(() => answered(primary.sessionId, 'AFTER_RECONNECT'), 'same old conversation accepts next message');
++            await eventually(() => answered(sibling.sessionId, 'SIBLING_CONTINUES'), 'sibling continues');
++            expect(siblingSocket.id).toBe(siblingConnection);
++
++            // /new roots have no separate child PID or recovered spawn entry.
++            const primaryConnection = primarySocket.id;
++            siblingSocket.disconnect();
++            await eventually(async () => record((await api(`/sessions/${sibling.sessionId}`)).session).active === false, 'Hub observes disconnected sibling', 40_000);
++            expect((await api(`/sessions/${sibling.sessionId}/resume`, {})).sessionId).toBe(sibling.sessionId);
++            await send(sibling.sessionId, 'SIBLING_RECONNECTED');
++            await eventually(() => answered(sibling.sessionId, 'SIBLING_RECONNECTED'), 'uncached sibling resumes through Runner');
++            expect(primarySocket.id).toBe(primaryConnection);
++            expect(record(record((await api(`/sessions/${sibling.sessionId}`)).session).metadata).hostPid).toBe(process.pid);
++
++            // Restart the actual Hub over the same database while native work
++            // is waiting on the local model. Neither wrapper nor roots restart.
++            await send(primary.sessionId, 'HELD_TURN_HUB_RESTART');
++            await eventually(async () => Boolean(held), 'native turn held before Hub restart');
++            expect(await killProcessByChildProcess(firstHub)).toBe(true);
++            await eventually(async () => !primarySocket.connected && !siblingSocket.connected, 'both roots observe Hub shutdown');
++            await startHub();
++            await eventually(async () => record((await api(`/sessions/${primary.sessionId}`)).session).active === true, 'primary rejoins restarted Hub');
++            await eventually(async () => record((await api(`/sessions/${sibling.sessionId}`)).session).active === true, 'sibling rejoins restarted Hub');
++            reply(held!.response, held!.prompt);
++            held = undefined;
++            await eventually(() => answered(primary.sessionId, 'HELD_TURN_HUB_RESTART'), 'in-flight reply reaches restarted Hub');
++            expect(requests.filter(prompt => prompt.includes('HELD_TURN_HUB_RESTART'))).toHaveLength(1);
++            expect(await answered(primary.sessionId, 'AFTER_RECONNECT')).toBe(true);
++            await send(sibling.sessionId, 'AFTER_HUB_RESTART');
++            await eventually(() => answered(sibling.sessionId, 'AFTER_HUB_RESTART'), 'old sibling accepts new messages after Hub restart');
++            expect(record(record((await api(`/sessions/${primary.sessionId}`)).session).metadata).hostPid).toBe(process.pid);
++
++            // Ending one root must release its resume ownership even though
++            // the wrapper remains alive for the sibling.
++            await api(`/sessions/${primary.sessionId}/archive`, {});
++            // Once cold, this root really needs an executable. Recovery must
++            // not bypass launch preflight for new native executions.
++            await expect(api(`/sessions/${primary.sessionId}/resume`, {})).rejects.toThrow('codex has invalid runner configuration');
++            expect(await killProcessByChildProcess(recoveryRunner)).toBe(true);
++            await startRunner();
++            expect((await api(`/sessions/${primary.sessionId}/resume`, {})).sessionId).toBe(primary.sessionId);
++            await send(primary.sessionId, 'AFTER_ARCHIVE_REOPEN');
++            await eventually(() => answered(primary.sessionId, 'AFTER_ARCHIVE_REOPEN'), 'archived root cold-resumes without waiting for sibling wrapper exit');
++            expect(siblingSocket.connected).toBe(true);
++            const durable = JSON.parse(await readFile(`${configuration.runnerStateFile}.resume-processes.json`, 'utf8')) as unknown[];
++            const primaryOwners = durable.map(record).filter(owner => owner.requestedSessionId === primary.sessionId);
++            expect(primaryOwners, JSON.stringify(primaryOwners)).toHaveLength(1);
++            expect(primaryOwners[0].pid).not.toBe(process.pid);
++        } finally {
++            held?.response.destroy();
++            stop.abort();
++            const cleanup = await Promise.allSettled([
++                native?.disconnect(), running,
++                ...runners.map(async child => {
++                    if (child.exitCode === null && child.signalCode === null && !await killProcessByChildProcess(child)) {
++                        throw new Error('Test Runner survived cleanup');
++                    }
++                })
++            ]);
++            const hubCleanup = await Promise.allSettled(hubs.map(async child => {
++                if (child.exitCode === null && child.signalCode === null && !await killProcessByChildProcess(child)) {
++                    throw new Error('Test Hub survived cleanup');
++                }
++            }));
++            model.closeAllConnections();
++            await new Promise<void>(resolve => model.close(() => resolve()));
++            vi.unstubAllEnvs();
++            configuration._setApiUrl(originalApiUrl);
++            captured.sessions.clear();
++            await rm(home, { recursive: true, force: true });
++            const failed = [...cleanup, ...hubCleanup].find(result => result.status === 'rejected');
++            if (failed?.status === 'rejected') throw failed.reason;
++        }
++    }, 120_000);
++});
+diff --git a/cli/src/codex/shared/registry.ts b/cli/src/codex/shared/registry.ts
+index e8ec34615..5985fa8c9 100644
+--- a/cli/src/codex/shared/registry.ts
++++ b/cli/src/codex/shared/registry.ts
+@@ -94,8 +94,8 @@ export async function withThreadOwnership<T>(home: string, threadId: string, own
+     });
+ }
+ 
+-export async function findRuntime(sessionId: string): Promise<CodexRuntimeRecord | undefined> {
+-    return (await readRuntimes()).find(record => record.hub === configuration.apiUrl && record.authHash === runtimeAuthHash()
++export async function findRuntime(sessionId: string, options?: { strict?: boolean }): Promise<CodexRuntimeRecord | undefined> {
++    return (await readRuntimes(options)).find(record => record.hub === configuration.apiUrl && record.authHash === runtimeAuthHash()
+         && record.sessions[sessionId]?.active && runtimeAlive(record));
+ }
+ 
+diff --git a/cli/src/codex/shared/runtime.ts b/cli/src/codex/shared/runtime.ts
+index 533439645..6b0d68d7d 100644
+--- a/cli/src/codex/shared/runtime.ts
++++ b/cli/src/codex/shared/runtime.ts
+@@ -337,6 +337,7 @@ export async function runSharedRuntime(options: SharedLaunchOptions, onReady?: (
+             }, control: (method, params) => operation(async () => {
+                 const sid = string(record(params).sessionId); const root = [...roots.values()].find(root => root.session.sessionId === sid);
+                 if (!root) throw new Error('Shared session not found');
++                if (method === 'hapi/reconnectSession') return { connected: !ending.has(root) && await root.session.reconnectHub() };
+                 if (method === 'hapi/stopSession') { await end(root); return { stopped: true }; }
+                 if (method === 'hapi/attach') return { threadId: root.threadId };
+                 throw new Error('Unknown runtime control');
+diff --git a/cli/src/codex/shared/runtimeControl.test.ts b/cli/src/codex/shared/runtimeControl.test.ts
+new file mode 100644
+index 000000000..9cab05790
+--- /dev/null
++++ b/cli/src/codex/shared/runtimeControl.test.ts
+@@ -0,0 +1,47 @@
++import { beforeEach, describe, expect, it, vi } from 'vitest';
++import type { CodexRuntimeRecord } from './registry';
++
++const state = vi.hoisted(() => ({ alive: true, initialize: vi.fn(), request: vi.fn(), disconnect: vi.fn() }));
++vi.mock('./registry', () => ({ runtimeAlive: () => state.alive }));
++vi.mock('./runtime', () => ({ runSharedRuntime: vi.fn() }));
++vi.mock('../codexAppServerClient', () => ({ CodexAppServerClient: class {
++    setServerRequestHandler() {}
++    async connect() {}
++    initialize = state.initialize;
++    request = state.request;
++    disconnect = state.disconnect;
++} }));
++import { runtimeControl } from './frontend';
++
++const runtime = { endpoint: 'unix://test' } as CodexRuntimeRecord;
++beforeEach(() => { vi.resetAllMocks(); state.alive = true; });
++
++describe('bounded shared runtime control', () => {
++    it('detaches its control client after a confirmed reconnect', async () => {
++        state.request.mockResolvedValue({ connected: true });
++        await expect(runtimeControl(runtime, 'hapi/reconnectSession', 'sid', { timeoutMs: 100 }))
++            .resolves.toEqual({ connected: true });
++        expect(state.request).toHaveBeenCalledExactlyOnceWith('hapi/reconnectSession', { sessionId: 'sid' });
++        expect(state.disconnect).toHaveBeenCalledOnce();
++    });
++
++    it('does not send a late control request after initialization exceeds the deadline', async () => {
++        let finish!: () => void;
++        state.initialize.mockImplementation(() => new Promise<void>(resolve => { finish = resolve; }));
++        await expect(runtimeControl(runtime, 'hapi/reconnectSession', 'sid', { timeoutMs: 10 }))
++            .rejects.toThrow('timed out');
++        expect(state.disconnect).toHaveBeenCalledOnce();
++        finish();
++        await Promise.resolve();
++        await Promise.resolve();
++        expect(state.request).not.toHaveBeenCalled();
++    });
++
++    it('requires a verified live generation before connecting', async () => {
++        state.alive = false;
++        await expect(runtimeControl(runtime, 'hapi/reconnectSession', 'sid', { timeoutMs: 10 }))
++            .rejects.toThrow('not alive');
++        expect(state.initialize).not.toHaveBeenCalled();
++        expect(state.request).not.toHaveBeenCalled();
++    });
++});
+diff --git a/cli/src/runner/buildCliArgs.test.ts b/cli/src/runner/buildCliArgs.test.ts
+index 4d70856ef..2f74af21a 100644
+--- a/cli/src/runner/buildCliArgs.test.ts
++++ b/cli/src/runner/buildCliArgs.test.ts
+@@ -1,4 +1,4 @@
+-import { describe, it, expect } from 'vitest'
++import { describe, it, expect, vi } from 'vitest'
+ import { execFileSync } from 'node:child_process'
+ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+ import { tmpdir } from 'node:os'
+@@ -464,6 +464,60 @@ describe('buildCliArgs', () => {
+ 
+ 
+ describe('createSpawnDeduplicator', () => {
++    it.each([true, false])('reconnects an existing execution before acknowledging resume (recovered=%s)', async recovered => {
++        let active = false
++        const spawn = vi.fn(async () => {
++            dedupe.markChildAlive('sid')
++            return { type: 'success' as const, sessionId: 'sid' }
++        })
++        const reconnect = vi.fn(async (_options, result) => { active = true; return result })
++        const dedupe = createSpawnDeduplicator(spawn, reconnect)
++        const options = { directory: '/tmp', existingSessionId: 'sid', agent: 'codex' as const }
++        if (recovered) dedupe.recoverChild('sid', { type: 'success', sessionId: 'sid' })
++        else await dedupe(options)
++
++        await expect(dedupe(options)).resolves.toEqual({ type: 'success', sessionId: 'sid' })
++        expect(active).toBe(true)
++        expect(reconnect).toHaveBeenCalledOnce()
++        expect(spawn).toHaveBeenCalledTimes(recovered ? 0 : 1)
++    })
++
++    it('coalesces concurrent reconnects and retries a failed connection without spawning another execution', async () => {
++        let finish!: (value: { type: 'error'; errorMessage: string }) => void
++        const spawn = vi.fn(async () => ({ type: 'success' as const, sessionId: 'sid' }))
++        const reconnect = vi.fn(() => new Promise<{ type: 'error'; errorMessage: string }>(resolve => { finish = resolve }))
++        const dedupe = createSpawnDeduplicator(spawn, reconnect)
++        dedupe.recoverChild('sid', { type: 'success', sessionId: 'sid' })
++        const options = { directory: '/tmp', existingSessionId: 'sid' }
++        const first = dedupe(options)
++        const second = dedupe(options)
++        await vi.waitFor(() => expect(reconnect).toHaveBeenCalledOnce())
++        finish({ type: 'error', errorMessage: 'Hub still unreachable' })
++        await expect(first).resolves.toMatchObject({ type: 'error' })
++        await expect(second).resolves.toMatchObject({ type: 'error' })
++        const retry = dedupe(options)
++        await vi.waitFor(() => expect(reconnect).toHaveBeenCalledTimes(2))
++        finish({ type: 'error', errorMessage: 'Hub still unreachable' })
++        await retry
++        expect(spawn).not.toHaveBeenCalled()
++    })
++
++    it('does not acknowledge a generation that exited while reconnecting', async () => {
++        let finish!: (value: { type: 'success'; sessionId: string }) => void
++        const reconnect = vi.fn(() => new Promise<{ type: 'success'; sessionId: string }>(resolve => { finish = resolve }))
++        const spawn = vi.fn(async () => ({ type: 'success' as const, sessionId: 'sid' }))
++        const dedupe = createSpawnDeduplicator(spawn, reconnect)
++        dedupe.recoverChild('sid', { type: 'success', sessionId: 'sid' })
++        const options = { directory: '/tmp', existingSessionId: 'sid' }
++        const pending = dedupe(options)
++        await vi.waitFor(() => expect(reconnect).toHaveBeenCalledOnce())
++        dedupe.onChildExited('sid')
++        finish({ type: 'success', sessionId: 'sid' })
++        await expect(pending).resolves.toMatchObject({ type: 'error' })
++        await expect(dedupe(options)).resolves.toMatchObject({ type: 'success' })
++        expect(spawn).toHaveBeenCalledOnce()
++    })
++
+     it('rehydrates a live child after runner restart without spawning again', async () => {
+         let calls = 0
+         const dedupe = createSpawnDeduplicator(async () => {
+@@ -487,6 +541,7 @@ describe('createSpawnDeduplicator', () => {
+         let resolveSpawn: ((result: { type: 'success'; sessionId: string }) => void) | undefined
+         const dedupe = createSpawnDeduplicator(async () => {
+             calls += 1
++            dedupe.markChildAlive('fresh-hapi-session')
+             return await new Promise<{ type: 'success'; sessionId: string }>((resolve) => {
+                 resolveSpawn = resolve
+             })
+@@ -505,6 +560,30 @@ describe('createSpawnDeduplicator', () => {
+         expect(calls).toBe(1)
+     })
+ 
++    it('does not retain a shared-root result without a child owned by this runner', async () => {
++        const spawn = vi.fn(async () => ({ type: 'success' as const, sessionId: 'sid' }))
++        const dedupe = createSpawnDeduplicator(spawn)
++        const options = { directory: '/tmp', existingSessionId: 'sid' }
++        await dedupe(options)
++        await dedupe(options)
++        expect(spawn).toHaveBeenCalledTimes(2)
++    })
++
++    it('does not let a late root-stop acknowledgement release the next execution', async () => {
++        const spawn = vi.fn(async () => {
++            dedupe.markChildAlive('sid')
++            return { type: 'success' as const, sessionId: 'sid' }
++        })
++        const dedupe = createSpawnDeduplicator(spawn)
++        dedupe.recoverChild('sid', { type: 'success', sessionId: 'sid' })
++        const finishOldStop = dedupe.captureChildExit('sid')
++        dedupe.onChildExited('sid')
++        await dedupe({ directory: '/tmp', existingSessionId: 'sid' })
++        finishOldStop()
++        await dedupe({ directory: '/tmp', existingSessionId: 'sid' })
++        expect(spawn).toHaveBeenCalledOnce()
++    })
++
+     it('retries immediately when spawning fails before a child PID is registered', async () => {
+         let calls = 0
+         const dedupe = createSpawnDeduplicator(async () => {
+diff --git a/cli/src/runner/reconnectSession.test.ts b/cli/src/runner/reconnectSession.test.ts
+new file mode 100644
+index 000000000..dfeb4a1b4
+--- /dev/null
++++ b/cli/src/runner/reconnectSession.test.ts
+@@ -0,0 +1,43 @@
++import { beforeEach, describe, expect, it, vi } from 'vitest';
++import { reconnectRunnerSession } from './reconnectSession';
++
++const state = vi.hoisted(() => ({ findRuntime: vi.fn(), control: vi.fn() }));
++vi.mock('@/codex/shared/registry', () => ({ findRuntime: state.findRuntime }));
++vi.mock('@/codex/shared/frontend', () => ({ runtimeControl: state.control }));
++
++beforeEach(() => { vi.resetAllMocks(); });
++const options = { directory: '/tmp', agent: 'codex' as const, existingSessionId: 'sid' };
++const result = { type: 'success' as const, sessionId: 'sid' };
++
++describe('reconnectRunnerSession', () => {
++    it('reuses the verified runtime through a bounded reconnect control', async () => {
++        const runtime = { id: 'runtime' };
++        state.findRuntime.mockResolvedValue(runtime);
++        state.control.mockResolvedValue({ connected: true });
++        await expect(reconnectRunnerSession(options, result)).resolves.toEqual(result);
++        expect(state.findRuntime).toHaveBeenCalledWith('sid', { strict: true });
++        expect(state.control).toHaveBeenCalledExactlyOnceWith(runtime, 'hapi/reconnectSession', 'sid', { timeoutMs: 10_000 });
++    });
++
++    it.each([undefined, null, {}, { connected: false }])('does not accept an unconfirmed reconnect (%j)', async reply => {
++        state.findRuntime.mockResolvedValue({ id: 'runtime' });
++        state.control.mockResolvedValue(reply);
++        await expect(reconnectRunnerSession(options, result)).resolves.toMatchObject({ type: 'error' });
++    });
++
++    it('preserves an execution whose runtime cannot be verified', async () => {
++        state.findRuntime.mockResolvedValue(undefined);
++        await expect(reconnectRunnerSession(options, result)).resolves.toMatchObject({ type: 'error' });
++        expect(state.control).not.toHaveBeenCalled();
++        state.findRuntime.mockRejectedValue(new Error('Cannot verify ownership record'));
++        await expect(reconnectRunnerSession(options, result)).resolves.toMatchObject({ type: 'error', errorMessage: expect.stringContaining('Cannot verify') });
++        expect(state.control).not.toHaveBeenCalled();
++    });
++
++    it('reports an unreachable or older runtime without stopping it', async () => {
++        state.findRuntime.mockResolvedValue({ id: 'runtime' });
++        state.control.mockRejectedValue(new Error('Unknown runtime control'));
++        await expect(reconnectRunnerSession(options, result)).resolves.toMatchObject({ type: 'error', errorMessage: expect.stringContaining('execution was preserved') });
++        expect(state.control.mock.calls.map(call => call[1])).toEqual(['hapi/reconnectSession']);
++    });
++});
+diff --git a/cli/src/runner/reconnectSession.ts b/cli/src/runner/reconnectSession.ts
+new file mode 100644
+index 000000000..4f3ac447d
+--- /dev/null
++++ b/cli/src/runner/reconnectSession.ts
+@@ -0,0 +1,28 @@
++import type { SpawnSessionOptions, SpawnSessionResult } from '@/modules/common/rpcTypes';
++
++/** A recovered PID is ownership evidence, not proof of a working Hub connection. */
++export async function reconnectRunnerSession(
++    options: SpawnSessionOptions,
++    result: Extract<SpawnSessionResult, { type: 'success' }>
++): Promise<SpawnSessionResult> {
++    if (options.agent !== 'codex') return result;
++    return await reconnectSharedRunnerSession(result.sessionId)
++        ?? { type: 'error', errorMessage: 'The existing Codex process has no verified shared runtime. Stop that session explicitly before reopening it.' };
++}
++
++/** Also used before spawning: /new roots share a PID and have no spawn cache. */
++export async function reconnectSharedRunnerSession(sessionId: string): Promise<SpawnSessionResult | undefined> {
++    try {
++        const { findRuntime } = await import('@/codex/shared/registry');
++        const runtime = await findRuntime(sessionId, { strict: true });
++        if (!runtime) return undefined;
++        const { runtimeControl } = await import('@/codex/shared/frontend');
++        const reply = await runtimeControl(runtime, 'hapi/reconnectSession', sessionId, { timeoutMs: 10_000 });
++        if (typeof reply === 'object' && reply !== null && 'connected' in reply && reply.connected === true) {
++            return { type: 'success', sessionId };
++        }
++        return { type: 'error', errorMessage: 'The existing Codex session could not reconnect to the Hub. Its execution was preserved; retry when the connection is available.' };
++    } catch (error) {
++        return { type: 'error', errorMessage: `Could not reconnect the existing Codex session; its execution was preserved: ${error instanceof Error ? error.message : String(error)}` };
++    }
++}
+diff --git a/cli/src/runner/run.ts b/cli/src/runner/run.ts
+index 12c50bd9c..a59d842bc 100644
+--- a/cli/src/runner/run.ts
++++ b/cli/src/runner/run.ts
+@@ -50,6 +50,8 @@ import { scheduleCursorModelsPrewarm } from '@/modules/common/cursorModelsPrewar
+ import { isLinkedGitWorktree } from '@/utils/isLinkedGitWorktree';
+ import { agentUnavailableMessage, getAgentAvailability } from '@/agent/agentAvailability';
+ import { copyCodexConfigFile, resolveCodexHome } from '@/codex/utils/codexHome';
++import { reconnectRunnerSession, reconnectSharedRunnerSession } from './reconnectSession';
++import { SessionReboundDuringStop, SessionStopGuard, SessionStopGuards } from './sessionStopGuard';
+ 
+ /**
+  * Deduplicates a preallocated HAPI-row spawn only while its child is alive.
+@@ -61,12 +63,15 @@ export type SpawnDeduplicator = ((options: SpawnSessionOptions) => Promise<Spawn
+   markChildAlive: (existingSessionId: string) => void
+   markChildStopping: (existingSessionId: string) => void
+   onChildExited: (existingSessionId: string) => void
++  captureChildExit: (existingSessionId: string) => () => void
+ }
+ 
+ export function createSpawnDeduplicator(
+-  spawnOnce: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>
++  spawnOnce: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>,
++  reuseCompleted?: (options: SpawnSessionOptions, result: Extract<SpawnSessionResult, { type: 'success' }>) => Promise<SpawnSessionResult>
+ ): SpawnDeduplicator {
+-  const completedOrInFlight = new Map<string, Promise<SpawnSessionResult>>();
++  type Entry = { task: Promise<SpawnSessionResult>; result?: SpawnSessionResult; reconnect?: Promise<SpawnSessionResult> };
++  const completedOrInFlight = new Map<string, Entry>();
+   const childState = new Map<string, 'alive' | 'stopping'>();
+ 
+   const dedupe = async (options: SpawnSessionOptions): Promise<SpawnSessionResult> => {
+@@ -76,20 +81,37 @@ export function createSpawnDeduplicator(
+     }
+     const existing = completedOrInFlight.get(key);
+     if (existing) {
+-      return await existing;
++      if (existing.result?.type === 'success' && reuseCompleted) {
++        if (childState.get(key) === 'stopping') {
++          return { type: 'error', errorMessage: 'The existing session is still stopping; retry after it exits' };
++        }
++        const result = existing.result;
++        const reconnect = existing.reconnect ??= Promise.resolve().then(async (): Promise<SpawnSessionResult> => {
++          const reconnected = await reuseCompleted(options, result);
++          if (completedOrInFlight.get(key) !== existing || childState.get(key) === 'stopping') {
++            return { type: 'error', errorMessage: 'The existing session changed while reconnecting; retry resume' };
++          }
++          return reconnected;
++        }).finally(() => { existing.reconnect = undefined; });
++        return await reconnect;
++      }
++      return await existing.task;
+     }
+ 
+     const task = spawnOnce(options);
+-    completedOrInFlight.set(key, task);
++    const entry: Entry = { task };
++    completedOrInFlight.set(key, entry);
+     task.then((result) => {
+-      // A failure before a PID exists can retry immediately. Once startRunner
+-      // has registered a child PID, keep its result until exit/stale detection
++      entry.result = result;
++      // A result without an owned PID must be checked again on the next call
++      // (including reconnecting a shared root that this runner did not spawn).
++      // Once startRunner has registered a child PID, keep its result until exit/stale detection
+       // confirms that the child is gone.
+-      if (result.type !== 'success' && !childState.has(key) && completedOrInFlight.get(key) === task) {
++      if (!childState.has(key) && completedOrInFlight.get(key) === entry) {
+         completedOrInFlight.delete(key);
+       }
+     }, () => {
+-      if (!childState.has(key) && completedOrInFlight.get(key) === task) {
++      if (!childState.has(key) && completedOrInFlight.get(key) === entry) {
+         completedOrInFlight.delete(key);
+       }
+     });
+@@ -97,7 +119,7 @@ export function createSpawnDeduplicator(
+   };
+   dedupe.recoverChild = (existingSessionId: string, result: SpawnSessionResult) => {
+     childState.set(existingSessionId, 'alive');
+-    completedOrInFlight.set(existingSessionId, Promise.resolve(result));
++    completedOrInFlight.set(existingSessionId, { task: Promise.resolve(result), result });
+   };
+   dedupe.markChildAlive = (existingSessionId: string) => {
+     childState.set(existingSessionId, 'alive');
+@@ -111,6 +133,14 @@ export function createSpawnDeduplicator(
+     childState.delete(existingSessionId);
+     completedOrInFlight.delete(existingSessionId);
+   };
++  dedupe.captureChildExit = (existingSessionId: string) => {
++    const generation = completedOrInFlight.get(existingSessionId);
++    return () => {
++      if (generation && completedOrInFlight.get(existingSessionId) === generation) {
++        dedupe.onChildExited(existingSessionId);
++      }
++    };
++  };
+   return dedupe;
+ }
+ 
+@@ -421,6 +451,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+     // existingSessionId identifies the HAPI row, not a permanent spawn request.
+     // Keep the dedupe entry only while this runner still owns the child PID.
+     const existingSessionIdByChildPid = new Map<number, string>();
++    const stopGuards = new SessionStopGuards();
+     type SpawnFailureDetails = {
+       message: string
+       pid?: number
+@@ -456,12 +487,16 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+       // Check if we already have this PID (runner-spawned)
+       const existingSession = pidToTrackedSession.get(pid);
+ 
++      // An archive notification can arrive after stop cleanup, including after
++      // Runner restart when this wrapper has not been adopted yet. It is never
++      // evidence of a live root and must not recreate its durable PID ownership.
++      if (sessionMetadata.capabilities?.concurrentClients && sessionMetadata.lifecycleState === 'archived') {
++        if (existingSession?.sharedSessions) delete existingSession.sharedSessions[sessionId];
++        return;
++      }
++      stopGuards.registered(sessionId);
+       if (existingSession && sessionMetadata.capabilities?.concurrentClients) {
+         existingSession.sharedSessions ??= {};
+-        if (sessionMetadata.lifecycleState === 'archived') {
+-          delete existingSession.sharedSessions[sessionId];
+-          return;
+-        }
+         existingSession.sharedSessions[sessionId] = sessionMetadata;
+         invalidateVerifiedExit(sessionId);
+         // Native /new or /fork cannot replace the primary spawn confirmation.
+@@ -600,6 +635,20 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+         if (requestedId) rememberVerifiedExit(requestedId);
+         return result;
+       };
++      if (options.validateDirectory && !(await options.validateDirectory(directory))) {
++        return failBeforeChild({
++          type: 'error',
++          errorMessage: 'Directory is outside this machine\'s workspace roots',
++          code: 'outside_workspace_roots',
++          childStarted: false,
++        });
++      }
++      // Reconnecting a verified live runtime does not launch Codex. A changed
++      // PATH or temporarily missing binary must not strand an existing root.
++      if (agent === 'codex' && options.existingSessionId) {
++        const existing = await reconnectSharedRunnerSession(options.existingSessionId);
++        if (existing) return existing;
++      }
+       const availability = getAgentAvailability(agent);
+       if (!availability.available) {
+         const errorMessage = agentUnavailableMessage(availability);
+@@ -616,14 +665,6 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+           childStarted: false,
+         });
+       }
+-      if (options.validateDirectory && !(await options.validateDirectory(directory))) {
+-        return failBeforeChild({
+-          type: 'error',
+-          errorMessage: 'Directory is outside this machine\'s workspace roots',
+-          code: 'outside_workspace_roots',
+-          childStarted: false,
+-        });
+-      }
+       const yolo = options.yolo === true;
+       const sessionType = options.sessionType ?? 'simple';
+       const worktreeName = options.worktreeName;
+@@ -1097,7 +1138,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+       }
+     };
+ 
+-    spawnSession = createSpawnDeduplicator(spawnSessionOnce);
++    spawnSession = createSpawnDeduplicator(spawnSessionOnce, reconnectRunnerSession);
+     for (const [pid, record] of persistedResumeProcesses) {
+       const verified = pidToRequestedSessionId.get(pid) === record.requestedSessionId;
+       existingSessionIdByChildPid.set(pid, record.requestedSessionId);
+@@ -1110,9 +1151,10 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+     }
+ 
+     // Stop a session by sessionId or PID fallback
+-    const stopSession = async (
++    const stopSessionOnce = async (
+       sessionId: string,
+-      opts?: { processStartMarker?: string }
++      opts: { processStartMarker?: string } | undefined,
++      guard: SessionStopGuard
+     ): Promise<'stopped' | 'already_gone' | 'still_alive' | 'unknown'> => {
+       logger.debug(`[RUNNER RUN] Attempting to stop session ${sessionId}`);
+ 
+@@ -1145,7 +1187,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+ 
+       const readLiveRuntimesForStop = async () => {
+         try {
+-          return (await readRuntimes({ strict: true })).filter(runtime =>
++          return (await guard.run(() => readRuntimes({ strict: true }))).filter(runtime =>
+             runtime.hub === configuration.apiUrl
+             && runtime.authHash === runtimeAuthHash()
+             && runtimeMayBeAlive(runtime)
+@@ -1164,8 +1206,8 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+           // refuse the orphan sweep. Non-Codex stops proceed with [] so archive
+           // is not machine-wide blocked by schema drift.
+           try {
+-            const { findRuntime } = await import('@/codex/shared/registry');
+-            if (await findRuntime(sessionId) || isCodexStopContext()) return null;
++            const { findRuntime } = await guard.run(() => import('@/codex/shared/registry'));
++            if (await guard.run(() => findRuntime(sessionId)) || isCodexStopContext()) return null;
+           } catch {
+             if (isCodexStopContext()) return null;
+           }
+@@ -1176,18 +1218,19 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+       const finishWithOrphanSweep = async (
+         base: 'stopped' | 'already_gone' | 'unknown'
+       ): Promise<'stopped' | 'already_gone' | 'still_alive' | 'unknown'> => {
+-        const liveRuntimes = await readLiveRuntimesForStop();
++        const liveRuntimes = await guard.run(readLiveRuntimesForStop);
+         if (liveRuntimes === null) return 'still_alive';
+         const protectedTrackedPids = trackedSharedWrapperPidsWithSiblings(
+           pidToTrackedSession.entries(),
+           sessionId
+         );
+-        const orphanStatus = await reapRunnerSpawnedOrphans(sessionId, {
++        const orphanStatus = await guard.run(() => reapRunnerSpawnedOrphans(sessionId, {
+           findTargets: (id) => findStopSessionOrphanTargets(
+             id,
+             (sid, pid) => shouldSkipOrphanPid(liveRuntimes, protectedTrackedPids, sid, pid)
+           ),
+-        });
++          killTree: pid => guard.run(() => killProcessTreeByPid(pid)),
++        }));
+         if (orphanStatus === 'still_alive') {
+           logger.debug(`[RUNNER RUN] Orphan argv sweep left live PIDs for session ${sessionId}`);
+           return 'still_alive';
+@@ -1199,12 +1242,12 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+         return base;
+       };
+ 
+-      const { findRuntime } = await import('@/codex/shared/registry');
+-      const sharedRuntime = await findRuntime(sessionId);
++      const { findRuntime } = await guard.run(() => import('@/codex/shared/registry'));
++      const sharedRuntime = await guard.run(() => findRuntime(sessionId));
+       if (sharedRuntime) {
+         try {
+-          const { runtimeControl } = await import('@/codex/shared/frontend');
+-          await runtimeControl(sharedRuntime, 'hapi/stopSession', sessionId);
++          const { runtimeControl } = await guard.run(() => import('@/codex/shared/frontend'));
++          await guard.run(() => runtimeControl(sharedRuntime, 'hapi/stopSession', sessionId));
+           const tracked = pidToTrackedSession.get(sharedRuntime.pid);
+           if (tracked) {
+             const detach = detachSharedRootFromWrapper(tracked, sessionId);
+@@ -1214,23 +1257,23 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+               logger.debug(
+                 `[RUNNER RUN] Shared runtime stopped root ${sessionId}; wrapper PID ${sharedRuntime.pid} kept`
+               );
+-              return await finishWithOrphanSweep('stopped');
++              return await guard.run(() => finishWithOrphanSweep('stopped'));
+             }
+           }
+           // Post-restart: TrackedSession may be gone; registry still lists siblings.
+-          const liveAfterStop = await readLiveRuntimesForStop();
++          const liveAfterStop = await guard.run(readLiveRuntimesForStop);
+           if (liveAfterStop === null) return 'still_alive';
+           if (wrapperHasActiveSiblingRoots(liveAfterStop, sessionId, sharedRuntime.pid)) {
+             logger.debug(
+               `[RUNNER RUN] Shared runtime stopped root ${sessionId}; registry siblings keep PID ${sharedRuntime.pid}`
+             );
+-            return await finishWithOrphanSweep('stopped');
++            return await guard.run(() => finishWithOrphanSweep('stopped'));
+           }
+-          return await finishWithOrphanSweep('stopped');
++          return await guard.run(() => finishWithOrphanSweep('stopped'));
+         } catch { return 'still_alive'; }
+       }
+       {
+-        const probeRuntimes = await readLiveRuntimesForStop();
++        const probeRuntimes = await guard.run(readLiveRuntimesForStop);
+         if (probeRuntimes === null) return 'still_alive';
+         if (probeRuntimes.some(runtime => runtime.sessions[sessionId]?.active)) return 'still_alive';
+       }
+@@ -1240,7 +1283,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+       // while older roots remain active only in the durable registry).
+       const liveRegistryRuntimes = async () => readLiveRuntimesForStop();
+       const registrySiblingsKeepPid = async (pid: number): Promise<boolean | 'unreadable'> => {
+-        const live = await liveRegistryRuntimes();
++        const live = await guard.run(liveRegistryRuntimes);
+         if (live === null) return 'unreadable';
+         return wrapperHasActiveSiblingRoots(live, sessionId, pid);
+       };
+@@ -1250,7 +1293,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+       if (sessionId.startsWith('PID-')) {
+         const pid = parseInt(sessionId.slice(4), 10);
+         if (Number.isFinite(pid) && pid > 0) {
+-          const liveForPid = await liveRegistryRuntimes();
++          const liveForPid = await guard.run(liveRegistryRuntimes);
+           if (liveForPid === null) return 'still_alive';
+           const decision = decideRawPidStop({
+             alive: isProcessAlive(pid),
+@@ -1272,11 +1315,11 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+             logger.debug(
+               `[RUNNER RUN] PID ${pid} still hosts active shared roots; not tree-killing`
+             );
+-            return await finishWithOrphanSweep('stopped');
++            return await guard.run(() => finishWithOrphanSweep('stopped'));
+           }
+-          if (!(await killProcessTreeByPid(pid))) return 'still_alive';
++          if (!(await guard.run(() => killProcessTreeByPid(pid)))) return 'still_alive';
+           rememberVerifiedExit(sessionId);
+-          return await finishWithOrphanSweep('stopped');
++          return await guard.run(() => finishWithOrphanSweep('stopped'));
+         }
+         return 'unknown';
+       }
+@@ -1286,13 +1329,13 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+       // registry binding is stop evidence (Codex KillSession already archived
+       // the root); absent evidence stays unknown across retries.
+       const finishKeepWrapperDetach = async (pid: number): Promise<'stopped' | 'already_gone' | 'still_alive' | 'unknown'> => {
+-        const live = await liveRegistryRuntimes();
++        const live = await guard.run(liveRegistryRuntimes);
+         if (live === null) return 'still_alive';
+         const binding = sessionRegistryBindingState(live, sessionId, pid);
+         if (binding === 'active') return 'still_alive';
+         // Base unknown so an argv orphan reap returning stopped is distinguishable
+         // from "no orphans" (which would otherwise echo a stopped base).
+-        const orphan = await finishWithOrphanSweep('unknown');
++        const orphan = await guard.run(() => finishWithOrphanSweep('unknown'));
+         if (orphan === 'still_alive') return 'still_alive';
+         if (orphan === 'stopped') return 'stopped';
+         const decision = decideKeepWrapperArchive(binding);
+@@ -1311,12 +1354,12 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+       for (const [pid, session] of pidToTrackedSession.entries()) {
+         if (!session.sharedSessions?.[sessionId]) continue;
+         if (detachSharedRootFromWrapper(session, sessionId).kind === 'keep_wrapper') {
+-          return await finishKeepWrapperDetach(pid);
++          return await guard.run(() => finishKeepWrapperDetach(pid));
+         }
+         // In-memory map had only this root (typical after restart adoption of a
+         // newly reported root). Registry may still list older active siblings.
+-        if (await registrySiblingsKeepPid(pid) !== false) {
+-          return await finishKeepWrapperDetach(pid);
++        if (await guard.run(() => registrySiblingsKeepPid(pid)) !== false) {
++          return await guard.run(() => finishKeepWrapperDetach(pid));
+         }
+         // Last shared entry removed — fall through so the wrapper can be stopped.
+         break;
+@@ -1330,15 +1373,15 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+           // Primary match, but live shared siblings still use this wrapper
+           // (KillSession may already have cleared this id from sharedSessions).
+           if (keepWrapperForSharedSiblings(session, sessionId)) {
+-            return await finishKeepWrapperDetach(pid);
++            return await guard.run(() => finishKeepWrapperDetach(pid));
+           }
+ 
+           // Post-restart: TrackedSession may only list the newly reported root
+           // while older roots remain active in the durable registry on this PID.
+           // Archiving the new root must not tree-kill those siblings.
+-          if (await registrySiblingsKeepPid(pid) !== false) {
++          if (await guard.run(() => registrySiblingsKeepPid(pid)) !== false) {
+             detachSharedRootFromWrapper(session, sessionId);
+-            return await finishKeepWrapperDetach(pid);
++            return await guard.run(() => finishKeepWrapperDetach(pid));
+           }
+ 
+           if (session.startedBy === 'runner') {
+@@ -1352,7 +1395,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+                 logger.debug(
+                   `[RUNNER RUN] Adopted PID ${pid} has no start marker; refusing tracked kill for ${sessionId}`
+                 );
+-                const orphan = await finishWithOrphanSweep('unknown');
++                const orphan = await guard.run(() => finishWithOrphanSweep('unknown'));
+                 if (orphan === 'still_alive') return 'still_alive';
+                 if (orphan === 'stopped') return 'stopped';
+                 return 'unknown';
+@@ -1371,9 +1414,10 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+               }
+             }
+             try {
+-              const treeStopped = session.childProcess
+-                ? await killProcessByChildProcess(session.childProcess)
+-                : await killProcessTreeByPid(pid);
++              const child = session.childProcess;
++              const treeStopped = await guard.run(() => child
++                ? killProcessByChildProcess(child)
++                : killProcessTreeByPid(pid));
+               if (!treeStopped) {
+                 logger.debug(`[RUNNER RUN] Process tree for session ${sessionId} is still alive after stop request`);
+                 return 'still_alive';
+@@ -1386,7 +1430,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+           } else {
+             // For externally started sessions, try to kill by PID
+             try {
+-              if (!(await killProcess(pid))) return 'still_alive';
++              if (!(await guard.run(() => killProcess(pid)))) return 'still_alive';
+               logger.debug(`[RUNNER RUN] Requested termination for external session PID ${pid}`);
+             } catch (error) {
+               logger.debug(`[RUNNER RUN] Failed to kill external session PID ${pid}:`, error);
+@@ -1402,7 +1446,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+           }
+           const deadline = Date.now() + 5_000;
+           while (isProcessAlive(pid) && Date.now() < deadline) {
+-            await new Promise(resolve => setTimeout(resolve, 50));
++            await guard.run(() => new Promise(resolve => setTimeout(resolve, 50)));
+           }
+           if (isProcessAlive(pid)) {
+             logger.debug(`[RUNNER RUN] Session ${sessionId} process ${pid} is still alive after stop request`);
+@@ -1415,8 +1459,9 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+           pidToRequestedSessionId.delete(pid);
+           pidToConfirmedSessionId.delete(pid);
+           if (persistedResumeProcesses.delete(pid)) persistResumeProcesses();
++          releaseRecoveredSpawnDedupe(pid, existingSessionIdByChildPid, spawnSession);
+           logger.debug(`[RUNNER RUN] Removed terminated session ${sessionId} from tracking`);
+-          return await finishWithOrphanSweep('stopped');
++          return await guard.run(() => finishWithOrphanSweep('stopped'));
+         }
+       }
+ 
+@@ -1449,14 +1494,14 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+             releaseRecoveredSpawnDedupe(pid, existingSessionIdByChildPid, spawnSession);
+             continue;
+           }
+-          const liveForPid = await liveRegistryRuntimes();
++          const liveForPid = await guard.run(liveRegistryRuntimes);
+           if (liveForPid === null) return 'still_alive';
+           if (wrapperHasActiveSiblingRoots(liveForPid, sessionId, pid)) {
+             // Keep this shared wrapper; siblings alone are not stop proof for
+             // this root — require an inactive registry binding (KillSession ack).
+             const binding = sessionRegistryBindingState(liveForPid, sessionId, pid);
+             if (binding === 'active') return 'still_alive';
+-            const orphan = await finishWithOrphanSweep('unknown');
++            const orphan = await guard.run(() => finishWithOrphanSweep('unknown'));
+             if (orphan === 'still_alive') return 'still_alive';
+             if (orphan === 'stopped') return 'stopped';
+             const decision = decideKeepWrapperArchive(binding);
+@@ -1465,7 +1510,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+             );
+             return decision;
+           }
+-          if (!(await killProcessTreeByPid(pid))) return 'still_alive';
++          if (!(await guard.run(() => killProcessTreeByPid(pid)))) return 'still_alive';
+           if (requestedSessionId) rememberVerifiedExit(requestedSessionId);
+           if (confirmedSessionId) rememberVerifiedExit(confirmedSessionId);
+           rememberVerifiedExit(`PID-${pid}`);
+@@ -1473,7 +1518,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+           pidToConfirmedSessionId.delete(pid);
+           if (persistedResumeProcesses.delete(pid)) persistResumeProcesses();
+           releaseRecoveredSpawnDedupe(pid, existingSessionIdByChildPid, spawnSession);
+-          return await finishWithOrphanSweep('stopped');
++          return await guard.run(() => finishWithOrphanSweep('stopped'));
+         }
+         if (requestedSessionId) rememberVerifiedExit(requestedSessionId);
+         if (confirmedSessionId) rememberVerifiedExit(confirmedSessionId);
+@@ -1482,7 +1527,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+         pidToConfirmedSessionId.delete(pid);
+         if (persistedResumeProcesses.delete(pid)) persistResumeProcesses();
+         releaseRecoveredSpawnDedupe(pid, existingSessionIdByChildPid, spawnSession);
+-        return await finishWithOrphanSweep('already_gone');
++        return await guard.run(() => finishWithOrphanSweep('already_gone'));
+       }
+ 
+       // Maps missed (or marker-mismatch cleared a stale row). Scan live argv for
+@@ -1490,18 +1535,19 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+       // excluding PIDs that still host active shared sibling roots (registry
+       // and/or in-memory tracked wrappers).
+       {
+-        const liveRuntimes = await readLiveRuntimesForStop();
++        const liveRuntimes = await guard.run(readLiveRuntimesForStop);
+         if (liveRuntimes === null) return 'still_alive';
+         const protectedTrackedPids = trackedSharedWrapperPidsWithSiblings(
+           pidToTrackedSession.entries(),
+           sessionId
+         );
+-        const orphanStatus = await reapRunnerSpawnedOrphans(sessionId, {
++        const orphanStatus = await guard.run(() => reapRunnerSpawnedOrphans(sessionId, {
+           findTargets: (id) => findStopSessionOrphanTargets(
+             id,
+             (sid, pid) => shouldSkipOrphanPid(liveRuntimes, protectedTrackedPids, sid, pid)
+           ),
+-        });
++          killTree: pid => guard.run(() => killProcessTreeByPid(pid)),
++        }));
+         if (orphanStatus === 'still_alive') {
+           logger.debug(`[RUNNER RUN] Orphan argv reap still_alive for session ${sessionId} (scan_failed or kill left live PIDs)`);
+           return 'still_alive';
+@@ -1539,6 +1585,74 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+       return 'unknown';
+     };
+ 
++    const stopSession = async (sessionId: string, opts?: { processStartMarker?: string }): ReturnType<typeof stopSessionOnce> => {
++      try {
++        return await stopGuards.during(sessionId, async guard => {
++          if (sessionId.startsWith('PID-')) return await stopSessionOnce(sessionId, opts, guard);
++          // Root exit is different from wrapper exit. Snapshot the ownership being
++          // stopped so late cleanup cannot erase a newly spawned same-row child.
++          const pids = new Set([
++            ...pidToTrackedSession.keys(), ...persistedResumeProcesses.keys(),
++            ...existingSessionIdByChildPid.keys(), ...pidToRequestedSessionId.keys(), ...pidToConfirmedSessionId.keys(),
++          ]);
++          const snapshots = [...pids].map(pid => ({
++            pid,
++            tracked: pidToTrackedSession.get(pid),
++            persisted: persistedResumeProcesses.get(pid),
++            requested: pidToRequestedSessionId.get(pid),
++            confirmed: pidToConfirmedSessionId.get(pid),
++            dedupeId: existingSessionIdByChildPid.get(pid),
++          })).filter(snapshot => [
++            snapshot.requested, snapshot.confirmed, snapshot.dedupeId,
++            snapshot.persisted?.requestedSessionId, snapshot.persisted?.confirmedSessionId,
++            snapshot.tracked?.happySessionId, snapshot.tracked?.requestedHappySessionId,
++          ].includes(sessionId) || snapshot.tracked?.sharedSessions?.[sessionId]);
++          const ids = new Set([sessionId]);
++          for (const snapshot of snapshots) {
++            if (snapshot.confirmed === sessionId || snapshot.persisted?.confirmedSessionId === sessionId) {
++              for (const id of [snapshot.requested, snapshot.dedupeId, snapshot.persisted?.requestedSessionId]) {
++                if (id) ids.add(id);
++              }
++            }
++          }
++          const releases = [...ids].map(id => spawnSession.captureChildExit(id));
++          const status = await guard.run(() => stopSessionOnce(sessionId, opts, guard));
++          if (status !== 'stopped' && status !== 'already_gone') return status;
++          let changed = false;
++          for (const snapshot of snapshots) {
++            const { pid, tracked, persisted } = snapshot;
++            // Replacement tracking for a reused PID belongs to the new generation.
++            if (pidToTrackedSession.get(pid) !== tracked || persistedResumeProcesses.get(pid) !== persisted) continue;
++            for (const [map, value] of [
++              [existingSessionIdByChildPid, snapshot.dedupeId],
++              [pidToRequestedSessionId, snapshot.requested],
++              [pidToConfirmedSessionId, snapshot.confirmed],
++            ] as const) {
++              if (value && ids.has(value) && map.get(pid) === value) map.delete(pid);
++            }
++            if (persisted && (ids.has(persisted.requestedSessionId) || (persisted.confirmedSessionId && ids.has(persisted.confirmedSessionId)))) {
++              persistedResumeProcesses.delete(pid);
++              changed = true;
++            }
++            if (tracked) {
++              if (tracked.happySessionId && ids.has(tracked.happySessionId)) {
++                delete tracked.happySessionId;
++                delete tracked.happySessionMetadataFromLocalWebhook;
++              }
++              if (tracked.requestedHappySessionId && ids.has(tracked.requestedHappySessionId)) delete tracked.requestedHappySessionId;
++              if (tracked.sharedSessions) delete tracked.sharedSessions[sessionId];
++            }
++          }
++          for (const release of releases) release();
++          if (changed) persistResumeProcesses();
++          return status;
++        });
++      } catch (error) {
++        if (error instanceof SessionReboundDuringStop) return 'still_alive';
++        throw error;
++      }
++    };
++
+     // Handle child process exit
+     const onChildExited = (pid: number) => {
+       const session = pidToTrackedSession.get(pid);
+diff --git a/cli/src/runner/sessionStopGuard.test.ts b/cli/src/runner/sessionStopGuard.test.ts
+new file mode 100644
+index 000000000..7308d7ff3
+--- /dev/null
++++ b/cli/src/runner/sessionStopGuard.test.ts
+@@ -0,0 +1,56 @@
++import { describe, expect, it, vi } from 'vitest';
++import { SessionReboundDuringStop, SessionStopGuards } from './sessionStopGuard';
++
++function deferred() {
++    let resolve!: () => void;
++    const promise = new Promise<void>(done => { resolve = done; });
++    return { promise, resolve };
++}
++
++describe('session stop registration guard', () => {
++    it('prevents detach and cache cleanup when the same root registers before stop ACK', async () => {
++        const guards = new SessionStopGuards();
++        const ack = deferred();
++        const detach = vi.fn();
++        const release = vi.fn();
++        const stopped = guards.during('root', async guard => {
++            await guard.run(() => ack.promise);
++            detach();
++            release();
++        });
++        guards.registered('root');
++        ack.resolve();
++        await expect(stopped).rejects.toBeInstanceOf(SessionReboundDuringStop);
++        expect(detach).not.toHaveBeenCalled();
++        expect(release).not.toHaveBeenCalled();
++    });
++
++    it('does not start another orphan kill after re-registration during a sweep', async () => {
++        const guards = new SessionStopGuards();
++        const firstKill = deferred();
++        const secondKill = vi.fn(async () => true);
++        const stopped = guards.during('root', async guard => {
++            try { await guard.run(() => firstKill.promise); } catch { /* sweep catches failed kills */ }
++            await guard.run(secondKill);
++        });
++        guards.registered('root');
++        firstKill.resolve();
++        await expect(stopped).rejects.toBeInstanceOf(SessionReboundDuringStop);
++        expect(secondKill).not.toHaveBeenCalled();
++    });
++
++    it('invalidates concurrent stops only for the registered root, without poisoning later stops', async () => {
++        const guards = new SessionStopGuards();
++        const ack = deferred();
++        const stop = (id: string) => guards.during(id, guard => guard.run(() => ack.promise));
++        const first = stop('root');
++        const second = stop('root');
++        const sibling = stop('sibling');
++        guards.registered('root');
++        ack.resolve();
++        await expect(first).rejects.toBeInstanceOf(SessionReboundDuringStop);
++        await expect(second).rejects.toBeInstanceOf(SessionReboundDuringStop);
++        await expect(sibling).resolves.toBeUndefined();
++        await expect(guards.during('root', guard => guard.run(async () => 'stopped'))).resolves.toBe('stopped');
++    });
++});
+diff --git a/cli/src/runner/sessionStopGuard.ts b/cli/src/runner/sessionStopGuard.ts
+new file mode 100644
+index 000000000..f6fe42a43
+--- /dev/null
++++ b/cli/src/runner/sessionStopGuard.ts
+@@ -0,0 +1,42 @@
++/** Stops may outlive a native root's re-registration in the same wrapper PID. */
++export class SessionReboundDuringStop extends Error {
++    constructor() { super('Session registered again during stop'); }
++}
++
++export class SessionStopGuard {
++    private invalidated = false;
++
++    invalidate(): void { this.invalidated = true; }
++
++    check(): void {
++        if (this.invalidated) throw new SessionReboundDuringStop();
++    }
++
++    async run<T>(work: () => Promise<T>): Promise<T> {
++        this.check();
++        const result = await work();
++        this.check();
++        return result;
++    }
++}
++
++/** Only holds active stop requests, not a permanent map of historical roots. */
++export class SessionStopGuards {
++    private readonly active = new Map<string, Set<SessionStopGuard>>();
++
++    registered(sessionId: string): void {
++        for (const guard of this.active.get(sessionId) ?? []) guard.invalidate();
++    }
++
++    async during<T>(sessionId: string, work: (guard: SessionStopGuard) => Promise<T>): Promise<T> {
++        const guard = new SessionStopGuard();
++        const guards = this.active.get(sessionId) ?? new Set<SessionStopGuard>();
++        guards.add(guard);
++        this.active.set(sessionId, guards);
++        try { return await work(guard); }
++        finally {
++            guards.delete(guard);
++            if (guards.size === 0) this.active.delete(sessionId);
++        }
++    }
++}
+diff --git a/cli/src/test/auditTestProcesses.ts b/cli/src/test/auditTestProcesses.ts
+index a0aaa4976..d16342d75 100644
+--- a/cli/src/test/auditTestProcesses.ts
++++ b/cli/src/test/auditTestProcesses.ts
+@@ -42,7 +42,9 @@ export function findTestOwnedProcesses(marker: string): TestOwnedProcess[] {
+         // personality" on some Linux builds. `e` shows the environment after
+         // the command; `ww` removes width truncation so the env dump is not
+         // cut off.
+-        output = execFileSync('ps', ['eww', '-eo', 'pid=,ppid=,rss=,command='], {
++        // macOS BSD ps interprets -e as environment (and produces no rows
++        // with this combination); its all-process selection is -ax.
++        output = execFileSync('ps', ['eww', process.platform === 'darwin' ? '-axo' : '-eo', 'pid=,ppid=,rss=,command='], {
+             encoding: 'utf8',
+             maxBuffer: 64 * 1024 * 1024,
+             stdio: ['ignore', 'pipe', 'pipe'],
