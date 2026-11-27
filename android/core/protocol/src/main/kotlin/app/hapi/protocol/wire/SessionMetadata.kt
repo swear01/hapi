@@ -53,6 +53,7 @@ data class SessionMetadata(
      */
     val translateInput: Boolean? = null,
     val lastModelError: ModelError? = null,
+    val cursorAcpPermissionModes: List<String>? = null,
 )
 
 /** `metadata.summary` on the detail session (`{text, updatedAt}`). */

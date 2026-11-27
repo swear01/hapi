@@ -213,6 +213,7 @@ export function HappyComposer(props: {
     contextModel?: string | null
     controlledByUser?: boolean
     agentFlavor?: string | null
+    cursorAcpPermissionModes?: string[]
     /** Session machine, for the plan-quota readout in the status bar. */
     machineId?: string | null
     availableModelOptions?: Array<{ value: string | null; label: string; group?: string }>
@@ -337,6 +338,7 @@ export function HappyComposer(props: {
         contextModel,
         controlledByUser = false,
         agentFlavor,
+        cursorAcpPermissionModes,
         machineId,
         availableModelOptions,
         piModels,
@@ -945,8 +947,8 @@ export function HappyComposer(props: {
     }, [switchDisabled, onSwitchToRemote, haptic])
 
     const permissionModeOptions = useMemo(
-        () => getPermissionModeOptionsForFlavor(agentFlavor),
-        [agentFlavor]
+        () => getPermissionModeOptionsForFlavor(agentFlavor, cursorAcpPermissionModes),
+        [agentFlavor, cursorAcpPermissionModes]
     )
     const collaborationModeOptions = useMemo(
         () => agentFlavor === 'codex' ? getCodexCollaborationModeOptions() : [],
