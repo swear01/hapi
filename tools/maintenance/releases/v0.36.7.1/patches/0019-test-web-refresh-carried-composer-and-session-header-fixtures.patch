@@ -1,0 +1,42 @@
+From 604574e69f5f5bb582eafb24c507b6b4dd482333 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Fri, 27 Nov 2026 18:08:59 +0800
+Subject: [PATCH] test(web): refresh carried composer and session header
+ fixtures
+
+---
+ .../AssistantChat/HappyComposer.expandEnter.test.tsx           | 3 ++-
+ web/src/components/SessionHeader.test.tsx                      | 3 ++-
+ 2 files changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/web/src/components/AssistantChat/HappyComposer.expandEnter.test.tsx b/web/src/components/AssistantChat/HappyComposer.expandEnter.test.tsx
+index 83bed4da8e9d0eb51131d91074e509aedee60650..6491ee7567acc6e4eaab7d5c63803e654156ebf2 100644
+--- a/web/src/components/AssistantChat/HappyComposer.expandEnter.test.tsx
++++ b/web/src/components/AssistantChat/HappyComposer.expandEnter.test.tsx
+@@ -178,7 +178,8 @@ vi.mock('@/components/ChatInput/Autocomplete', () => ({ Autocomplete: () => null
+ vi.mock('@/components/AssistantChat/StatusBar', () => ({ StatusBar: () => null }))
+ vi.mock('./PiModelPanel', () => ({ PiModelPanel: () => null }))
+ vi.mock('./PiThinkingLevelPanel', () => ({ PiThinkingLevelPanel: () => null }))
+-vi.mock('@/components/AssistantChat/ComposerButtons', () => ({
++vi.mock('@/components/AssistantChat/ComposerButtons', async (importOriginal) => ({
++    ...(await importOriginal<typeof import('@/components/AssistantChat/ComposerButtons')>()),
+     ComposerButtons: (props: {
+         onSend: () => void
+         expanded: boolean
+diff --git a/web/src/components/SessionHeader.test.tsx b/web/src/components/SessionHeader.test.tsx
+index 81669168ac3e3608692b33c11b5dde0994863311..a340eaa622da283bd53ca7cc35f9ac124ae0a14c 100644
+--- a/web/src/components/SessionHeader.test.tsx
++++ b/web/src/components/SessionHeader.test.tsx
+@@ -16,7 +16,8 @@ const mocks = vi.hoisted(() => ({
+     }))
+ }))
+ 
+-vi.mock('@/hooks/useTelegram', () => ({
++vi.mock('@/hooks/useTelegram', async (importOriginal) => ({
++    ...(await importOriginal<typeof import('@/hooks/useTelegram')>()),
+     isTelegramApp: () => mocks.telegramApp
+ }))
+ 
+-- 
+2.54.0 (Apple Git-157)
+

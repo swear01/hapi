@@ -1,0 +1,95 @@
+From fd6ab0a0d8a0081a9026c64bedadd0a520dbf9f2 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Wed, 18 Nov 2026 16:37:06 +0800
+Subject: [PATCH] Keep skill discovery roots and test HOME isolation
+
+Both are independent of the removed installer: skill roots drive skill
+listing for cursor/opencode/kimi/agy/pi (needed for Skillshare-synced skills),
+and the HOME redirect protects the real home from any test.
+
+(cherry picked from commit 73e3fa006fd2043f70003fdcbf1899d5fd8d19e3)
+---
+ cli/src/agent/backends/acp/agentCliGuard.test.ts |  4 ++--
+ cli/src/modules/common/skills.ts                 | 14 ++++++++++++++
+ cli/src/test/setup.ts                            |  4 ++++
+ 3 files changed, 20 insertions(+), 2 deletions(-)
+
+diff --git a/cli/src/agent/backends/acp/agentCliGuard.test.ts b/cli/src/agent/backends/acp/agentCliGuard.test.ts
+index f885d5c566c60f5bd28a24ee7a9108c1713e0417..a65e4256367c51062b2126276a9f0508c92fa6ce 100644
+--- a/cli/src/agent/backends/acp/agentCliGuard.test.ts
++++ b/cli/src/agent/backends/acp/agentCliGuard.test.ts
+@@ -1,5 +1,5 @@
+ import { existsSync, mkdirSync, readFileSync, readdirSync, utimesSync, writeFileSync } from 'node:fs';
+-import { join } from 'node:path';
++import { join, sep } from 'node:path';
+ import { homedir, tmpdir } from 'node:os';
+ import { afterEach, describe, expect, test } from 'vitest';
+ import {
+@@ -190,7 +190,7 @@ describe('agentCliGuard', () => {
+         try {
+             const expected = join(homedir(), '.hapi', 'locks', 'agent-acp-active');
+             expect(getAgentAcpLockDir()).toBe(expected);
+-            expect(getAgentAcpLockDir()).not.toContain(join(tmpdir(), 'hapi'));
++            expect(getAgentAcpLockDir()).not.toContain(join(tmpdir(), 'hapi') + sep);
+         } finally {
+             // Restore isolated home before afterEach reset (belt + suspenders).
+             process.env.HAPI_HOME = testHome;
+diff --git a/cli/src/modules/common/skills.ts b/cli/src/modules/common/skills.ts
+index 5db938b9159d70f0d66c5139be60a7793ef98293..a031ac41c9d03e36a48597a04f0e81d90a3cf98d 100644
+--- a/cli/src/modules/common/skills.ts
++++ b/cli/src/modules/common/skills.ts
+@@ -58,8 +58,12 @@ function getAgentConfigDir(flavor?: string): string {
+         case 'dsh':
+             // DSH resolves its harness home from $DSH_HOME, then ~/.dsh.
+             return process.env.DSH_HOME || join(getHomeDirectory(), '.dsh');
++        case 'opencode':
++            return process.env.OPENCODE_CONFIG_DIR || join(getHomeDirectory(), '.config', 'opencode');
+         case 'agy':
+             return join(getHomeDirectory(), '.gemini', 'config');
++        case 'pi':
++            return join(getHomeDirectory(), '.pi', 'agent');
+         default:
+             return join(getHomeDirectory(), `.${normalizedFlavor}`);
+     }
+@@ -83,6 +87,10 @@ function getUserSkillsRoots(flavor?: string): string[] {
+             break;
+         case 'dsh':
+             // Mirrors DSH's own skill-filesystem provider: $DSH_HOME/skills.
++        case 'cursor':
++        case 'opencode':
++        case 'kimi':
++        case 'pi':
+             roots.push(join(getAgentConfigDir(flavor), 'skills'));
+             break;
+         case 'agy':
+@@ -122,6 +130,12 @@ function getProjectSkillsRoots(directory: string, flavor?: string): string[] {
+             roots.push(join(directory, '_agents', 'skills'));
+             roots.push(join(directory, '_agent', 'skills'));
+             break;
++        case 'cursor':
++        case 'opencode':
++        case 'kimi':
++        case 'pi':
++            roots.push(join(directory, `.${normalizeFlavor(flavor)}`, 'skills'));
++            break;
+     }
+     return roots;
+ }
+diff --git a/cli/src/test/setup.ts b/cli/src/test/setup.ts
+index d1387ac648c8a2cfc019bc9780b3ce2f6c2bf2aa..a538f59a2767ff07f5374c29c220b194235a454b 100644
+--- a/cli/src/test/setup.ts
++++ b/cli/src/test/setup.ts
+@@ -24,6 +24,10 @@ try {
+ process.env.HAPI_API_URL = `http://127.0.0.1:${config.port}`
+ process.env.CLI_API_TOKEN = config.token
+ process.env.HAPI_HOME = config.tmpHome
++// Keep agent config writes out of the real home.
++process.env.HOME = join(config.tmpHome, 'home')
++delete process.env.CLAUDE_CONFIG_DIR
++delete process.env.CODEX_HOME
+ process.env.HAPI_BUN_EXEC = config.bunExec
+ // The runner agent-availability preflight must see an installable Claude CLI
+ // even on machines (CI) without one; globalSetup provides a stub binary.
+-- 
+2.54.0 (Apple Git-157)
+
