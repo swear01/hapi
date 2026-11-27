@@ -4,6 +4,7 @@ import app.hapi.protocol.wire.ModelErrorActionResponse
 import app.hapi.protocol.wire.ApprovePermissionRequest
 import app.hapi.protocol.wire.CancelMessageResponse
 import app.hapi.protocol.wire.RetryIndeterminateMessageResponse
+import app.hapi.protocol.wire.CursorModelsResponse
 import app.hapi.protocol.wire.CodexModelsResponse
 import app.hapi.protocol.wire.DeleteUploadResponse
 import app.hapi.protocol.wire.FeaturesResponse
@@ -105,6 +106,8 @@ interface ChatSessionApi : MessagesApi, AttachmentUploadApi {
     suspend fun setModelReasoningEffort(sessionId: String, modelReasoningEffort: String?)
 
     /** `GET /api/sessions/:id/codex-models` (RPC-wrapped: check `success`). */
+    suspend fun getSessionCursorModels(sessionId: String): CursorModelsResponse
+
     suspend fun getSessionCodexModels(sessionId: String): CodexModelsResponse
 
     /**
