@@ -12,6 +12,7 @@ vi.mock('@/lib/use-translation', () => ({
 }))
 
 import { AskUserQuestionFooter } from './AskUserQuestionFooter'
+import { AskUserQuestionView } from './views/AskUserQuestionView'
 
 function makeTool(id: string, allowFreeText?: boolean): ChatToolCall {
     return {
@@ -171,8 +172,21 @@ describe('AskUserQuestionFooter draft persistence (hapi#1734)', () => {
         expect(document.activeElement).not.toBe(field)
     })
 
+    it('marks the chosen Cursor option by ID when a completed question is reopened', () => {
+        const tool: ChatToolCall = { ...makeTool('cursor-q'), name: 'CursorAskQuestion', input: {
+            questions: [{ id: 'branch', prompt: 'Which branch?', options: [
+                { id: 'dev', label: 'Development' }, { id: 'main', label: 'Main branch' }
+            ] }]
+        }, permission: { id: 'p', status: 'approved', answers: { branch: ['dev'] } } }
+        render(<AskUserQuestionView block={{ kind: 'tool-call', id: 'q', localId: null, createdAt: 1, children: [], tool }} metadata={null} />)
+        const selected = document.querySelector('div[class*="border-[var(--app-md-quote-border)]"][class*="p-[2px]"]')
+        expect(selected?.textContent).toContain('Development')
+        expect(selected?.textContent).not.toContain('Main branch')
+        expect(screen.queryByText('dev')).toBeNull()
+    })
+
     it('submits only an advertised option ID from a Cursor question', async () => {
-        const tool = { ...makeTool('cursor-q'), name: 'CursorAskQuestion', input: {
+        const tool: ChatToolCall = { ...makeTool('cursor-q'), name: 'CursorAskQuestion', input: {
             questions: [{ id: 'branch', prompt: 'Which branch?', options: [{ id: 'dev', label: 'Development' }] }]
         } }
         const { approvePermission } = renderFooter('session-A', tool)
