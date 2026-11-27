@@ -171,7 +171,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     private promptInFlight = false;
     private history: CursorConversationHistory | null = null;
     private processingBatch = false;
-    private historyGate: PromiseWithResolvers<void> | null = null;
+    private historyGate: ReturnType<typeof Promise.withResolvers<void>> | null = null;
     private preparedRewind: { id: string; localId: string; backend: AcpSdkBackend; mode: PermissionMode } | null = null;
     /**
      * Set in handleAbort before session/cancel. Cursor often rejects the
@@ -1666,7 +1666,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 const model = this.currentBackendModel;
                 if (model && !isCursorAutoModelId(model)) {
                     const result = await applyCursorAcpModel(candidate, id, model);
-                    if (!result.applied || wireIdForCursorSessionState(result.requestedWireId ?? model, result.resolvedWireId) !== model) {
+                    if (!result.applied || !result.resolvedWireId || wireIdForCursorSessionState(result.requestedWireId ?? model, result.resolvedWireId) !== model) {
                         throw new Error('Cursor could not restore the confirmed model at the rewind point');
                     }
                 }
